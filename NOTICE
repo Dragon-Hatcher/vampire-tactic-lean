@@ -1,0 +1,29 @@
+This package contains code ported from lean-smt, used under the Apache License 2.0.
+
+    lean-smt — https://github.com/ufmg-smite/lean-smt
+    Copyright (c) 2021-2026 by the authors listed in that project's AUTHORS file
+    and their institutional affiliations.
+    Ported from revision a934af210f30145ce0cbc8a38acff3f40c406d43.
+
+The goal-translation pipeline follows lean-smt's design closely, and these files are
+direct ports, each carrying a header saying what was changed:
+
+    Vampire/Attribute.lean               <- Smt/Attribute.lean
+    Vampire/Data/Graph.lean              <- Smt/Data/Graph.lean
+    Vampire/Recognizers.lean             <- Smt/Recognizers.lean
+    Vampire/Translate.lean               <- Smt/Translate.lean
+    Vampire/Translate/Term.lean          <- Smt/Translate/Term.lean
+    Vampire/Translate/Commands.lean      <- Smt/Translate/Commands.lean
+    Vampire/Translate/Query.lean         <- Smt/Translate/Query.lean
+    Vampire/Translate/Prop.lean          <- Smt/Translate/Prop.lean
+    Vampire/Translate/Bool.lean          <- Smt/Translate/Bool.lean
+    Vampire/Preprocess/Basic.lean        <- Smt/Preprocess/Basic.lean
+    Vampire/Preprocess/Intros.lean       <- Smt/Preprocess/Intros.lean
+    Vampire/Preprocess/NegateGoal.lean   <- Smt/Preprocess/NegateGoal.lean
+    Vampire/Preprocess/PushHintsToCtx.lean <- Smt/Preprocess/PushHintsToCtx.lean
+
+    Vampire/Tactic.lean                  follows Smt/Tactic/Smt.lean
+
+Vampire/Translate/Build.lean has no counterpart: lean-smt renders its terms as SMT-LIB
+text for a solver process, whereas this compiles them into an embedded Vampire's own
+data structures.

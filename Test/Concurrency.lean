@@ -14,22 +14,22 @@ involved and what the high-water mark of concurrent entries was.
 
 open Vampire.Ffi
 
-theorem c00 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c01 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c02 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c03 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c04 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c05 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c06 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c07 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c08 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c09 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c10 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c11 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c12 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c13 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c14 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
-theorem c15 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire
+theorem c00 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c01 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c02 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c03 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c04 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c05 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c06 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c07 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c08 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c09 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c10 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c11 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c12 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c13 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c14 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
+theorem c15 (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by vampire_replay
 
 #eval show IO Unit from do
   let threads ← threadCount

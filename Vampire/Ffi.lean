@@ -22,6 +22,8 @@ inductive Status where
   | noEnv
   /-- A C++ exception escaped into the shim. -/
   | exception
+  /-- The instruction stream handed to the problem builder was malformed. -/
+  | malformed
   /-- The C++ side returned a code this side does not know. -/
   | unknown (code : UInt32)
   deriving Repr, DecidableEq, Inhabited
@@ -38,6 +40,7 @@ instance : ToString Status where
     | .ok => "ok"
     | .noEnv => "vampire environment not constructed"
     | .exception => "C++ exception crossed the FFI boundary"
+    | .malformed => "the problem builder was given a malformed instruction stream"
     | .unknown c => s!"unknown status {c}"
 
 @[extern "lean_vampire_init"]
@@ -102,5 +105,60 @@ def reset : BaseIO Status := do
 
 /-- Self-test: add a fresh function symbol, returning the new symbol count. -/
 def selftestDirty : BaseIO UInt32 := selftestDirtyRaw
+
+/-- The problem builder failed to walk the instruction stream: a bug in
+`Vampire/Translate/Build.lean` rather than something a goal can provoke. -/
+def Status.ofBuildCode : UInt32 → Status
+  | 0 => .ok
+  | 2 => .exception
+  | 3 => .malformed
+  | c => .unknown c
+
+@[extern "lean_vampire_build"]
+private opaque buildRaw : (@& Array String) → (@& Array UInt32) → BaseIO UInt32
+
+@[extern "lean_vampire_build_error"]
+private opaque buildErrorRaw : BaseIO String
+
+@[extern "lean_vampire_problem_size"]
+private opaque problemSizeRaw : BaseIO UInt32
+
+@[extern "lean_vampire_problem_unit"]
+private opaque problemUnitRaw : UInt32 → BaseIO String
+
+@[extern "lean_vampire_solve"]
+private opaque solveRaw : UInt32 → BaseIO UInt32
+
+/--
+Build a problem in Vampire from a compiled instruction stream.
+
+The whole problem crosses in one call. The entry lock makes a call atomic but not a
+sequence of them, and the signature being built into is process-global, so a build
+spread over many calls could be interleaved by another elaboration thread.
+
+This resets Vampire's global state first, so it discards any problem already there.
+-/
+def build (names : Array String) (code : Array UInt32) : BaseIO Status := do
+  return Status.ofBuildCode (← buildRaw names code)
+
+/-- The message from the last failed `build`. -/
+def buildError : BaseIO String := buildErrorRaw
+
+/-- How many units the built problem has. -/
+def problemSize : BaseIO UInt32 := problemSizeRaw
+
+/-- Vampire's own rendering of unit `i` of the built problem.
+
+Text, but going the other way: this is what Vampire says it received, which is evidence
+about the transfer rather than the medium of it. -/
+def problemUnit (i : UInt32) : BaseIO String := problemUnitRaw i
+
+/-- Preprocess and saturate the built problem. `deciseconds` bounds the search with a
+soft time limit, which throws out of the loop rather than killing the process. -/
+def solve (deciseconds : UInt32 := 100) : BaseIO (Option Bool) := do
+  match ← solveRaw deciseconds with
+  | 0 => return some Bool.false
+  | 1 => return some Bool.true
+  | _ => return none
 
 end Vampire.Ffi

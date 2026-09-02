@@ -23,23 +23,42 @@ Lean 4.33.0 everywhere. `lake build` runs the tests as `#eval`s and fails on reg
 
 ## What works
 
+**Goal translation.** `vampire?` preprocesses a goal, translates it, builds it inside
+Vampire and runs the prover:
+
+    example (α : Type) (f : α → α) (P : α → Prop) (a : α)
+        (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
+      vampire?
+    -- 1. 'P'(a) [input(axiom)]
+    -- 2. ! [X0 : 'α'] : ('P'(X0) => 'P'(f(X0))) [input(axiom)]
+    -- 3. ~'P'(f(f(a))) [input(axiom)]
+    -- refuted
+
+Monomorphic FOL with equality; definitions become declarations plus defining equations.
+The pipeline is a port of lean-smt's — registry, dependency graph, preprocessing steps —
+with `Translate/Build.lean` replacing its SMT-LIB printer by compilation into Vampire's
+own structures. Attribution per file and in `NOTICE`.
+
+**Replay,** on one shape:
+
     theorem resolution_two_step (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by
-      vampire
+      vampire_replay
     -- 'resolution_two_step' does not depend on any axioms
 
-End to end, with no text format anywhere: the problem is built with
-`Signature`/`Literal`/`Clause`, saturation runs in-process, the refutation crosses the
-FFI as unit numbers / rule ids / premise lists / `(atom, polarity)` pairs, and
-`Vampire/Reconstruct.lean` rebuilds it as `Or.elim` + `absurd`.
+The problem there is built with `Signature`/`Literal`/`Clause`, saturation runs
+in-process, and the refutation crosses the FFI as unit numbers / rule ids / premise
+lists / `(atom, polarity)` pairs for `Vampire/Reconstruct.lean` to rebuild as `Or.elim`
++ `absurd`.
 
 ## What does not
 
-- **The problem is hard-coded** to `(p ∨ q), ¬p, ¬q ⊢ ⊥`. The tactic pattern-matches
-  the goal for that shape and refuses anything else. **Goal translation is the next
-  step**, and it decides the term encoding: `(atom, polarity)` does not survive contact
-  with first-order terms.
-- Reconstruction handles **binary propositional resolution only**; every other rule or
-  arity throws rather than guessing.
+- **The two halves are not joined.** `vampire` translates and runs, then *admits* a
+  refuted goal with a warning (`sorryAx`). Joining them needs the refutation to come
+  back as first-order terms rather than `(atom, polarity)` pairs, and reconstruction to
+  handle more than binary propositional resolution.
+- **Polymorphism.** Vampire's logic is monomorphic; lean-smt's monomorphisation pass is
+  not ported, so a polymorphic hypothesis is skipped (or, if named as a hint, reported).
+- No arithmetic or other theories, no `ite`, no `let`, no datatypes.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
 
 ## Things that will bite
@@ -59,7 +78,10 @@ Recorded because each cost real time to find.
    with `find()`.
 5. **Function-local statics that cache Vampire objects** dangle after a reset. Fixed for
    the built-in sorts; six more are listed in the audit, unhandled.
-6. **Vampire generation is nondeterministic** under a wall-clock limit, so any
+6. **A `Unit*` does not survive preprocessing.** The problem's unit list is replaced by
+   clausification, so anything the FFI wants to report about the input must be captured
+   when it is built, not read back afterwards.
+7. **Vampire generation is nondeterministic** under a wall-clock limit, so any
    before/after comparison must transform one fixed generated file, or sample enough to
    average out. This produced a phantom "2.6× regression" earlier in the work.
 

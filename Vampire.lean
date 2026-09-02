@@ -1,4 +1,10 @@
 import Vampire.Ffi
+import Vampire.Preprocess
 import Vampire.Proof
 import Vampire.Reconstruct
 import Vampire.Tactic
+import Vampire.Translate
+import Vampire.Translate.Bool
+import Vampire.Translate.Build
+import Vampire.Translate.Prop
+import Vampire.Translate.Query

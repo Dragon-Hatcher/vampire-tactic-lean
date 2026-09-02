@@ -1,42 +1,168 @@
+/-
+The driver follows lean-smt's (`Smt/Tactic/Smt.lean`), Copyright (c) 2021-2022 by the
+authors listed in that project's AUTHORS file. Released under Apache 2.0; see `NOTICE`.
+-/
 import VampLean
 import Vampire.Ffi
+import Vampire.Preprocess
 import Vampire.Proof
 import Vampire.Reconstruct
+import Vampire.Translate.Bool
+import Vampire.Translate.Build
+import Vampire.Translate.Prop
+import Vampire.Translate.Query
 
 /-!
 # The `vampire` tactic
 
-Frontend for discharging a Lean goal with the Vampire theorem prover.
+    goal ─▶ preprocess ─▶ translate ─▶ compile ─▶ Vampire ─▶ refutation ─▶ Lean proof
+            §Preprocess    §Translate   §Build     FFI                    §Reconstruct
 
-The pipeline, once complete:
+Preprocessing puts the goal in refutation form: hints and binders become local
+hypotheses and the target becomes `False`, so what Vampire is asked is whether the
+hypotheses are jointly unsatisfiable. Translation maps each hypothesis onto a
+first-order formula, collecting the symbols it mentions; the query builder orders those
+into declarations; and the compiler constructs the whole thing inside Vampire.
 
-1. collect the goal and the hypotheses it may use;
-2. translate them into Vampire's term representation — directly, over an FFI boundary,
-   rather than by printing and reparsing a text format;
-3. run saturation and, on success, get back the proof;
-4. replay that proof as a Lean term, checked by the kernel.
+**The last arrow is not implemented for arbitrary goals.** `vampire` translates, builds
+and runs, but replaying the refutation only works for the propositional resolution
+demonstrated by `vampire_replay`. Until that catches up, `vampire` admits a refuted goal
+with a warning, so the proof depends on `sorryAx` and says so.
 
-Steps 3 and 4 are done. Step 1–2 is not: the problem Vampire is given is hard-coded to
-
-    (p ∨ q),  ¬p,  ¬q  ⊢  ⊥
-
-so the tactic only closes goals of that exact shape. It closes them with a real proof
-term — no `sorry`, no axioms beyond Lean's own — which is what makes the replay path
-testable ahead of the translation.
+Use `vampire?` to see the problem Vampire was given; it leaves the goal alone.
 -/
 
 namespace Vampire
 
 open Lean Elab Tactic Meta
 
-/--
-Discharge the goal with Vampire.
+/-- What the tactic did. -/
+inductive Outcome where
+  /-- Vampire found a refutation. -/
+  | refuted
+  /-- Vampire saturated or ran out of time without one. -/
+  | notRefuted
+  deriving DecidableEq
 
-**The problem sent to Vampire is currently hard-coded**, so this only works on a goal
-of the form `(p ∨ q) → ¬p → ¬q → False` (after `intro`). It is a real proof, not an
-admission: the refutation is replayed as a Lean term.
+/-- Names for the free variables in scope that survive a round trip through the
+pretty-printer, so a symbol is spelled the same way everywhere it occurs. -/
+def genUniqueFVarNames : MetaM (Std.HashMap FVarId String × Std.HashMap String Expr) := do
+  let lCtx ← getLCtx
+  let st : NameSanitizerState := { options := {} }
+  let (lCtx, _) := (lCtx.sanitizeNames st).run
+  return lCtx.getFVarIds.foldl (init := ({}, {})) fun (m₁, m₂) fvarId =>
+    let nm := (lCtx.getRoundtrippingUserName? fvarId).get!.toString
+    (m₁.insert fvarId nm, m₂.insert nm (.fvar fvarId))
+
+/--
+Keep the hypotheses this translation understands.
+
+Used only on hypotheses collected automatically from the local context: a goal about
+lists, or carrying a typeclass instance, has no first-order reading, and dropping those
+is what makes it reasonable to send the context in the first place. A hypothesis the
+user named explicitly is never dropped — failing to translate it is an error they asked
+to hear about.
 -/
-syntax (name := vampire) "vampire" : tactic
+def filterTranslatable (hs : Array Expr) : MetaM (Array Expr) :=
+  hs.filterM fun h => withoutModifyingState do
+    let ty ← inferType h
+    try
+      let _ ← (Translator.translateExpr' ty).run {}
+      return true
+    catch e =>
+      trace[vampire] "not first-order, skipping{indentD m!"{h} : {ty}"}\n{e.toMessageData}"
+      return false
+
+/--
+Preprocess `mv`, translate it, and build the problem inside Vampire.
+
+Works on a copy of the goal, so nothing here changes what the user has to prove; the
+copy is returned along with the hypotheses that were sent.
+-/
+def buildProblem (mv : MVarId) (hs : Array Expr) :
+    MetaM (List Command × Array Expr × MVarId) := mv.withContext do
+  -- Everything propositional in the local context, then the hints. Unlike lean-smt,
+  -- which sends only what it is given, the context is swept up automatically: this is
+  -- meant to be a hammer, and a hypothesis it cannot read is skipped rather than fatal.
+  let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
+  let hs := locals.filter (fun l => !hs.contains l) ++ hs
+  let mv₀ := (← Meta.mkFreshExprMVar (← mv.getType)).mvarId!
+  let mv₀ ← mv₀.cleanup (← hs.foldlM (fun s h => return (← (Expr.collectFVars h).run s).snd) {}).fvarIds
+  mv₀.withContext do
+  let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs
+    #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
+  mv₁.withContext do
+    let (fvNames, _) ← genUniqueFVarNames
+    let cmds ← Query.generateQuery hs₁.toList fvNames
+    trace[vampire] "problem:{indentD (MessageData.joinSep (cmds.map toMessageData) Format.line)}"
+    send cmds
+    return (cmds, hs₁, mv₁)
+
+/-- The problem as Vampire itself renders it, for diagnostics. -/
+def problemAsVampireSeesIt : MetaM MessageData := do
+  let n ← Ffi.problemSize
+  let mut lines : Array MessageData := #[]
+  for i in [0:n.toNat] do
+    lines := lines.push (← Ffi.problemUnit i.toUInt32)
+  return MessageData.joinSep lines.toList Format.line
+
+/-- Build and run. -/
+def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM Outcome := do
+  let _ ← buildProblem mv hs
+  match ← Ffi.solve deciseconds with
+  | some true => return .refuted
+  | some false => return .notRefuted
+  | none => throwError "vampire: the prover raised an exception"
+
+/-- Collect the hypotheses named in `vampire [h₁, h₂]`. -/
+private def elabHints (stx : Syntax) : TacticM (Array Expr) := do
+  if stx.getNumArgs == 0 then return #[]
+  let mut hs := #[]
+  for arg in stx[0][1].getSepArgs do
+    hs := hs.push (← elabTerm arg none)
+  return hs
+
+syntax hintList := (" [" withoutPosition(term,*,?) "]")?
+
+/-- Discharge the goal with Vampire. Hypotheses in the local context are used
+automatically; `vampire [h, thm]` adds more. -/
+syntax (name := vampire) "vampire" hintList : tactic
+
+/-- Show the problem Vampire is given for this goal, and whether it refutes it. Leaves
+the goal alone. -/
+syntax (name := vampireQ) "vampire?" hintList : tactic
+
+elab_rules : tactic
+  | `(tactic| vampire $hints:hintList) => do
+    let hs ← elabHints hints
+    let g ← getMainGoal
+    g.withContext do
+      unless (← Ffi.init) == .ok do
+        throwError "vampire: the embedded prover is not available"
+      match ← run g hs 100 with
+      | .notRefuted =>
+        throwError "vampire: no refutation found"
+      | .refuted =>
+        logWarning m!"vampire: the prover refuted the goal, but replaying its refutation \
+          as a Lean proof is not implemented for arbitrary goals yet, so the goal is \
+          admitted — this proof depends on `sorryAx`"
+        g.admit true
+
+  | `(tactic| vampire? $hints:hintList) => do
+    let hs ← elabHints hints
+    let g ← getMainGoal
+    g.withContext do
+      unless (← Ffi.init) == .ok do
+        throwError "vampire: the embedded prover is not available"
+      let outcome ← run g hs 100
+      let verdict := if outcome == .refuted then "refuted" else "no refutation found"
+      logInfo m!"vampire: the problem, as Vampire received it:\
+        {indentD (← problemAsVampireSeesIt)}\n{verdict}"
+
+/-- The propositional replay demonstrated end to end. The problem is hard-coded, so this
+only closes `(p ∨ q) → ¬p → ¬q → False`; what it shows is that a refutation coming back
+across the FFI becomes a real proof term, with no axioms beyond Lean's own. -/
+syntax (name := vampireReplay) "vampire_replay" : tactic
 
 /-- Match `(a ∨ b) → ¬a → ¬b → False` and return `(a, b, h₁, h₂, h₃)`. -/
 private def matchBuiltinGoal (g : MVarId) : MetaM (Option (Expr × Expr × Expr × Expr × Expr)) :=
@@ -57,31 +183,28 @@ private def matchBuiltinGoal (g : MVarId) : MetaM (Option (Expr × Expr × Expr 
     return some (a, b, hOr, hA, hB)
 
 elab_rules : tactic
-  | `(tactic| vampire) => do
+  | `(tactic| vampire_replay) => do
     let g ← getMainGoal
     g.withContext do
-      let status ← Ffi.init
-      unless status == .ok do
-        throwError m!"vampire: FFI unavailable: {status}"
+      unless (← Ffi.init) == .ok do
+        throwError "vampire: the embedded prover is not available"
 
       unless (← g.getType).isConstOf ``False do
-        throwError m!"vampire: the goal must be `False` for now \
-          (the problem sent to Vampire is hard-coded); got {← g.getType}"
+        throwError m!"vampire_replay: the goal must be `False` (the problem is \
+          hard-coded); got {← g.getType}"
 
       let some (a, b, hOr, hA, hB) ← matchBuiltinGoal g
-        | throwError m!"vampire: no hypotheses matching the hard-coded problem \
-            `(p ∨ q), ¬p, ¬q`; goal translation is not implemented yet"
+        | throwError "vampire_replay: no hypotheses matching the hard-coded problem \
+            `(p ∨ q), ¬p, ¬q`"
 
       let some proof ← Ffi.runBuiltinProblem
-        | throwError "vampire: no refutation found"
+        | throwError "vampire_replay: no refutation found"
 
-      -- Map Vampire's atoms and input clauses onto the goal's own terms.
       let p ← Ffi.atom 0
       let q ← Ffi.atom 1
       let interp : Interp := {
         atom := fun x => if x == p then some a else if x == q then some b else none
         input := fun n =>
-          -- input clauses, identified by the literals Vampire recorded for them
           match proof.find? (fun s => s.number == n) with
           | none => none
           | some s =>
@@ -92,7 +215,8 @@ elab_rules : tactic
 
       let term ← reconstruct interp proof
       unless (← isDefEq (← inferType term) (.const ``False [])) do
-        throwError m!"vampire: replayed proof has type {← inferType term}, expected False"
+        throwError m!"vampire_replay: replayed proof has type {← inferType term}, \
+          expected False"
       g.assign term
       logInfo m!"vampire: closed by a {proof.size}-step refutation replayed from the prover"
 

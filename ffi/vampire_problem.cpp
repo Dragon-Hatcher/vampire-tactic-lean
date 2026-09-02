@@ -107,6 +107,11 @@ uint32_t lean_vampire_run_builtin_problem(lean_obj_arg /* w */);
 uint32_t lean_vampire_run_builtin_problem(lean_obj_arg) {
   vampire_ffi::EntryGuard guard;
   try {
+    // Before the reset: the problem's units live in the environment about to be torn
+    // down, so destroying it afterwards would reach into freed state.
+    delete g_problem;
+    g_problem = nullptr;
+
     Lib::resetGlobalState();
     Lib::Timer::startClock();
 
@@ -131,7 +136,6 @@ uint32_t lean_vampire_run_builtin_problem(lean_obj_arg) {
     UnitList::push(c2, units);
     UnitList::push(c1, units);
 
-    delete g_problem;
     g_problem = new Problem(units);
     // Saturation reaches through env for the problem (getMainProblem()->isHigherOrder()),
     // so this is not optional.
