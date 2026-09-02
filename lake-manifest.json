@@ -1,0 +1,13 @@
+{"version": "1.2.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "vamp_lean",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../bodingbauer-etall/vamplean",
+   "configFile": "lakefile.toml"}],
+ "name": "vampire",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}
