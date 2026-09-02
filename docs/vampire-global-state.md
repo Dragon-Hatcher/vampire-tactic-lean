@@ -81,13 +81,37 @@ signature and term sharing table.
 the exception must not be allowed to unwind across the FFI boundary into Lean. The shim
 catches everything and returns a status code.
 
+## 6. Caches held in function-local statics
+
+Easy to miss, and the reason a naive `Environment::reset()` segfaults. `Kernel/Term.cpp`
+cached the FOOL constants and all five built-in sorts this way:
+
+```cpp
+TermList AtomicSort::defaultSort(){
+  static AtomicSort* _default = createConstant(env.signature->getDefaultSort());
+  return TermList(_default);
+}
+```
+
+Initialised once per process. After the environment is rebuilt these point into a freed
+signature and term-sharing table, and because the static is already initialised the
+stale pointer is returned for the rest of the process's life. They are file-scope
+pointers now, filled lazily, and `Term::resetBuiltinCache()` drops them.
+
+Others of this shape that are *not* yet handled, because nothing has needed them:
+`Clause.cpp:218` (`static Clause* selected`), `TermIterators.cpp:154`,
+`LookaheadLiteralSelector.cpp:266`, `Term.cpp:1689` (`static RobSubstitution
+checkSortSubst`), `TermPartialOrdering.cpp:127`, and `Perfect<T>::_ids`
+(`Lib/Perfect.hpp:44`), a global interning map. These hold scratch state rather than
+signature-dependent objects, but any of them could bite the same way.
+
 ## Consequences for the FFI
 
-1. **One prover run per process, for now.** Nothing resets `env`, the signature, term
-   sharing, `InferenceStore`, or the unit counters. Supporting repeated calls needs
-   either a reset entry point or moving this state into a context object.
+1. **Reusable, not re-entrant.** `Lib::resetGlobalState()` (`Lib/Reset.cpp`) restores
+   the state above, so a process can solve many problems — sequentially. The state is
+   still global, so concurrent runs are not possible.
 2. **The shim must not call the `vampire.cpp` setup.** Signal handlers and `setrlimit`
    are the dangerous ones.
 3. **No exception may cross the boundary**, and `exit()` on the proof path has to go.
-4. **Determinism is process-global** (`Random::_seed`, unit counters), so a second run
-   would not reproduce the first even given the same input.
+4. **Determinism is restored by the reset** (`Random::_seed` and the unit counters are
+   both reset), but the allocator's pools are not, so a long-lived process grows.

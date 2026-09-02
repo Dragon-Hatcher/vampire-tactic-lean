@@ -3,7 +3,7 @@ open Lake DSL System
 
 /-- Checkout of the Vampire fork we build against. -/
 def vampireDir : FilePath :=
-  "../bodingbauer-etall/vampire-leancheck"
+  "../vampire"
 
 def vampireBuildDir : FilePath := vampireDir / "build"
 
@@ -43,7 +43,20 @@ target vampire_ffi.o pkg : FilePath := do
   let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
   buildO oFile srcJob flags #[] "c++"
 
+/--
+The prebuilt Vampire archive. Declaring it as an input means Lake relinks when the
+archive changes; without it a rebuilt Vampire leaves a stale dylib whose calls into
+the new symbols fault at run time.
+-/
+target vampire_archive : FilePath := do
+  let archive := vampireBuildDir / "libvampire_lib.a"
+  unless (← archive.pathExists) do
+    error s!"missing {archive}\n\
+      build it first: cmake --build {vampireBuildDir} --target vampire_lib"
+  inputBinFile archive
+
 extern_lib libvampireffi pkg := do
   let name := nameToStaticLib "vampireffi"
   let ffiO ← fetch <| pkg.target ``vampire_ffi.o
+  let _ ← fetch <| pkg.target ``vampire_archive
   buildStaticLib (pkg.staticLibDir / name) #[ffiO]

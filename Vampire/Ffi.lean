@@ -49,6 +49,12 @@ private opaque signatureFunctionsRaw : BaseIO UInt32
 @[extern "lean_vampire_signature_type_cons"]
 private opaque signatureTypeConsRaw : BaseIO UInt32
 
+@[extern "lean_vampire_reset"]
+private opaque resetRaw : BaseIO UInt32
+
+@[extern "lean_vampire_selftest_dirty"]
+private opaque selftestDirtyRaw : BaseIO UInt32
+
 /-- Confirm the embedded prover is linked and its environment is live. -/
 def init : BaseIO Status := do
   return Status.ofCode (← initRaw)
@@ -58,5 +64,17 @@ def signatureFunctions : BaseIO UInt32 := signatureFunctionsRaw
 
 /-- Number of type constructors (sorts) in Vampire's current signature. -/
 def signatureTypeCons : BaseIO UInt32 := signatureTypeConsRaw
+
+/--
+Reset Vampire's process-global state so another problem can be solved.
+
+Runs must be sequential: the state is global, so this makes the library reusable,
+not re-entrant.
+-/
+def reset : BaseIO Status := do
+  return Status.ofCode (← resetRaw)
+
+/-- Self-test: add a fresh function symbol, returning the new symbol count. -/
+def selftestDirty : BaseIO UInt32 := selftestDirtyRaw
 
 end Vampire.Ffi

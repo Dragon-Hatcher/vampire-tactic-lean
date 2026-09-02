@@ -18,6 +18,7 @@
 #include "Lib/Environment.hpp"
 #include "Kernel/Signature.hpp"
 #include "Shell/Options.hpp"
+#include "Lib/Reset.hpp"
 
 using namespace Lib;
 
@@ -69,6 +70,37 @@ uint32_t lean_vampire_signature_type_cons(lean_obj_arg /* w */) {
   try {
     if (env.signature == nullptr) return 0;
     return static_cast<uint32_t>(env.signature->typeCons());
+  } catch (...) {
+    return 0;
+  }
+}
+
+/**
+ * Reset Vampire's process-global state so another problem can be solved.
+ *
+ * Without this the library is one-shot: nothing restores the environment, the unit
+ * numbering, the term sharing table or the proof singletons between runs. See
+ * docs/vampire-global-state.md.
+ */
+uint32_t lean_vampire_reset(lean_obj_arg /* w */) {
+  try {
+    Lib::resetGlobalState();
+    return VAMPIRE_OK;
+  } catch (...) {
+    return VAMPIRE_ERR_EXCEPTION;
+  }
+}
+
+/**
+ * Self-test hook: dirty the signature by adding a fresh function symbol, and return
+ * the resulting symbol count. Used to show that `lean_vampire_reset` really restores
+ * the environment rather than reporting a constant.
+ */
+uint32_t lean_vampire_selftest_dirty(lean_obj_arg /* w */) {
+  try {
+    if (env.signature == nullptr) return 0;
+    env.signature->addFreshFunction(0, "leanffi_probe");
+    return static_cast<uint32_t>(env.signature->functions());
   } catch (...) {
     return 0;
   }
