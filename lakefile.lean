@@ -43,6 +43,12 @@ target vampire_ffi.o pkg : FilePath := do
   let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
   buildO oFile srcJob flags #[] "c++"
 
+target vampire_problem.o pkg : FilePath := do
+  let oFile := pkg.buildDir / "ffi" / "vampire_problem.o"
+  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_problem.cpp"
+  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
+  buildO oFile srcJob flags #[] "c++"
+
 /--
 The prebuilt Vampire archive. Declaring it as an input means Lake relinks when the
 archive changes; without it a rebuilt Vampire leaves a stale dylib whose calls into
@@ -58,5 +64,6 @@ target vampire_archive : FilePath := do
 extern_lib libvampireffi pkg := do
   let name := nameToStaticLib "vampireffi"
   let ffiO ← fetch <| pkg.target ``vampire_ffi.o
+  let probO ← fetch <| pkg.target ``vampire_problem.o
   let _ ← fetch <| pkg.target ``vampire_archive
-  buildStaticLib (pkg.staticLibDir / name) #[ffiO]
+  buildStaticLib (pkg.staticLibDir / name) #[ffiO, probO]

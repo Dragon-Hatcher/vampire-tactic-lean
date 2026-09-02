@@ -3,14 +3,24 @@
 A Lean tactic that discharges goals with the Vampire theorem prover and replays
 the result as a kernel-checked Lean proof.
 
-**Status: FFI reachable, no goal translation.** The tactic calls into an embedded
-Vampire and reads its live signature, then admits the goal — so anything it "proves"
-depends on `sorryAx`. `Test/Basic.lean` pins that.
+**Status: the prover runs and its proof is replayed; the goal is not yet translated.**
 
-    info: vampire: embedded prover live (signature: 0 function symbols, 5 sorts)
+The tactic sends a problem to the embedded Vampire, gets the refutation back as
+structured data, and rebuilds it as a Lean proof term:
 
-The 5 sorts are `$i, $o, $int, $real, $rat`, registered by `Environment::Environment()`
-during static initialisation: real Vampire state read from inside Lean's elaborator.
+    theorem resolution_two_step (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by
+      vampire
+
+    info: vampire: closed by a 5-step refutation replayed from the prover
+    info: 'resolution_two_step' does not depend on any axioms
+
+No `sorry`, and no axioms at all — propositional resolution replays as `Or.elim` and
+`absurd`, both constructive.
+
+**The problem sent to Vampire is hard-coded** to `(p ∨ q), ¬p, ¬q ⊢ ⊥`, so only goals of
+that shape work. Translating an arbitrary Lean goal is the next piece of work; this
+establishes the run-and-replay half of the pipeline first, so the translation has
+something to hand to.
 
 ## Design
 
@@ -27,10 +37,13 @@ during static initialisation: real Vampire state read from inside Lean's elabora
 
 ## Layout
 
-    Vampire.lean         library root
-    Vampire/Ffi.lean     typed bindings to the embedded prover
-    Vampire/Tactic.lean  the `vampire` frontend (calls the FFI, then admits)
-    ffi/vampire_ffi.cpp  the C++ shim
+    Vampire.lean             library root
+    Vampire/Ffi.lean         typed bindings to the embedded prover
+    Vampire/Proof.lean       the refutation, read back as structured data
+    Vampire/Reconstruct.lean refutation -> Lean proof term
+    Vampire/Tactic.lean      the `vampire` frontend
+    ffi/vampire_ffi.cpp      environment, reset, threading
+    ffi/vampire_problem.cpp  builds a problem, runs saturation, exposes the proof
     Test/Basic.lean      smoke tests; `#print axioms` shows `sorryAx` until the
                          translation and replay layers land
     docs/vampire-global-state.md
