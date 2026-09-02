@@ -24,6 +24,7 @@
 #include "Kernel/Signature.hpp"
 #include "Shell/Options.hpp"
 #include "Lib/Reset.hpp"
+#include "Lib/Timer.hpp"
 
 using namespace Lib;
 
@@ -147,6 +148,25 @@ uint32_t lean_vampire_selftest_dirty(lean_obj_arg /* w */) {
     return static_cast<uint32_t>(env.signature->functions());
   } catch (...) {
     return 0;
+  }
+}
+
+/**
+ * Start Vampire's clock for a run, without installing limit enforcement.
+ *
+ * Deliberately NOT Timer::reinitialise: that spawns a detached thread which calls
+ * System::terminateImmediately -- std::_Exit -- when the limit is hit, which would kill
+ * Lean outright. An embedded run bounds itself with
+ * SaturationAlgorithm::setSoftTimeLimit, whose check throws TimeLimitExceededException
+ * from the search loop instead.
+ */
+uint32_t lean_vampire_start_clock(lean_obj_arg /* w */) {
+  EntryGuard guard;
+  try {
+    Lib::Timer::startClock();
+    return VAMPIRE_OK;
+  } catch (...) {
+    return VAMPIRE_ERR_EXCEPTION;
   }
 }
 

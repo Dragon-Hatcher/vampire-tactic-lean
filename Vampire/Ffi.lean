@@ -55,11 +55,24 @@ private opaque resetRaw : BaseIO UInt32
 @[extern "lean_vampire_selftest_dirty"]
 private opaque selftestDirtyRaw : BaseIO UInt32
 
+@[extern "lean_vampire_start_clock"]
+private opaque startClockRaw : BaseIO UInt32
+
 @[extern "lean_vampire_thread_count"]
 private opaque threadCountRaw : BaseIO UInt32
 
 @[extern "lean_vampire_max_concurrent"]
 private opaque maxConcurrentRaw : BaseIO UInt32
+
+/--
+Start Vampire's clock for a run.
+
+Note this is not `Timer::reinitialise`: that spawns a thread which `_Exit`s the process
+when the time limit is hit. An embedded run bounds itself with a soft time limit, which
+throws from the search loop instead.
+-/
+def startClock : BaseIO Status := do
+  return Status.ofCode (← startClockRaw)
 
 /-- How many distinct OS threads have entered the FFI. -/
 def threadCount : BaseIO UInt32 := threadCountRaw

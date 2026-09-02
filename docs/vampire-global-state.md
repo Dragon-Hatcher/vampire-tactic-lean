@@ -70,16 +70,59 @@ signature and term sharing table.
 
 ## 5. Calls that terminate the process
 
-`exit()` in a library kills Lean. Live sites:
+`System::terminateImmediately` (`Lib/System.hpp:36`) is `std::_Exit` — no unwinding, no
+destructors, no diagnostics. In a library it is instant death for the host. Every
+remaining path to it is now behind something an embedded Vampire does not invoke:
 
-- `Shell/CommandLine.cpp:75,86` — only on `--help`/`--version`, not reachable from the FFI.
-- `Shell/LeanChecker/LeanChecker.cpp:702` — `exit(10)` on `PROBLEM IN DEMODULATION`.
-  Reachable, and must become an exception before the proof-generation path is driven
-  over the FFI.
+| Site | Reachable? |
+|---|---|
+| `Lib/System.cpp:93,119` | only from the signal handlers, which `setSignalHandlers()` installs and we never call |
+| `Lib/Timer.cpp:112` | only from `timer_thread`, which only exists if `Timer::reinitialise()` is called — see section 8 |
+| `Shell/CommandLine.cpp:75,86` | `--help`/`--version` only |
+| `Shell/LeanChecker/LeanChecker.cpp:702` | **was** `exit(10)` on missing demodulation replay info; now throws `InvalidOperationException` |
 
-`USER_ERROR` throws rather than exits, so ordinary input errors are recoverable — but
-the exception must not be allowed to unwind across the FFI boundary into Lean. The shim
-catches everything and returns a status code.
+`USER_ERROR` throws rather than exits, so ordinary input errors are recoverable — but no
+exception may unwind across the FFI boundary into Lean. The shim catches everything and
+returns a status code.
+
+## 8. The timeout mechanism kills the process
+
+This is the one that would have been hardest to diagnose in the field, because it only
+fires on hard problems.
+
+`Timer::reinitialise()` (`Lib/Timer.cpp`) ends with:
+
+```cpp
+std::thread(timer_thread).detach();
+```
+
+`timer_thread` is `[[noreturn]]`, loops forever, and when the time or instruction limit
+is reached calls `limitReached`, which prints an SZS status and finishes with
+`System::terminateImmediately(1)`. Embedded, that means **a Vampire timeout terminates
+Lean** — with no exception, no stack, and no way to catch it. The thread is also
+detached and never stops, so it outlives the run and a second `reinitialise()` spawns
+another.
+
+There is a second, cooperative path, and it is the one to use.
+`SaturationAlgorithm::runImpl` polls in the search loop:
+
+```cpp
+if(_softTimeLimit && Timer::elapsedDeciseconds() - startTime > _softTimeLimit)
+  throw TimeLimitExceededException();
+```
+
+which `ProvingHelper` and `MainLoop` already catch. It is set programmatically with
+`SaturationAlgorithm::setSoftTimeLimit(deciseconds)`.
+
+So an embedded run must:
+
+1. call `Timer::startClock()`, added here, which sets `START_TIME` **without** spawning
+   the thread — the clock is still needed because elapsed readings are relative to it;
+2. never call `Timer::reinitialise()`;
+3. bound itself with `setSoftTimeLimit`.
+
+Note the soft check compares a *difference* from the loop's own start, so it stays
+correct regardless of when the clock was started.
 
 ## 6. Caches held in function-local statics
 
