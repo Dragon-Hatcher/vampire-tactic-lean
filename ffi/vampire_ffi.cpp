@@ -15,12 +15,51 @@
 
 #include <lean/lean.h>
 
+#include <atomic>
+#include <mutex>
+#include <set>
+#include <thread>
+
 #include "Lib/Environment.hpp"
 #include "Kernel/Signature.hpp"
 #include "Shell/Options.hpp"
 #include "Lib/Reset.hpp"
 
 using namespace Lib;
+
+namespace {
+// Lean elaborates declarations concurrently: `Elab.async` defaults to false but is
+// overridden to true in the language server and the cmdline driver. Measured on a file
+// of 16 goals, the tactic was entered from 7 OS threads with 3 calls in flight at once.
+//
+// Vampire cannot survive that. Its state is process-global (see
+// docs/vampire-global-state.md) and it is compiled with `-fno-threadsafe-statics`, so
+// even the lazy initialisation of the built-in sort cache races.
+//
+// Every entry point therefore takes this lock, serialising the prover while leaving the
+// rest of elaboration parallel. The cost is that a long proof search blocks other
+// threads that reach the tactic; removing that needs Vampire's state moved into a
+// per-run context, not just a reset.
+std::recursive_mutex g_vampireMutex;
+
+// Instrumentation, kept so the serialisation is testable rather than assumed.
+std::atomic<int> g_inFlight{0};
+std::atomic<int> g_maxInFlight{0};
+std::mutex g_threadsMutex;
+std::set<std::thread::id> g_threads;
+
+struct EntryGuard {
+  std::lock_guard<std::recursive_mutex> lock;
+  EntryGuard() : lock(g_vampireMutex) {
+    int now = ++g_inFlight;
+    int prev = g_maxInFlight.load();
+    while (now > prev && !g_maxInFlight.compare_exchange_weak(prev, now)) {}
+    std::lock_guard<std::mutex> lock(g_threadsMutex);
+    g_threads.insert(std::this_thread::get_id());
+  }
+  ~EntryGuard() { --g_inFlight; }
+};
+} // namespace
 
 extern "C" {
 
@@ -40,6 +79,7 @@ enum : uint32_t {
  * confirms the archive is linked and its static initialisers ran.
  */
 uint32_t lean_vampire_init(lean_obj_arg /* w */) {
+  EntryGuard guard;
   try {
     if (env.options == nullptr || env.signature == nullptr || env.statistics == nullptr)
       return VAMPIRE_ERR_NO_ENV;
@@ -57,6 +97,7 @@ uint32_t lean_vampire_init(lean_obj_arg /* w */) {
  * point of the probe.
  */
 uint32_t lean_vampire_signature_functions(lean_obj_arg /* w */) {
+  EntryGuard guard;
   try {
     if (env.signature == nullptr) return 0;
     return static_cast<uint32_t>(env.signature->functions());
@@ -67,6 +108,7 @@ uint32_t lean_vampire_signature_functions(lean_obj_arg /* w */) {
 
 /** Number of type constructors (sorts) in the current signature. */
 uint32_t lean_vampire_signature_type_cons(lean_obj_arg /* w */) {
+  EntryGuard guard;
   try {
     if (env.signature == nullptr) return 0;
     return static_cast<uint32_t>(env.signature->typeCons());
@@ -83,6 +125,7 @@ uint32_t lean_vampire_signature_type_cons(lean_obj_arg /* w */) {
  * docs/vampire-global-state.md.
  */
 uint32_t lean_vampire_reset(lean_obj_arg /* w */) {
+  EntryGuard guard;
   try {
     Lib::resetGlobalState();
     return VAMPIRE_OK;
@@ -97,6 +140,7 @@ uint32_t lean_vampire_reset(lean_obj_arg /* w */) {
  * the environment rather than reporting a constant.
  */
 uint32_t lean_vampire_selftest_dirty(lean_obj_arg /* w */) {
+  EntryGuard guard;
   try {
     if (env.signature == nullptr) return 0;
     env.signature->addFreshFunction(0, "leanffi_probe");
@@ -104,6 +148,17 @@ uint32_t lean_vampire_selftest_dirty(lean_obj_arg /* w */) {
   } catch (...) {
     return 0;
   }
+}
+
+/** How many distinct OS threads have entered the FFI. */
+uint32_t lean_vampire_thread_count(lean_obj_arg /* w */) {
+  std::lock_guard<std::mutex> lock(g_threadsMutex);
+  return static_cast<uint32_t>(g_threads.size());
+}
+
+/** High-water mark of concurrent entries. >1 means Vampire was entered in parallel. */
+uint32_t lean_vampire_max_concurrent(lean_obj_arg /* w */) {
+  return static_cast<uint32_t>(g_maxInFlight.load());
 }
 
 } // extern "C"

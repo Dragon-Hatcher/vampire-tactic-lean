@@ -55,6 +55,19 @@ private opaque resetRaw : BaseIO UInt32
 @[extern "lean_vampire_selftest_dirty"]
 private opaque selftestDirtyRaw : BaseIO UInt32
 
+@[extern "lean_vampire_thread_count"]
+private opaque threadCountRaw : BaseIO UInt32
+
+@[extern "lean_vampire_max_concurrent"]
+private opaque maxConcurrentRaw : BaseIO UInt32
+
+/-- How many distinct OS threads have entered the FFI. -/
+def threadCount : BaseIO UInt32 := threadCountRaw
+
+/-- High-water mark of concurrent FFI entries. `> 1` means Vampire was entered in
+parallel, which its global state cannot survive. -/
+def maxConcurrent : BaseIO UInt32 := maxConcurrentRaw
+
 /-- Confirm the embedded prover is linked and its environment is live. -/
 def init : BaseIO Status := do
   return Status.ofCode (← initRaw)

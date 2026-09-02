@@ -105,6 +105,34 @@ checkSortSubst`), `TermPartialOrdering.cpp:127`, and `Perfect<T>::_ids`
 (`Lib/Perfect.hpp:44`), a global interning map. These hold scratch state rather than
 signature-dependent objects, but any of them could bite the same way.
 
+## 7. Threading: Lean elaborates in parallel
+
+`Elab.async` (`Lean/CoreM.lean:35`) defaults to `false`, but its own description says it
+"is overridden to `true` in the Lean language server and cmdline" — so it is on in the
+editor and in `lake build`. Declarations within one file elaborate concurrently.
+
+Measured, on a file of 16 goals each calling the tactic:
+
+| | distinct threads | max concurrent |
+|---|---:|---:|
+| default | 7 | **3** |
+| `set_option Elab.async false` | 1 | 1 |
+
+So the tactic really is entered from several OS threads, several at once. Vampire cannot
+survive that: every item in sections 2–6 is process-global, and it is compiled with
+`-fno-threadsafe-statics`, so even the lazy initialisation of the built-in sort cache
+races.
+
+The FFI therefore takes a `std::recursive_mutex` on every entry point. `Test/Concurrency.lean`
+asserts the result — many threads reach the tactic, one is inside Vampire at a time:
+
+    distinct threads entering the FFI : 6
+    max concurrent entries            : 1
+
+The cost is that a long proof search blocks any other elaboration thread that reaches
+the tactic. Recovering that parallelism means moving Vampire's state into a per-run
+context, which is a much larger change than the reset.
+
 ## Consequences for the FFI
 
 1. **Reusable, not re-entrant.** `Lib::resetGlobalState()` (`Lib/Reset.cpp`) restores
@@ -113,5 +141,7 @@ signature-dependent objects, but any of them could bite the same way.
 2. **The shim must not call the `vampire.cpp` setup.** Signal handlers and `setrlimit`
    are the dangerous ones.
 3. **No exception may cross the boundary**, and `exit()` on the proof path has to go.
-4. **Determinism is restored by the reset** (`Random::_seed` and the unit counters are
+4. **Entry is serialised.** Lean elaborates in parallel (section 7), so the shim holds a
+   global lock for the duration of every call.
+5. **Determinism is restored by the reset** (`Random::_seed` and the unit counters are
    both reset), but the allocator's pools are not, so a long-lived process grows.
