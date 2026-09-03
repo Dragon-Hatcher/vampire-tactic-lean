@@ -298,17 +298,6 @@ partial def termSyntax (i : Interp) (syms : Symbols) (witness : Nat → Option T
     let as ← args.mapM (termSyntax i syms witness)
     return ⟨Syntax.mkApp hdStx as⟩
 
-/-- The free variables of an expression. -/
-private partial def fvarsIn : Expr → Std.HashSet FVarId → Std.HashSet FVarId
-  | .fvar id, acc => acc.insert id
-  | .app f a, acc => fvarsIn a (fvarsIn f acc)
-  | .lam _ d b _, acc => fvarsIn b (fvarsIn d acc)
-  | .forallE _ d b _, acc => fvarsIn b (fvarsIn d acc)
-  | .letE _ t v b _, acc => fvarsIn b (fvarsIn v (fvarsIn t acc))
-  | .mdata _ e, acc => fvarsIn e acc
-  | .proj _ _ e, acc => fvarsIn e acc
-  | _, acc => acc
-
 /--
 The local context a step lemma is proved in.
 
@@ -333,17 +322,31 @@ known, because a proof that works for an opaque `x` works for any particular one
 def restrictedContext (seeds : Array Expr) (opaqueLets : Bool) :
     MetaM (LocalContext × LocalInstances) := do
   let lctx ← getLCtx
+  -- `Expr.collectFVars`, not a hand-rolled traversal. An `Expr` is a DAG with heavy
+  -- sharing and the naive structural recursion has no visited set, so it re-walks every
+  -- shared subterm — exponential in the sharing, not linear in the size. That is fine
+  -- until it is asked for the free variables of a `let`'s *value*, and the values here
+  -- are skolem witnesses of the form `Classical.choose <the whole parent proof>`. On
+  -- SYN036+1 a 181-step refutation spent over two minutes inside it, 8333 of 8378 stack
+  -- samples, nested nine hundred frames deep.
+  --
+  -- One `CollectFVars.State` is threaded through the whole search rather than one per
+  -- declaration, so the memo table is shared: a proof term reached from two different
+  -- declarations is walked once for the pair, not once each.
+  let mut st : CollectFVars.State := {}
+  for e in seeds do st := (← (Expr.collectFVars e).run st).2
   let mut needed : Std.HashSet FVarId := {}
-  let mut queue : Array FVarId := (seeds.foldl (fun acc e => fvarsIn e acc) {}).toArray
-  while h : queue.size > 0 do
-    let fv := queue[queue.size - 1]
-    queue := queue.pop
+  let mut i := 0
+  -- `collectFVars` appends what it finds to `st.fvarIds`, so walking that array by index
+  -- picks up everything reached from a declaration visited later in the same pass.
+  while i < st.fvarIds.size do
+    let fv := st.fvarIds[i]!
+    i := i + 1
     if needed.contains fv then continue
     needed := needed.insert fv
     if let some d := lctx.find? fv then
-      let mut st := fvarsIn d.type {}
-      if let some v := d.value? then st := fvarsIn v st
-      queue := queue ++ st.toArray
+      st := (← (Expr.collectFVars d.type).run st).2
+      if let some v := d.value? then st := (← (Expr.collectFVars v).run st).2
   let mut result := lctx
   for d in lctx do
     if needed.contains d.fvarId then

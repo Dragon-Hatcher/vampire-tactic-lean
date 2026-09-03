@@ -137,7 +137,7 @@ bridge; `Vampire/Bridge.lean` closed it.
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
 statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
-**136/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
+**137/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
 Scripts to regenerate and rerun it are there too. The clausification binder-order
 failure that used to be on that list is fixed: it wanted `outputReorderIfNeeded`, which
 the port was missing, not the `grind` fallback it had been attributed to.
@@ -183,7 +183,17 @@ Recorded because each cost real time to find.
    nothing read the stale cache until then. `Lib::resetGlobalState` drops it now. Two
    things made this hard to see: a wrong hypothesis (`+mono`, which was merely correlated
    with the problems being large), and a broken reproducer — see 11.
-11. **`lean` needs `--load-dynlib` for the extern lib as well as `--plugin` for each
+11. **A hand-rolled `Expr` traversal without a visited set is exponential, not linear.**
+   `restrictedContext` collected free variables with a plain structural recursion. An
+   `Expr` is a DAG with heavy sharing, so shared subterms were re-walked once per path
+   to them — and it was being asked for the free variables of a `let`'s *value*, which
+   here is a skolem witness of the form `Classical.choose <the whole parent proof>`. On
+   `SYN036+1` that was over two minutes of a two-minute run: 8333 of 8378 stack samples,
+   nine hundred frames deep. `Expr.collectFVars` carries a memo table; use it. Found by
+   sampling the process (`sample <pid>`), which took a minute and pointed straight at the
+   frame — after an attempt to read it off the timing trace, which never printed because
+   traces are only flushed when the declaration finishes and this one never did.
+12. **`lean` needs `--load-dynlib` for the extern lib as well as `--plugin` for each
    precompiled module.** `lake setup-file`'s JSON has both a `plugins` and a `dynlibs`
    key; miss the second and the FFI symbols are unresolved and the process dies before
    running anything. Two hours went into a backtrace of that crash rather than the real

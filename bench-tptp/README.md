@@ -55,7 +55,7 @@ the pair into one file and only tests one of them.
 
 ## Results as of the last full run (196 problems: 57 original + 139 newly generated)
 
-Original 57: **57/57.** New 139: **136/139.** The newly-generated count moves between
+Original 57: **57/57.** New 139: **137/139.** The newly-generated count moves between
 runs — Vampire is nondeterministic under a wall-clock limit, so which problems it
 refutes within `gen.sh`'s budget, and therefore which get a test at all, is not fixed.
 
@@ -123,9 +123,18 @@ fix COM003.
 
 Every remaining failure, and what's understood about each:
 
-- **`Q_PRD001p1`, `Q_SYN036p1`, `Q_SYN472p1` — harness timeout, ~160–180s.** The only
-  three left, and none of them is a logic failure: `one.sh` caps the tactic at 150s and
-  these run past it. Not investigated. Could be Vampire genuinely taking that long on
-  the replay side (`grind`/`cnfify` on a large formula), or a real hang. Worth a first
-  look with `set_option trace.vampire.timing true` to see whether it is the prover call
-  or the replay that is slow. (`Q_ITP021p1` was on this list and now finishes.)
+- **`Q_PRD001p1`, `Q_SYN472p1` — harness timeout.** The only two left, and neither is a
+  logic failure: `one.sh` caps the tactic at 150s of CPU. `Q_PRD001p1` passes in 112s run
+  on its own and only fails under `xargs -P 4`, so it is genuinely borderline rather than
+  broken. `Q_SYN472p1` misses either way, at 153s alone.
+
+  These were three, and `Q_SYN036p1` came off the list when `restrictedContext` stopped
+  using an unmemoised free-variable traversal — see below. What is left is spread rather
+  than concentrated. For `Q_SYN036p1`, now 15s, the 8.7s of replay divides as: 3.25s in
+  step tactics (26 clausifications at about 120ms each), 2.5s abstracting 52 definitions
+  with `mkLetFVars`, 1.45s in the final `check`, 1.3s in two skolemisations, and 42ms in
+  everything else — input bridging, AVATAR definitions and the SAT refutation together.
+  No single hot spot; four real costs. The reference checks its own proof of the same
+  problem in 2.5s, but that is a different and smaller derivation (114 theorems against
+  our 181 steps) read from a file rather than built in the elaborator, so it is a bound
+  to aim at rather than a like-for-like gap.
