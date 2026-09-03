@@ -21,9 +21,18 @@ direct ports, each carrying a header saying what was changed:
     Vampire/Preprocess/Intros.lean       <- Smt/Preprocess/Intros.lean
     Vampire/Preprocess/NegateGoal.lean   <- Smt/Preprocess/NegateGoal.lean
     Vampire/Preprocess/PushHintsToCtx.lean <- Smt/Preprocess/PushHintsToCtx.lean
+    Vampire/Preprocess/Mono.lean         <- Smt/Preprocess/Mono.lean
 
     Vampire/Tactic.lean                  follows Smt/Tactic/Smt.lean
 
 Vampire/Translate/Build.lean has no counterpart: lean-smt renders its terms as SMT-LIB
 text for a solver process, whereas this compiles them into an embedded Vampire's own
 data structures.
+
+Vampire/Preprocess/Mono.lean carries lean-smt's own additions to the `Auto` namespace
+along with the port, because monomorphisation is driven by calling into lean-auto and
+lean-smt's variants of auto's lemma collection are what make that call. lean-auto is
+used under the Apache License 2.0:
+
+    lean-auto — https://github.com/leanprover-community/lean-auto
+    Copyright (c) 2023 Yicheng Qian and contributors.

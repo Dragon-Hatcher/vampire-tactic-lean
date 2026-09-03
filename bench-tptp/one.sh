@@ -5,11 +5,13 @@ SP=$1
 n=$2
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VT="$DIR/.."
-VL="$DIR/../../bodingbauer-etall/vamplean"
 cd "$VT"
-DYN="--load-dynlib=$VL/.lake/build/lib/libvamp__lean_VampLean.dylib --load-dynlib=$VT/.lake/build/lib/libvampireffi.dylib --load-dynlib=$VT/.lake/build/lib/libvampire_Vampire.dylib"
+# `lake lean`, not `lake env lean` with a hand-built `--load-dynlib` list. Since the
+# monomorphisation step calls into lean-auto, which is itself precompiled, the tactic's
+# own dylib carries unresolved `auto` symbols; loading it by hand segfaults however the
+# list is ordered. Lake knows the right closure, so let it say.
 start=$(date +%s)
-out=$( (ulimit -t 150; lake env lean $DYN "$SP/bench/$n.lean") 2>&1 )
+out=$( (ulimit -t 150; lake lean "$SP/bench/$n.lean") 2>&1 )
 rc=$?
 end=$(date +%s)
 mkdir -p "$SP/log" "$SP/res"

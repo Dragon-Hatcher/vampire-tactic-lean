@@ -47,6 +47,21 @@ open Lean Elab Tactic Meta
 def timeoutDeciseconds : MetaM UInt32 := do
   return (((← getOptions).get `vampire.timeout (10 : Nat)) * 10).toUInt32
 
+/-- How the tactic is configured, as `vampire +mono [h]` and friends. Follows `smt`'s
+`Smt.Config`, which is where the `+mono` spelling comes from. -/
+structure Config where
+  /-- Monomorphise the goal with `auto` before translating it.
+
+  Vampire's logic is monomorphic first-order logic, so a goal that quantifies over a
+  type or carries a typeclass has no direct reading. `auto`'s procedure instantiates the
+  polymorphic lemmas at the types the problem uses and replaces what is left with
+  uninterpreted symbols. Off by default: it changes what reaches the prover, and on a
+  goal that is already first-order it is cost without benefit. -/
+  mono : Bool := false
+deriving Inhabited
+
+declare_config_elab elabConfig Config
+
 /-- What the tactic did. -/
 inductive Outcome where
   /-- Vampire found a refutation. -/
@@ -107,13 +122,17 @@ structure Built where
   transfers the replayed proof back to the user's goal. -/
   root : MVarId
 
-def buildProblem (mv : MVarId) (hs : Array Expr) (all : Bool) : MetaM Built :=
-    mv.withContext do
+def buildProblem (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) :
+    MetaM Built := mv.withContext do
   -- Only with `[*]`: everything propositional in the local context, minus what has no
   -- first-order reading. Without it, just what was named.
   let hs ←
     if all then do
-      let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
+      -- Not filtered under `+mono`: the filter asks whether a hypothesis translates
+      -- *as it stands*, and the whole point of monomorphising is that a polymorphic one
+      -- does not until it has been.
+      let props := (← Preprocess.getPropHyps).map Expr.fvar
+      let locals ← if cfg.mono then pure props else filterTranslatable props
       pure (locals.filter (fun l => !hs.contains l) ++ hs)
     else pure hs
   let mv₀ := (← Meta.mkFreshExprMVar (← mv.getType)).mvarId!
@@ -123,8 +142,14 @@ def buildProblem (mv : MVarId) (hs : Array Expr) (all : Bool) : MetaM Built :=
   -- pruning drops. Translation is limited by the dependency graph, not by what is in
   -- scope, so nothing else changes.
   mv₀.withContext do
-  let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs
-    #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
+  -- `mono` replaces the other three rather than joining them: auto's procedure
+  -- introduces the goal's binders, negates it and pushes every hint into the context
+  -- itself, so running them alongside would do the work twice. This is how `smt` wires
+  -- it too.
+  let steps :=
+    if cfg.mono then #[Preprocess.mono]
+    else #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
+  let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs steps
   mv₁.withContext do
     let (fvNames, _) ← genUniqueFVarNames
     let q ← Query.generateQuery hs₁.toList fvNames
@@ -156,10 +181,10 @@ def problemAsVampireSeesIt : MetaM MessageData := do
   return MessageData.joinSep lines.toList Format.line
 
 /-- Translate the goal, then build, solve and export in one call. -/
-def run (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :
+def run (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :
     MetaM (Outcome × Built) := do
   let t0 ← IO.monoMsNow
-  let built ← buildProblem mv hs all
+  let built ← buildProblem cfg mv hs all
   let t1 ← IO.monoMsNow
   trace[vampire.timing] "translated in {t1 - t0}ms"
   let r ← Ffi.run built.names built.code deciseconds
@@ -207,7 +232,14 @@ private def elabHints (stx : Syntax) : TacticM (Array Expr × Bool) := do
   for arg in stx[0][1].getSepArgs do
     -- `syntax A := B <|> C` wraps the alternative, so the star is one level down.
     if arg[0].getKind == ``vampireStar then all := true
-    else hs := hs.push (← elabTerm arg[0] none)
+    else
+      -- `Auto.Prep.elabLemma`, as `smt` uses for its own hints. Plain `elabTerm` is not
+      -- enough for a polymorphic hint: `mul_assoc` on its own leaves `Group ?G` stuck,
+      -- and elaboration reports it rather than waiting to see what the goal fixes it
+      -- to. This elaborates with `ignoreStuckTC`, then abstracts whatever metavariables
+      -- are left into binders — which is exactly the form monomorphisation wants, and a
+      -- no-op on a hint whose type is already determined.
+      hs := hs.push (← Auto.Prep.elabLemma ⟨arg[0]⟩ (.leaf s!"❰{arg[0]}❱")).proof
   return (hs, all)
 
 /--
@@ -221,20 +253,21 @@ naming what matters is cheap. The goal's own binders are always introduced and s
 Under `[*]`, a hypothesis with no first-order reading is skipped rather than being
 fatal; one you name explicitly is not.
 -/
-syntax (name := vampire) "vampire" hintList : tactic
+syntax (name := vampire) "vampire" optConfig hintList : tactic
 
 /-- Show the problem Vampire is given for this goal, and whether it refutes it. Leaves
 the goal alone. Takes the same hints as `vampire`. -/
-syntax (name := vampireQ) "vampire?" hintList : tactic
+syntax (name := vampireQ) "vampire?" optConfig hintList : tactic
 
 elab_rules : tactic
-  | `(tactic| vampire $hints:hintList) => do
+  | `(tactic| vampire $cfg:optConfig $hints:hintList) => do
+    let cfg ← elabConfig cfg
     let (hs, all) ← elabHints hints
     let g ← getMainGoal
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      match ← run g hs all (← timeoutDeciseconds) with
+      match ← run cfg g hs all (← timeoutDeciseconds) with
       | (.notRefuted, _) =>
         throwError "vampire: no refutation found — {← Ffi.message}"
       | (.refuted, built) =>
@@ -242,13 +275,14 @@ elab_rules : tactic
         built.goal.assign proof
         g.assign (.mvar built.root)
 
-  | `(tactic| vampire? $hints:hintList) => do
+  | `(tactic| vampire? $cfg:optConfig $hints:hintList) => do
+    let cfg ← elabConfig cfg
     let (hs, all) ← elabHints hints
     let g ← getMainGoal
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      let (outcome, _) ← run g hs all (← timeoutDeciseconds)
+      let (outcome, _) ← run cfg g hs all (← timeoutDeciseconds)
       let verdict := if outcome == .refuted then "refuted" else "no refutation found"
       let outlineText ← if outcome == .refuted then Ffi.proofOutline else pure ""
       let outline : MessageData :=

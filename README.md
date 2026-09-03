@@ -82,11 +82,24 @@ This follows `smt`. Under `[*]` a hypothesis with no first-order reading is skip
 rather than being fatal, which is what makes sweeping reasonable; one you name
 explicitly is not.
 
-**Not translated: polymorphism.** Vampire's logic is monomorphic, and lean-smt's
-monomorphisation pass is not ported, so a polymorphic hypothesis is skipped when it is
-swept up from the context and reported when it is named as a hint. This is the largest
-remaining gap on the way in. Also not translated: arithmetic and other theories, `ite`,
-`let`, datatypes, higher-order arguments.
+**Polymorphism, with `+mono`.** Vampire's logic is monomorphic, so a goal that
+quantifies over a type or carries a typeclass has no direct reading. `vampire +mono`
+runs [lean-auto](https://github.com/leanprover-community/lean-auto)'s monomorphisation
+first — the same procedure, wired the same way, that `smt +mono` uses:
+
+    variable [Group G]
+
+    theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
+      vampire +mono [mul_assoc, one_mul, inv_mul_cancel]
+
+`G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols, which is
+a problem Vampire can take. Without `+mono` a polymorphic hypothesis is skipped when it
+is swept up from the context and reported when it is named as a hint. It is off by
+default because it changes what reaches the prover, and on a goal that is already
+first-order it is cost without benefit.
+
+Still not translated: arithmetic and other theories, `ite`, `let`, datatypes,
+higher-order arguments.
 
 ## What replays
 
@@ -122,6 +135,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     Vampire/Recognizers.lean        matching Lean terms against what translates
     Vampire/Data/Graph.lean         the dependency graph
     Vampire/Preprocess/             hints into the context, intros, negate the goal
+    Vampire/Preprocess/Mono.lean    monomorphisation, by way of lean-auto
     Vampire/Translate.lean          the translation monad and traversal
     Vampire/Translate/Term.lean     the intermediate representation
     Vampire/Translate/Prop.lean     connectives, quantifiers, equality

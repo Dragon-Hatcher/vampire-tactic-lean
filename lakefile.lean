@@ -28,6 +28,12 @@ package vampire where
 
 require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
 
+-- Monomorphisation. `Vampire/Preprocess/Mono.lean` is a port of lean-smt's
+-- `Smt/Preprocess/Mono.lean`, which drives auto's `runMono`; the pinned tag is the one
+-- lean-smt itself pins for this toolchain.
+require auto from git
+  "https://github.com/leanprover-community/lean-auto.git" @ "v4.33.0"
+
 @[default_target] lean_lib Vampire where
   globs := #[.one `Vampire, .submodules `Vampire]
   -- The tactic runs in the elaborator, so the FFI symbols must be available to the

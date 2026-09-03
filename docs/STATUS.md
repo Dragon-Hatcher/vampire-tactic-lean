@@ -47,9 +47,11 @@ outline of the refutation.
 
 ## What does not
 
-- **Polymorphism.** Vampire's logic is monomorphic; lean-smt's monomorphisation pass is
-  not ported. A polymorphic hypothesis swept up from the context is skipped; one named
-  as a hint is reported. **This is the largest remaining gap on the way in.**
+- **Polymorphism, without `+mono`.** Vampire's logic is monomorphic. `vampire +mono`
+  runs lean-auto's monomorphisation, ported from lean-smt's `Smt/Preprocess/Mono.lean`
+  and wired in the same way — it replaces `pushHintsToCtx`, `intros` and `negateGoal`,
+  because auto's procedure does all three itself. Without it a polymorphic hypothesis
+  swept up from the context is skipped and one named as a hint is reported.
 - **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
 - **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
