@@ -1,5 +1,6 @@
 import Lean
 import VampLean
+import Vampire.Bridge
 import Vampire.Proof
 import Vampire.Support
 
@@ -52,12 +53,16 @@ standalone file and this is working inside a goal:
 * **A script stops when the goal closes.** The generated file is one block per lemma
   and assumes every line has a goal to act on.
 
-Two scripts are transposed rather than copied. Multi-clause clausification takes its
-clauses out of the conjunction by projection, because the generator shares one
-destructuring across every conclusion drawn from the same parent. And the `ennf` script
-gets the `first | exact h | grind` its three sibling normal forms already have, in place
-of a bare `exact h` that assumes VampLean and Vampire agree on the order of the
-disjuncts — they do not always.
+Three scripts are transposed rather than copied. Multi-clause clausification closes with
+`vampire_finish_clausify`, which splits the conjunction `cnfify` produced and looks for
+the clause it wants, because the generator sizes one shared destructuring to Vampire's
+own clause count and VampLean's `cnfify` need not split the same way. The quantifier
+reordering `outputReorderIfNeeded` inserts is done by introducing the goal's binders and
+reverting them in the prenex order, rather than by stating the permutation as an `Iff`
+and rewriting with it — the same permutation, without a higher-order rewrite to find.
+And the `ennf` script gets the `first | exact h | grind` its three sibling normal forms
+already have, in place of a bare `exact h` that assumes VampLean and Vampire agree on
+the order of the disjuncts — they do not always.
 
 AVATAR needs no `{sA : Prop}` binders at all. A split proposition is introduced by a
 definition step as `let sAv := C`, so it *is* `C`; the replay simply uses `C`. The
@@ -66,20 +71,22 @@ rescanned the block once per declaration — have no counterpart here.
 
 ## What is not ported
 
-* **The definition introductions** — predicate, function, and the folding that follows
-  them. Like skolemisation they bring a symbol into the proof, but through a `let` whose
-  body is a formula rather than a witness.
 * **Theory axioms.** The generated file emits a Lean `axiom` for each; a tactic cannot.
 * **`EVALUATION`**, whose script is `norm_num1` and `our_int_not_lt` — Mathlib-backed,
   and gone since VampLean dropped Mathlib. The translation does not produce arithmetic
   either.
-* **`rectify` with a non-identity renaming**, and the quantifier reordering
-  `outputReorderIfNeeded` inserts when prenexing changes the variable order.
-* **Skolem functions** — an existential under a universal. `Classical.skolem` is the
-  missing ingredient.
+* **`rectify`'s recorded renamings.** `LeanChecker::rectify` emits a `conv … rw [rN]`
+  per binder group whose substitution is not the identity, built from the information
+  the inference replayer records. Those renamings are not exported; `symm_match`, and a
+  fallback that reapplies the premise under the conclusion's own binders, cover the
+  alpha-equivalent and the permuted cases between them.
 * **The `bv_decide` encoding of the SAT refutation**, which the generator falls back to
   when the solver's derivation is unavailable. Replaying the derivation is the path this
   fork added and the one taken here.
+
+The definition introductions — predicate, function, and the folding that follows them —
+and the skolemisation of an existential under a universal *are* ported; see
+`.predicateDefinition`, `.functionDefinition`, `.definitionFoldingPred` and `skolemise`.
 
 A step needing one of these is reported by name and unit number rather than guessed at.
 -/
@@ -522,6 +529,22 @@ namespace Replay
 
 open Tac Lean.Parser.Tactic
 
+/-- The sorts of the variables a term mentions, read off the argument positions of the
+symbols they sit under. A variable at the top of the term is not covered — nothing
+encloses it — which is what `Step.rangeSorts` is for. -/
+private partial def argSortsIn (syms : Symbols) : FTerm → Std.HashMap Nat Nat →
+    Std.HashMap Nat Nat
+  | .var _, acc => acc
+  | .app f args, acc => Id.run do
+    let argSorts := ((syms.funs[f]?).map (·.argSorts)).getD #[]
+    let mut acc := acc
+    for i in [0:args.size] do
+      match args[i]? with
+      | some (.var v) => if let some sort := argSorts[i]? then acc := acc.insert v sort
+      | some a => acc := argSortsIn syms a acc
+      | none => pure ()
+    return acc
+
 /-- The tactic script for a derived step, ported from `LeanChecker`.
 
 The `intro`/`have`/tactic shape is `genericNPremiseInference`; the rest are the
@@ -553,6 +576,14 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
         if !inScope.contains v then needed := needed.insert v
     let mut sortOf : Std.HashMap Nat Nat := {}
     for (v, sort) in p.vars do sortOf := sortOf.insert v sort
+    -- `rangeSorts` covers a substitution that sends a premise variable straight to
+    -- another variable; one buried inside a compound image — `v0 ↦ f v7` — is not
+    -- there, and need not be a variable of either unit. `LeanChecker` never has to ask:
+    -- it prints such a variable as `default` and lets Lean read the sort off the
+    -- argument position it lands in. The witness is built before the term is
+    -- elaborated, so the same reading is done here, off the symbol's declared
+    -- argument sorts.
+    for t in terms do sortOf := argSortsIn syms t sortOf
     for (v, sort) in s.rangeSorts do sortOf := sortOf.insert v sort
     let mut m : Std.HashMap Nat Term := {}
     for v in needed do
@@ -569,9 +600,14 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       m := m.insert v (← exprToSyntax w)
     return fun v => m[v]?
   -- `have iN := hN t₁ t₂ …`, for every premise.
-  let instantiations (fallbackToOwnVars : Bool) : TermElabM (Array (TSyntax `tactic)) := do
+  -- `upTo` bounds how many premises are instantiated. `LeanChecker::definitionUnfolding`
+  -- instantiates only the first — the rest are the defining equations, used by the
+  -- `rewrite` lines — and asking for a witness for a premise whose `have` is then
+  -- thrown away can fail over a sort that never mattered.
+  let instantiations (fallbackToOwnVars : Bool) (upTo : Nat := premises.size) :
+      TermElabM (Array (TSyntax `tactic)) := do
     let mut tacs := #[]
-    for k in [0:premises.size] do
+    for k in [0:min upTo premises.size] do
       let terms :=
         match s.insts[k]? with
         | some inst => inst.terms
@@ -600,6 +636,20 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       else `(tactic| grind only))
     return tacs
   | .generic =>
+    -- `genericInference`'s script is a bare `grind`, and that is what a rule falling
+    -- through `LeanChecker`'s switch gets. Where such a step has a single premise the
+    -- structural bridge gets first refusal: these rules are mostly *weakenings* —
+    -- `pure predicate removal` drops the literals of a predicate that only ever occurs
+    -- with one polarity and leaves the rest of the formula alone — and dropping
+    -- conjuncts, reordering junctions and reorienting equations is precisely what the
+    -- bridge does without searching for it. `grind` is asked to rediscover that, and on
+    -- a formula of any size it runs out of budget rather than out of truth.
+    --
+    -- This is a deviation: the reference has no such fallback and fails these steps too.
+    -- `grind` stays behind it, so nothing that passed before can stop passing.
+    if premises.size == 1 then
+      return #[← `(tactic| intro $h:ident),
+               ← `(tactic| first | vampire_bridge $h | grind)]
     return #[← `(tactic| grind)]
   | .ennf =>
     -- `LeanChecker` writes a bare `exact h` here, unlike the sibling normal forms. That
@@ -643,19 +693,49 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
                    | symm_match using $h
                    | $byPermutation)]
   | .clausify =>
+    -- `LeanChecker::outputReorderIfNeeded`.
+    --
+    -- `prenexify` hoists the parent's universal quantifiers in an order set by the
+    -- shape of the formula, which need not be the ascending order the conclusion
+    -- states its own binders in. When they differ, the clause the transformation
+    -- produces and the goal are one permutation of their `∀` prefix apart —
+    -- alpha-equivalent, but not something `assumption` can see past. The generated
+    -- file states the permutation as an `Iff` and `rw`s the goal's prefix into the
+    -- prenex order; the same reordering is done here by introducing the binders in the
+    -- order the goal has them and reverting them, one at a time, in the order the
+    -- prenexed clause wants — which leaves exactly the permuted goal, and needs no
+    -- higher-order rewrite to be found.
+    -- `s.splits.isEmpty` is the invariant this relies on rather than a case to handle:
+    -- the goal is introduced binder by binder, so a split hypothesis in front of the
+    -- `∀` prefix would be bound under a variable's name. Clausification runs in
+    -- preprocessing, before AVATAR ever names a component, so a clausified conclusion
+    -- holds under no split — and if that ever stops being true the reorder is skipped
+    -- rather than applied to the wrong thing.
+    let reorder : Array (TSyntax `tactic) ←
+      if s.splits.isEmpty && s.prenexOrder.size == s.vars.size
+         && s.prenexOrder != s.prenexOrder.qsort (· < ·) then do
+        let ascIds := s.vars.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+        let mut tacs ← intros ascIds
+        -- Each `revert` puts one binder back at the *front*, so reverting in reverse
+        -- prenex order rebuilds the prefix in prenex order. One at a time: `revert`
+        -- given several names orders them by their position in the context, which is
+        -- the order being permuted away from.
+        for v in s.prenexOrder.reverse do
+          tacs := tacs.push (← `(tactic| revert $(mkIdent (varName v)):ident))
+        pure tacs
+      else pure #[]
     if s.cnfCount <= 1 then
-      return #[← `(tactic| intro $h:ident),
-               ← `(tactic| try simp only),
-               ← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
-                     try (first | assumption | trivial))]
+      return #[← `(tactic| intro $h:ident), ← `(tactic| try simp only)] ++ reorder ++
+              #[← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
+                      try (first | assumption | trivial))]
     -- The parent clausifies into several clauses, of which this step is one. The
     -- generated file shares one destructuring across all of them by putting it in the
     -- enclosing block, sized to Vampire's clause count; here the shape is only known
     -- once `cnfify` has run, so `vampire_finish_clausify` looks instead.
-    return #[← `(tactic| intro $h:ident),
-             ← `(tactic| prenexify at $h:ident),
-             ← `(tactic| cnfify at $h:ident),
-             ← `(tactic| vampire_finish_clausify)]
+    return #[← `(tactic| intro $h:ident)] ++ reorder ++
+            #[← `(tactic| prenexify at $h:ident),
+              ← `(tactic| cnfify at $h:ident),
+              ← `(tactic| vampire_finish_clausify)]
   | .unusedPredDefRemoval =>
     return #[← `(tactic| intro $h:ident), ← `(tactic| simp only [$h:ident, imp_self, implies_true])]
   | .avatarContradiction =>
@@ -667,7 +747,7 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- in the direction the recorded left-hand side says; grind.
     let ids := (Array.range premises.size).map hyp ++ conclusionBinders
     let mut tacs ← intros ids
-    let insts ← instantiations true
+    let insts ← instantiations true (upTo := 1)
     if h : 0 < insts.size then tacs := tacs.push insts[0]
     for k in [1:premises.size] do
       let eq := hyp k
@@ -793,26 +873,32 @@ def bridgeInput (i : Interp) (syms : Symbols) (s : Step) (src : Input) : TermEla
   match src with
   | .hypothesis h =>
     if ← isDefEq (← inferType h) want then return h
-    -- The two can differ by more than orientation: Vampire states a junction in the
-    -- order it *prints*, which is the reverse of the order it holds it in, so a
-    -- conjunction can come back commuted as well as an equation reoriented. `grind`
-    -- with the hypothesis in context settles both; `grind only [h]` cannot, because a
-    -- hypothesis is not something it can extract a pattern from.
-    let vh := mkIdent `vh
-    -- `ac_nf0` first: the difference is usually nothing but the order of a junction's
-    -- arguments, and putting both sides in the same AC normal form settles that far
-    -- more reliably than asking `grind` to reason under the quantifiers.
-    proveBy want
-      #[← `(tactic| have $vh:ident := $(← exprToSyntax h)),
-        -- Rarely needed now that the export undoes Vampire's junction reversal and its
-        -- reorientation of input equations, but a hypothesis can still reach Vampire in
-        -- a shape it normalises further.
-        ← `(tactic| first
-              | exact $vh
-              | (ac_nf0 at $vh:ident; ac_nf0; assumption)
-              | grind)]
-      m!"input step {s.number}, whose Lean hypothesis is{indentD (← inferType h)}\n\
-        and whose statement as Vampire holds it is{indentD want}"
+    -- The two differ by the rendering the export applies on the way out: every `AND`
+    -- and `OR` argument list is reversed, mirroring `LeanPrinter::printFormula`, and
+    -- since Vampire holds a junction as a binary tree that mirrors the whole tree —
+    -- `a ∧ (b ∧ c)` comes back as `(c ∧ b) ∧ a`. Equations can be reoriented too.
+    --
+    -- `Vampire.Bridge` walks the two types together and builds the proof from that
+    -- correspondence. It is done here rather than by a tactic because the tactics are
+    -- being asked to find a known permutation by search, and on a real formula they run
+    -- out of budget rather than out of truth: on the three problems this was failing,
+    -- `ac_nf0` exhausted `simp`'s step limit and `grind` exhausted its case-split and
+    -- E-matching limits.
+    match ← Bridge.tryTransport want h with
+    | .inl e => return e
+    | .inr why =>
+      -- Still worth a search: the bridge only knows the shapes the export produces, and
+      -- a hypothesis can reach Vampire in one it normalised further.
+      let vh := mkIdent `vh
+      proveBy want
+        #[← `(tactic| have $vh:ident := $(← exprToSyntax h)),
+          ← `(tactic| first
+                | exact $vh
+                | (ac_nf0 at $vh:ident; ac_nf0; assumption)
+                | grind)]
+        m!"input step {s.number}, whose Lean hypothesis is{indentD (← inferType h)}\n\
+          and whose statement as Vampire holds it is{indentD want}\n\
+          the structural bridge said:{indentD why}"
   | .definition d =>
     let dStx ← exprToSyntax d
     proveBy want
@@ -974,29 +1060,6 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
   let some e := last | throwError "vampire: empty SAT derivation"
   return e
 
-/-- The clauses a formula produced, split apart and AC-normalised.
-
-`LeanChecker::clausify` destructures a parent once and lets every conclusion drawn from
-it share the result; redoing the destructuring per conclusion turned out to be most of
-the replay's cost, because `cnfify` is not cheap and a parent can yield dozens of
-conclusions. -/
-partial def clausesOf (parent : Expr) (what : MessageData) : TermElabM (Array Expr) := do
-  let cnf ← Tac.transformHyp parent
-    (fun v => do return #[← `(tactic| prenexify at $v:ident), ← `(tactic| cnfify at $v:ident)])
-    what
-  let parts ← split cnf
-  parts.mapM fun c =>
-    Tac.transformHyp c (fun v => do return #[← `(tactic| ac_nf0 at $v:ident)]) what
-where
-  /-- Take a nested conjunction apart. `whnf` is deliberately not used: it would unfold
-  the `let`-bound definitions, which is exactly what the `let` exists to prevent. -/
-  split (h : Expr) : TermElabM (Array Expr) := do
-    let ty ← instantiateMVars (← inferType h)
-    if ty.isAppOf ``And then
-      return (← split (← mkAppM ``And.left #[h])) ++ (← split (← mkAppM ``And.right #[h]))
-    else
-      return #[h]
-
 /-- Bind each skolem symbol with a `let`, then continue inside their scope.
 
 A `let` scopes over what follows it, so the rest of the replay has to happen inside. -/
@@ -1020,8 +1083,6 @@ structure State where
   definedFns : Std.HashMap Nat Expr := {}
   /-- The symbols the proof has bound so far, to be abstracted at the end. -/
   bound : Array Expr := #[]
-  /-- Per parent unit, the clauses its clausification produced. -/
-  clauses : Std.HashMap Nat (Array Expr) := {}
   last : Option Expr := none
 
 /--

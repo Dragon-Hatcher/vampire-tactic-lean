@@ -166,6 +166,11 @@ structure Step where
   rangeSorts : Array (Nat × Nat)
   /-- For a clausification, how many clauses the parent produced. -/
   cnfCount : Nat
+  /-- For a clausification, the order `prenexify` hoists the parent's universal
+  quantifiers into, restricted to the conclusion's own variables. The conclusion binds
+  them ascending, so when this is not ascending the two prefixes are a permutation
+  apart — which is what `LeanChecker::outputReorderIfNeeded` rewrites away. -/
+  prenexOrder : Array Nat
   /-- For a definition unfolding, which way round each rewriting premise is used. -/
   rewriteForwards : Array Bool
   /-- For an AVATAR definition: the variable named, and what it stands for. -/
@@ -381,6 +386,10 @@ def readUnit : M Unit := do
   for _ in [0:nPremises] do premises := premises.push (← next)
   let statement ← readForm
   let cnfCount ← if handler == .clausify then next else pure 0
+  let mut prenexOrder : Array Nat := #[]
+  if handler == .clausify then
+    let n ← next
+    for _ in [0:n] do prenexOrder := prenexOrder.push (← next)
   let mut rewriteForwards : Array Bool := #[]
   if handler == .definitionUnfolding then
     let n ← next
@@ -437,7 +446,8 @@ def readUnit : M Unit := do
   let rangeSorts ← readPairs (← next)
   let step : Step :=
     { number, handler, ruleName, inputType, isClause, vars, splits, premises,
-      statement, insts, rangeSorts, cnfCount, rewriteForwards, splitVar, splitBody, satClause,
+      statement, insts, rangeSorts, cnfCount, prenexOrder, rewriteForwards, splitVar,
+      splitBody, satClause,
       rewrites, introSplits, parentArgs, satParents, derivation, skolems,
       definedSymbol, definedParams, definedBody, definedTerm }
   modify fun s => { s with steps := s.steps.push step }

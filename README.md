@@ -1,39 +1,42 @@
 # `vampire` tactic for Lean 4
 
 A Lean tactic that discharges goals with the Vampire theorem prover and replays the
-result as a kernel-checked Lean proof.
+refutation as a kernel-checked Lean proof.
 
     goal ─▶ preprocess ─▶ translate ─▶ compile ─▶ Vampire ─▶ refutation ─▶ Lean proof
-              done          done        done       done         done        partial
 
-**Status: goals are translated and Vampire refutes them; replaying an arbitrary
-refutation as a Lean proof is not implemented yet.** `vampire` runs the whole pipeline
-and admits a refuted goal with a warning, so the proof depends on `sorryAx` and says so.
+The whole loop runs in process, and the proof is a real proof: no `sorry`, and nothing
+added to the trusted base.
+
+    theorem chained (α : Type) (f : α → α) (P : α → Prop) (a : α)
+        (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
+      vampire [*]
+
+    #print axioms chained
+    -- 'chained' depends on axioms: [propext, Classical.choice, Quot.sound]
+
+`vampire?` takes the same hints, shows what the prover was given and the refutation it
+found, and leaves the goal alone:
 
     example (α : Type) (f : α → α) (P : α → Prop) (a : α)
         (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
-      vampire?
+      vampire? [*]
 
     vampire: the problem, as Vampire received it:
       1. 'P'(a) [input(axiom)]
       2. ! [X0 : 'α'] : ('P'(X0) => 'P'(f(X0))) [input(axiom)]
       3. ~'P'(f(f(a))) [input(axiom)]
     refuted
+    refutation:
+      4  flattening  [3]  4. ~'P'(f(f(a))) [flattening 3]
+      5  ennf transformation  [2]  5. ! [X0 : 'α'] : ('P'(f(X0)) | ~'P'(X0)) [...]
+      ...
+      11  forward subsumption resolution  [10,6]  11. $false [...]
 
-`vampire?` shows what the prover was given and leaves the goal alone. What it prints is
-Vampire's own rendering of the units it holds — evidence about the transfer, produced at
-the far end of it.
+What it prints is Vampire's own rendering of the units it holds — evidence about the
+transfer, produced at the far end of it.
 
-The replay half works, on the shape it handles:
-
-    theorem resolution_two_step (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by
-      vampire_replay
-
-    info: vampire: closed by a 5-step refutation replayed from the prover
-    info: 'resolution_two_step' does not depend on any axioms
-
-No `sorry` and no axioms at all: propositional resolution replays as `Or.elim` and
-`absurd`, both constructive.
+`set_option vampire.timeout n` gives the prover `n` seconds to search (default 10).
 
 ## Design
 
@@ -60,6 +63,12 @@ No `sorry` and no axioms at all: propositional resolution replays as `Or.elim` a
   and tactic `Syntax` rather than as source text, including this fork's own changes to
   those scripts. The tactics themselves come from VampLean, so this library owns
   translation and replay, not the inference-level lemmas.
+- **Where a formula has to be reconciled, do it structurally.** The generated file is a
+  file: it can state a junction in whatever order it likes, because both ends of every
+  step are its own. A tactic has the user's hypothesis at one end, in the shape the user
+  wrote it, and Vampire's recorded formula at the other, in the shape the exporter
+  renders it. `Vampire/Bridge.lean` walks the two together and builds the proof from the
+  correspondence rather than handing the difference to a search procedure.
 
 ## What translates
 
@@ -75,28 +84,43 @@ explicitly is not.
 
 **Not translated: polymorphism.** Vampire's logic is monomorphic, and lean-smt's
 monomorphisation pass is not ported, so a polymorphic hypothesis is skipped when it is
-swept up from the context and reported when it is named as a hint. Also not translated:
-arithmetic and other theories, `ite`, `let`, datatypes, higher-order arguments.
+swept up from the context and reported when it is named as a hint. This is the largest
+remaining gap on the way in. Also not translated: arithmetic and other theories, `ite`,
+`let`, datatypes, higher-order arguments.
 
 ## What replays
 
-The rules the ported handlers cover: resolution, superposition, demodulation,
-factoring, equality resolution and factoring, subsumption resolution, the literal
-tidying rules, definition unfolding, the normal forms (ENNF, NNF, flattening, tautology
-removal), rectification, single-clause clausification, and unused predicate definition
-removal.
+The generating and simplifying rules — resolution, superposition, forward and backward
+demodulation, factoring, equality resolution and factoring, subsumption resolution, and
+the literal tidying rules — with the unifier recovered by re-running the inference
+through Vampire's own replayer, exactly as `LeanChecker` does.
 
-**Not replayed: AVATAR.** Splitting, the SAT refutation and the resolution replay of it
-this fork added are not ported, so the tactic runs Vampire with `avatar off` rather than
-producing steps it cannot replay. That costs search power on large problems and is the
-biggest piece still missing. Skolemisation, the definition introductions, multi-clause
-clausification, and `rectify` with a non-identity renaming are also unported.
-`Vampire/Reconstruct.lean` lists them, and a step that needs one is reported by name.
+Preprocessing: the normal forms (ENNF, NNF, flattening, tautology removal),
+rectification, clausification (whether the parent yields one clause or many), definition
+unfolding and folding, the predicate and function definition introductions,
+skolemisation, and unused and pure predicate definition removal.
+
+AVATAR, in full: the definitions, the components, the split clauses, the contradiction
+clauses, and the SAT refutation — replayed as this fork's explicit resolution steps
+rather than by re-solving the SAT problem in Lean.
+
+**Not replayed.** Theory axioms: the generated file emits a Lean `axiom` for each, which
+a tactic cannot do. Arithmetic evaluation, whose script needs `norm_num1` — Mathlib-
+backed, and gone since VampLean dropped Mathlib; the translation produces no arithmetic
+either. `rectify`'s recorded renamings, which are not exported: `symm_match` and a
+permutation fallback cover the alpha-equivalent and reordered cases between them. And
+the `bv_decide` encoding of the SAT refutation, which the generator falls back to when
+the solver's derivation is unavailable.
+
+A step needing something unported is reported by name and unit number rather than
+guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
 
 ## Layout
 
     Vampire.lean                    library root
     Vampire/Attribute.lean          the `@[vampire_translate]` registry
+    Vampire/Recognizers.lean        matching Lean terms against what translates
+    Vampire/Data/Graph.lean         the dependency graph
     Vampire/Preprocess/             hints into the context, intros, negate the goal
     Vampire/Translate.lean          the translation monad and traversal
     Vampire/Translate/Term.lean     the intermediate representation
@@ -106,20 +130,32 @@ clausification, and `rectify` with a non-identity renaming are also unported.
     Vampire/Translate/Build.lean    compile into Vampire, across the FFI
     Vampire/Ffi.lean                typed bindings to the embedded prover
     Vampire/Proof.lean              the refutation, read back as structured data
+    Vampire/Bridge.lean             reconciling two renderings of the same formula
+    Vampire/Support.lean            tactics the replay needs and the generated file does not
     Vampire/Reconstruct.lean        the port of Vampire's Lean code generator
     Vampire/Tactic.lean             `vampire` and `vampire?`
     ffi/vampire_ffi.cpp             environment, reset, threading
     ffi/vampire_build.cpp           builds a translated problem, runs it
     ffi/vampire_proof.cpp           exports the refutation as structured data
+    bench-tptp/                     the wider TPTP benchmark and its scripts
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
     docs/STATUS.md                  working notes
 
-## Benchmark
+## Benchmarks
 
-`docs/STATUS.md` describes a sweep over the `fullProof` statements of the paper's
-generated proofs, with `vampire` in place of the proof. It is not a replay of those
-proofs — the statement is re-translated and a fresh search is run — which is what makes
-it a test of this port rather than of the generated files.
+Both take a `fullProof` statement out of a reference-generated proof, replace the proof
+with `vampire [*]`, and check with `#print axioms` so a `sorryAx` counts as a failure.
+Neither replays the recorded proof: the statement is re-translated and a fresh search is
+run, which is what makes them a test of this port rather than of the generated file.
+
+| | problems | pass |
+| --- | ---: | ---: |
+| the paper's set (`../bodingbauer-etall/bench/work`) | 57 | **57** |
+| `bench-tptp/`, that set plus 139 more | 196 | **191** |
+
+The five that do not pass are two skolemisations whose parent bundles an unrelated
+existential and three that exceed the harness's 150s cap; `bench-tptp/README.md` has
+each one and what is understood about it, and the scripts to reproduce the run.
 
 ## Building against Vampire
 

@@ -53,22 +53,48 @@ directory, pulls the preamble `variable` blocks and the type between `theorem fu
 by spelling `+`/`-` as `p`/`m` before sanitizing — collapsing both to `_` silently merges
 the pair into one file and only tests one of them.
 
-## Results as of the last full run (438 problems: 57 original + 138 newly generated)
+## Results as of the last full run (196 problems: 57 original + 139 newly generated)
 
-Original 57: **56/57.** New 138: **128/138.** Every failure, and what's understood about
-each:
+Original 57: **57/57.** New 139: **134/139.** The newly-generated count moves between
+runs — Vampire is nondeterministic under a wall-clock limit, so which problems it
+refutes within `gen.sh`'s budget, and therefore which get a test at all, is not fixed.
 
-- **`P_SWC153_1`, `Q_ALG037p1`, `Q_BIO006p1` — input-step bridge.** An `input` step
-  proves Vampire's own recorded formula for an axiom/negated-conjecture follows from the
-  Lean hypothesis translated from the same source. The two are logically identical but
-  not syntactically identical: Vampire's own formula printer reverses junction argument
-  order from how it's held internally, and equations can come back reoriented — both
-  nested arbitrarily deep inside quantifiers/negations. Two direct fixes (reverse
-  junctions on the builder side; flip equality orientation on export) each fix one of
-  these cases and break `ALG014` in the original 57. There is no single global
-  convention that's right for every problem; the real fix is a structural bridge (like
-  `rectify`'s `symm_match`, but tolerant of commutativity/associativity) rather than a
-  fixed printing convention. Deferred — see `bridgeInput` in `Vampire/Reconstruct.lean`.
+`Q_MED007p1` used to be on this list, as "clausification, binder order": after
+`vampire_finish_clausify` split and AC-normalised, the matching clause was
+alpha-equivalent to the goal but bound its variables in a different *position*
+(`∀ v0 v2 v3` against the clause's own `∀ v0 v3 v2`), which `assumption` cannot see
+past. That was diagnosed here as wanting a `grind` fallback. It was not: the reference
+generator handles it, with `LeanChecker::outputReorderIfNeeded`, and the port simply
+did not have that function. It does now — the prenex variable ordering is exported for
+clausification steps and the goal's binder prefix is permuted into it — and the problem
+passes with no fallback. Grep the generated `MED007+1.lean` for `have reorder` to see
+the reference doing the same thing.
+
+`P_SWC153p1`, `Q_ALG037p1` and `Q_BIO006p1` used to be on this list as the
+"input-step bridge", and `Q_NUN081p1` and `Q_BIO006p1` as generic steps `grind` could
+not close. All four are fixed by `Vampire/Bridge.lean`, and the diagnosis recorded here
+before was right about the cause and wrong about the remedy.
+
+The cause: an `input` step has to prove Vampire's recorded formula for a unit from the
+Lean hypothesis it was translated from, and `Exporter::writeFormula` reverses every
+`AND`/`OR` argument list to mirror `LeanPrinter::printFormula`. Vampire holds a junction
+as a binary tree, so that mirrors the *whole* tree — `a ∧ (b ∧ c)` comes back as
+`(c ∧ b) ∧ a`. The reversal cannot be dropped globally, because derived steps need it:
+VampLean's `nnf_transformation` and friends were written to produce exactly the order
+the generated file states. That is why both convention flips tried before each fixed one
+problem and broke another.
+
+The remedy is not a better search. Measured, on the three failures: `ac_nf0` exhausted
+`simp`'s step budget, and `grind` exhausted its case-split budget (`(splits := 9)`) and
+its E-matching budget (`(instances := 1000)`). None of them failed because the goal was
+false — all three had identical symbol multisets and identical connective counts on both
+sides, differing only in order. `Vampire/Bridge.lean` walks the two types together and
+builds the proof from the correspondence, with no search on the common path. It also
+subsumes the `grind` failures on generic single-premise steps, because
+`pure predicate removal` is a weakening — drop some conjuncts, keep the rest — which is
+the same walk.
+
+Every remaining failure, and what's understood about each:
 
 - **`Q_COM003p1`, `Q_PRO011p1` — skolemisation, parent has an extra existential.**
   Investigated at length (see the session that added this file). Concretely confirmed:
@@ -96,24 +122,6 @@ each:
   two invocations' *searches* actually diverge remains open; several hypotheses (random
   seed, conjunct order, `axiom`/`conjecture` role, time limit) were tested directly and
   ruled out.
-
-- **`Q_MED007p1` — clausification, binder order.** After `vampire_finish_clausify`
-  splits and AC-normalises, the matching split clause is alpha-equivalent to the goal
-  but its bound variables are in a different *position* (`∀ v0 v2 v3` vs the clause's
-  own `∀ v0 v3 v2`), which plain `assumption` can't see past. A `first | assumption |
-  grind` fallback in `Vampire/Support.lean` fixed it (`grind` needs no quantifier search
-  once the clause is fully split and ground-normalised) but was reverted with the rest
-  of this session's speculative fixes; safe to reapply on its own if wanted, since its
-  reasoning doesn't depend on the unresolved COM003 question.
-
-- **`Q_NUN081p1` — generic step, `grind` can't E-match through nested `∃`.** Same root
-  cause as the `Xor'`/`ennf` fix already in the tree: `grind`'s E-matching can't trigger
-  on a hypothesis whose leading `∀` has no atom to match, buried under nested
-  existentials. Specializing the hypothesis at the goal's own leading binders before
-  calling `grind` fixed it (also reverted with the rest). The one wrinkle: use only the
-  statement's *leading* `∀`-bound prefix, not every free variable (`s.vars` includes
-  ones bound further in, under their own `∃`) — the same distinction `.rectify`'s
-  permutation fallback already draws.
 
 - **`Q_ITP021p1`, `Q_PRD001p1`, `Q_SYN036p1`, `Q_SYN472p1` — harness timeout, ~160–180s.**
   Not investigated. Could be Vampire genuinely taking that long on the replay side

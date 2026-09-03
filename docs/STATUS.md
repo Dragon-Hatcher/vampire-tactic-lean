@@ -53,14 +53,27 @@ outline of the refutation.
 - **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
 - **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
-- **The input-step bridge**, when Vampire's own recorded formula for an axiom differs
-  from the Lean hypothesis by more than orientation/associativity — see
-  `bench-tptp/README.md`, "input-step bridge".
 - **A skolemisation whose parent bundles an existential unrelated to the symbol it
   introduces** (typically a not-yet-folded predicate-definition body sharing the
   formula) — see `bench-tptp/README.md`, "skolemisation, parent has an extra
   existential". Understood in some depth but not fixed; the fix that was tried and
   reverted is documented there.
+
+**The input-step bridge** is `Vampire/Bridge.lean`: a structural congruence prover that
+proves Vampire's recorded formula for an input unit from the Lean hypothesis it was
+translated from, by walking the two types together rather than searching. The difference
+it reconciles is one the export makes deliberately — `writeFormula` reverses every
+junction to mirror `LeanPrinter`, and since Vampire holds a junction as a binary tree
+that mirrors the whole tree — plus equations reoriented by the term ordering. It is
+modelled on VampLean's `symmUnify`, which `rectify` uses through `symm_match` and which
+gets everything except the junction cases: at an application node it recurses
+positionally, so it takes `A ∧ B` against `B ∧ A` down `A` against `B`. The bridge also
+backs `grind` on generic single-premise steps, where the rule is usually a weakening.
+
+The quantifier reordering `LeanChecker::outputReorderIfNeeded` inserts into a
+clausification, when prenexing the parent changes the order of its universal binders, is
+now ported: `ffi/vampire_proof.cpp` exports the `VariablePrenexOrderingTree` ordering it
+computes, and `.clausify` permutes the goal's `∀` prefix into it.
 
 Predicate and function definition introductions, and `rectify` with a non-identity
 renaming (including the quantifier-permutation case, not just plain alpha-renaming), are
@@ -117,18 +130,17 @@ throw and name its step — and doing so immediately moved the blame for three p
 from skolemisation, where it had been wrongly placed, to `nnf transformation`, which is
 where the ordering bug was.
 
-**Currently 56/57** on this benchmark (the one that doesn't pass, `SWC153`, is the
-input-step bridge case above).
+**Currently 57/57** on this benchmark. `SWC153`, the last holdout, was the input-step
+bridge; `Vampire/Bridge.lean` closed it.
 
 ### `bench-tptp/`
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
 statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
-**128/138**. Every failure and what's understood about it — including the two `grind`
-fallbacks (clausification binder order, generic-step E-matching) that were found,
-verified, and then reverted along with an unresolved skolemisation fix, to keep this
-tree at a state that's fully understood rather than partially patched — is in
-`bench-tptp/README.md`. Scripts to regenerate and rerun it are there too.
+**134/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
+Scripts to regenerate and rerun it are there too. The clausification binder-order
+failure that used to be on that list is fixed: it wanted `outputReorderIfNeeded`, which
+the port was missing, not the `grind` fallback it had been attributed to.
 
 ## Things that will bite
 

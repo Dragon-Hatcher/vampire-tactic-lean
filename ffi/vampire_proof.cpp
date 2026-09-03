@@ -920,6 +920,30 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
           n = env.proofExtra.get<Inferences::CNFTransformationInferenceExtra>(p).number;
       }
       e.put(n);
+
+      // The order `prenexify` will hoist the parent's universal quantifiers into.
+      //
+      // `LeanChecker::outputReorderIfNeeded` builds exactly this ordering, with the
+      // same `VariablePrenexOrderingTree` the skolemisation export already uses, and
+      // filters it to the conclusion's own variables. When the result is not ascending
+      // the generated file rewrites the goal's binder prefix into it, because the
+      // conclusion is stated `∀` in ascending order while the prenexed hypothesis
+      // binds in this one, and `assumption` cannot see past the permutation.
+      std::vector<unsigned> prenexOrder;
+      {
+        UnitIterator ps = u->getParents();
+        if (ps.hasNext()) {
+          Unit *parent = ps.next();
+          if (!parent->isClause()) {
+            VariablePrenexOrderingTree tree;
+            tree.buildTreeFromFormula(parent->getFormula(), Kernel::FORALL);
+            for (unsigned v : tree.determineVariableOrdering())
+              if (varSorts.findPtr(v) != nullptr) prenexOrder.push_back(v);
+          }
+        }
+      }
+      e.put(static_cast<uint32_t>(prenexOrder.size()));
+      for (unsigned v : prenexOrder) e.put(v);
     }
 
     // Which way round each rewriting premise of a definition unfolding is used, which
