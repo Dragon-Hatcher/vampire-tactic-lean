@@ -403,7 +403,15 @@ statement:{indentD type}
         script:{indentD (MessageData.joinSep (tacs.map (·.raw)).toList Format.line)}"
   unless remaining.isEmpty do
     throwError "vampire: {what} left {remaining.length} goal(s) unproved      {indentD type}"
-  instantiateMVars mv
+  -- Ascribed, so that `inferType` on the result gives back `type` rather than whatever
+  -- the tactic happened to leave. A script ending in `exact h` produces `fun h => h`,
+  -- whose inferred type is the *premise's* — defeq to the conclusion, which is why the
+  -- tactic was accepted, but not the same expression. Definition folding is where that
+  -- bites: its script is exactly `exact h`, so the folded conclusion `… ∨ sP9 v0 v1 ∨ …`
+  -- came back as the unfolded premise, and the skolemisation downstream reads its
+  -- parent with `inferType` and saw an existential the definition was hiding. The
+  -- generated file has no such problem: it writes `change <concl> at stepN`.
+  mkExpectedTypeHint (← instantiateMVars mv) type
 
 /--
 An element of `ty`, by instance synthesis.

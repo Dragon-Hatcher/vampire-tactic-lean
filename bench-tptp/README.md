@@ -55,7 +55,7 @@ the pair into one file and only tests one of them.
 
 ## Results as of the last full run (196 problems: 57 original + 139 newly generated)
 
-Original 57: **57/57.** New 139: **134/139.** The newly-generated count moves between
+Original 57: **57/57.** New 139: **136/139.** The newly-generated count moves between
 runs — Vampire is nondeterministic under a wall-clock limit, so which problems it
 refutes within `gen.sh`'s budget, and therefore which get a test at all, is not fixed.
 
@@ -94,37 +94,38 @@ subsumes the `grind` failures on generic single-premise steps, because
 `pure predicate removal` is a weakening — drop some conjuncts, keep the rest — which is
 the same walk.
 
+`Q_COM003p1` and `Q_PRO011p1` used to be here as "skolemisation, parent has an extra
+existential", with a long diagnosis about `skolemise` assigning symbols to hoisted
+existentials by position. The position logic was never the problem. The parent really did
+have an extra existential, but because of this:
+
+    | .definitionFoldingPred =>
+        intros h0 h1
+        exact h0
+
+`stepLemma` builds the lemma's type with the *folded* conclusion, and `exact h0` is
+accepted because the two are definitionally equal — but the term it produces is
+`fun h0 h1 => h0`, and `inferType` on that gives back the *premise's* type, not the
+conclusion's. So every consumer reading the parent with `inferType` — which is what
+`skolemise` does — saw the formula with the predicate definition unfolded, existential
+and all. The generated file has no such problem: `LeanChecker::definitionFoldingPred`
+writes `change <concl> at stepN`, which re-types the hypothesis explicitly.
+
+`proveBy` now ascribes its result to the type it was asked for, which fixes it for any
+step whose script ends in `exact h` rather than only for definition folding.
+
+Worth recording that the earlier diagnosis was wrong in an instructive way. The symptom —
+witnesses lining up against the wrong existentials — is what you get either from a
+mis-ordered assignment or from a parent that has one existential too many, and the note
+above picked the first. The arity-matching fix it describes made PRO011 pass by
+compensating for the extra existential rather than removing it, which is why it did not
+fix COM003.
+
 Every remaining failure, and what's understood about each:
 
-- **`Q_COM003p1`, `Q_PRO011p1` — skolemisation, parent has an extra existential.**
-  Investigated at length (see the session that added this file). Concretely confirmed:
-  our tactic's Vampire invocation and the standalone reference binary find *different*
-  derivations for the same theorem — not from a fixed conjunct-order or `axiom`-vs-
-  `conjecture`-role difference (both tested directly and ruled out) but from something
-  in the search itself. In our derivation, some skolemisation steps' parent formula
-  contains an existential that belongs to *different* content than the symbol the step
-  actually introduces — traced concretely for COM003: the leftover existential is
-  token-for-token the same as a predicate-definition abbreviation's own body, already
-  skolemized independently under a different symbol at an earlier step. `skolemise` in
-  `Vampire/Reconstruct.lean` assigns `s.skolems` to hoisted existentials by strict
-  left-to-right position, which is wrong whenever such an unrelated existential sits in
-  front of the one the step actually wants — a real bug, confirmed by fixing it: an
-  arity-matching version (peel every existential, assign by each symbol's declared
-  arity, discard non-matches) made `PRO011` pass cleanly with no fallback needed. It did
-  *not* fully fix `COM003`: once the leftover existential is correctly set aside, the
-  witness built from it is a specific instance where the target needs the general
-  existential claim, which needs an `Exists.intro` reintroduced — `symm_match` can't do
-  that, and `grind` didn't find the (multi-level, several nested `∧`/`∨`/`∃`)
-  reconstruction within its default search. **This arity-matching fix was reverted**
-  (along with the `grind` fallback it was tested with) at the user's request, to get
-  back to a stable, understood baseline rather than leave an untested partial fix in
-  place — the diagnosis above is what to build from if this is picked back up. Why the
-  two invocations' *searches* actually diverge remains open; several hypotheses (random
-  seed, conjunct order, `axiom`/`conjecture` role, time limit) were tested directly and
-  ruled out.
-
-- **`Q_ITP021p1`, `Q_PRD001p1`, `Q_SYN036p1`, `Q_SYN472p1` — harness timeout, ~160–180s.**
-  Not investigated. Could be Vampire genuinely taking that long on the replay side
-  (`grind`/`cnfify` on a large formula), or a real hang. Worth a first look with
-  `set_option trace.vampire.timing true` to see whether it's the prover call or the
-  replay that's slow.
+- **`Q_PRD001p1`, `Q_SYN036p1`, `Q_SYN472p1` — harness timeout, ~160–180s.** The only
+  three left, and none of them is a logic failure: `one.sh` caps the tactic at 150s and
+  these run past it. Not investigated. Could be Vampire genuinely taking that long on
+  the replay side (`grind`/`cnfify` on a large formula), or a real hang. Worth a first
+  look with `set_option trace.vampire.timing true` to see whether it is the prover call
+  or the replay that is slow. (`Q_ITP021p1` was on this list and now finishes.)

@@ -55,11 +55,6 @@ outline of the refutation.
 - **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
 - **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
-- **A skolemisation whose parent bundles an existential unrelated to the symbol it
-  introduces** (typically a not-yet-folded predicate-definition body sharing the
-  formula) — see `bench-tptp/README.md`, "skolemisation, parent has an extra
-  existential". Understood in some depth but not fixed; the fix that was tried and
-  reverted is documented there.
 
 **The input-step bridge** is `Vampire/Bridge.lean`: a structural congruence prover that
 proves Vampire's recorded formula for an input unit from the Lean hypothesis it was
@@ -142,7 +137,7 @@ bridge; `Vampire/Bridge.lean` closed it.
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
 statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
-**134/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
+**136/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
 Scripts to regenerate and rerun it are there too. The clausification binder-order
 failure that used to be on that list is fixed: it wanted `outputReorderIfNeeded`, which
 the port was missing, not the `grind` fallback it had been attributed to.
