@@ -113,6 +113,13 @@ clausification, and `rectify` with a non-identity renaming are also unported.
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
     docs/STATUS.md                  working notes
 
+## Benchmark
+
+`docs/STATUS.md` describes a sweep over the `fullProof` statements of the paper's
+generated proofs, with `vampire` in place of the proof. It is not a replay of those
+proofs — the statement is re-translated and a fresh search is run — which is what makes
+it a test of this port rather than of the generated files.
+
 ## Building against Vampire
 
 The shim links `libvampire_lib.a`, a static archive added to the fork's `CMakeLists`:

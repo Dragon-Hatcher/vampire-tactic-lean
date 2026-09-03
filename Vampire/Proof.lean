@@ -82,6 +82,12 @@ inductive Handler where
   | skolemise
   /-- Contributes nothing to the proof: `LeanChecker::isUncheckedInProof`. -/
   | skipped
+  /-- `predicateDefinitionIntroduction`: `let sP v… := φ`. -/
+  | predicateDefinition
+  /-- `functionDefinitionIntroduction`: `let f v… := t`. -/
+  | functionDefinition
+  /-- `definitionFoldingPred`: the conclusion is the parent, re-stated. -/
+  | definitionFoldingPred
   /-- A rule whose handler is not ported yet. -/
   | unsupported
   deriving DecidableEq, Repr, Inhabited
@@ -100,6 +106,9 @@ def Handler.ofCode : Nat → Handler
   | 17 => .evaluation
   | 18 => .skolemise
   | 19 => .skipped
+  | 20 => .predicateDefinition
+  | 21 => .functionDefinition
+  | 22 => .definitionFoldingPred
   | _ => .unsupported
 
 /-- A function symbol, as Vampire has it. -/
@@ -177,6 +186,12 @@ structure Step where
   /-- For a skolemisation: the symbols introduced, in the order the existentials they
   replace are stripped. -/
   skolems : Array Nat
+  /-- For a definition introduction: the symbol named, the parameters it takes, and the
+  formula or term it abbreviates. -/
+  definedSymbol : Nat
+  definedParams : Array (Nat × Nat)
+  definedBody : FForm
+  definedTerm : FTerm
   deriving Inhabited
 
 /-- The symbol table the statements are written over. -/
@@ -318,7 +333,11 @@ partial def readStream : M (Array Val) := do
       let (st', f) ← popForm st
       st := st'.push (.form (if op == opForall then .all vars f else .ex vars f))
     else
-      throw s!"vampire: unknown opcode {op} in the exported proof"
+      let cur ← get
+      let from_ := if cur.pos < 16 then 0 else cur.pos - 16
+      let window := (cur.code.extract from_ (min cur.code.size (cur.pos + 8))).map (·.toNat)
+      throw s!"vampire: unknown opcode {op} at {cur.pos - 1} of {cur.code.size} \
+        inside a stream; around it: {window.toList}"
   return st
 
 def readForm : M FForm := do
@@ -381,6 +400,18 @@ def readUnit : M Unit := do
     for _ in [0:n] do rewrites := rewrites.push ((← next) == 1)
     introSplits ← readPairs (← next)
     parentArgs ← readPairs (← next)
+  let mut definedSymbol := 0
+  let mut definedParams : Array (Nat × Nat) := #[]
+  let mut definedBody : FForm := .tru
+  let mut definedTerm : FTerm := .var 0
+  if handler == .predicateDefinition then
+    definedSymbol ← next
+    definedParams ← readPairs (← next)
+    definedBody ← readForm
+  if handler == .functionDefinition then
+    definedSymbol ← next
+    definedParams ← readPairs (← next)
+    definedTerm ← readTerm
   let mut skolems : Array Nat := #[]
   if handler == .skolemise then
     let n ← next
@@ -407,7 +438,8 @@ def readUnit : M Unit := do
   let step : Step :=
     { number, handler, ruleName, inputType, isClause, vars, splits, premises,
       statement, insts, rangeSorts, cnfCount, rewriteForwards, splitVar, splitBody, satClause,
-      rewrites, introSplits, parentArgs, satParents, derivation, skolems }
+      rewrites, introSplits, parentArgs, satParents, derivation, skolems,
+      definedSymbol, definedParams, definedBody, definedTerm }
   modify fun s => { s with steps := s.steps.push step }
 
 partial def run : M Unit := do
@@ -437,7 +469,11 @@ partial def run : M Unit := do
     else if op == opUnit then
       readUnit
     else
-      throw s!"vampire: unknown top-level opcode {op} in the exported proof"
+      let st ← get
+      let from_ := if st.pos < 12 then 0 else st.pos - 12
+      let window := (st.code.extract from_ (min st.code.size (st.pos + 8))).map (·.toNat)
+      throw s!"vampire: unknown top-level opcode {op} at {st.pos - 1} of \
+        {st.code.size} in the exported proof; around it: {window.toList}"
 
 end Decode
 

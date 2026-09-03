@@ -57,6 +57,42 @@ outline of the refutation.
   and skolem functions as opposed to constants.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
 
+## Benchmark
+
+`fullProof` statements extracted from `../bodingbauer-etall/bench/work/*.lean` — the
+preamble's `variable` block plus everything between `theorem fullProof :` and `:= by` —
+with the proof replaced by `vampire`, checked with `#print axioms` so a `sorryAx` counts
+as a failure. This is not a replay of the recorded proof: the tactic re-translates the
+statement and runs a fresh search, so Vampire finds a different proof each time. That is
+what makes it a test of the port rather than of the file.
+
+Four bugs came out of it that the unit tests could not have found, all of them the same
+shape — something the generated *file* gets from being a file:
+
+1. Predicate definitions are `let`-bound, not substituted. Substituting lets `cnfify`
+   see through a definition Vampire introduced precisely so the CNF would not blow up.
+2. Definitions are *opaque* inside a step lemma — a section variable in the generated
+   file — and only `fullProof` binds the value. Two rules are exempt because they are
+   definitional: the introduction itself and definition folding.
+3. Each step is proved in a restricted context. `grind` reads the local context, and
+   ours accumulates the goal's hypotheses and every definition so far. Measured: 8ms per
+   superposition in a small context, 100ms in the goal's.
+4. Multi-clause clausification cannot be sized by Vampire's clause count, because
+   VampLean's `cnfify` need not split the same way.
+
+A fifth was a silent one: a tactic can *log* an error and admit its goal without
+throwing, so a replay announced success while the proof depended on `sorryAx`, visible
+only in `#print axioms`. `proveBy` and `transformHyp` now inspect the term they built —
+`Expr.hasSorry` is the one check that cannot be evaded.
+
+For calibration, `bench/work/ALG130+1.lean` — the *recorded* proof — checks in 8.4s under
+the same toolchain. Replaying a freshly-found proof of the same problem takes 15s, on a
+proof about 20% larger.
+
+**51 of 56 pass.** The five that do not: two where VampLean's `exists_prenex` fails on
+the parent of a skolemisation, one clausification, one input bridge, and one goal whose
+translation is not first-order.
+
 ## Things that will bite
 
 Recorded because each cost real time to find.

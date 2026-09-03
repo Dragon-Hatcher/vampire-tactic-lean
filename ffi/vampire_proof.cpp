@@ -50,6 +50,7 @@
 #include "Lib/Environment.hpp"
 #include "SATSubsumption/SATSubsumptionAndResolution.hpp"
 #include "Kernel/MLVariant.hpp"
+#include "Kernel/Ordering.hpp"
 #include "Saturation/Splitter.hpp"
 #include "Shell/FunctionDefinition.hpp"
 #include "Shell/InferenceRecorder.hpp"
@@ -114,6 +115,9 @@ enum Handler : uint32_t {
   H_EVALUATION              = 17,
   H_SKOLEMISE               = 18,
   H_SKIP                    = 19,  // `isUncheckedInProof`: contributes nothing
+  H_PREDICATE_DEFINITION    = 20,
+  H_FUNCTION_DEFINITION     = 21,
+  H_DEFINITION_FOLDING_PRED = 22,
   H_UNSUPPORTED             = 255,
 };
 
@@ -166,10 +170,9 @@ static uint32_t handlerFor(InferenceRule rule) {
     case InferenceRule::SKOLEMIZE: return H_SKOLEMISE;
     case InferenceRule::SKOLEM_SYMBOL_INTRODUCTION: return H_SKIP;
 
-    case InferenceRule::PREDICATE_DEFINITION:
-    case InferenceRule::FUNCTION_DEFINITION:
-    case InferenceRule::DEFINITION_FOLDING_PRED:
-      return H_UNSUPPORTED;
+    case InferenceRule::PREDICATE_DEFINITION: return H_PREDICATE_DEFINITION;
+    case InferenceRule::FUNCTION_DEFINITION: return H_FUNCTION_DEFINITION;
+    case InferenceRule::DEFINITION_FOLDING_PRED: return H_DEFINITION_FOLDING_PRED;
 
     default:
       return isTheoryAxiomRule(rule) || rule == InferenceRule::DISTINCTNESS_AXIOM
@@ -452,6 +455,10 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
   {
     savedAlgorithm = env.options->saturationAlgorithm();
     env.options->set("code_tree_subsumption", "off");
+    // The run that just finished installed its ordering globally, and a second
+    // algorithm cannot install another. It is harmless — the replayer sets its own
+    // ordering directly — but Vampire warns about it, so give it the slot.
+    Kernel::Ordering::unsetGlobalOrdering();
     replayer.makeInferenceEngine(is->ordering);
   }
 
@@ -525,6 +532,8 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       case H_AVATAR_SPLIT_CLAUSE: writeAvatarSplitClause(u); break;
       case H_AVATAR_REFUTATION: writeAvatarRefutation(u); break;
       case H_SKOLEMISE: writeSkolemisation(u); break;
+      case H_PREDICATE_DEFINITION: writePredicateDefinition(u); break;
+      case H_FUNCTION_DEFINITION: writeFunctionDefinition(u); break;
       default: break;
     }
   }
@@ -719,6 +728,80 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
 
     e.put(static_cast<uint32_t>(ordered.size()));
     for (unsigned sym : ordered) { e.declareFun(sym); e.put(sym); }
+  }
+
+  /// The predicate a definition introduction named, the parameters it takes, and the
+  /// formula it abbreviates. `LeanChecker::predicateDefinitionIntroduction` writes
+  /// `let sP v… := φ`; here the symbol becomes the lambda directly.
+  void writePredicateDefinition(Unit *u) {
+    InferenceStore *is = InferenceStore::instance();
+    auto &introduced = is->getIntroducedSymbols(u);
+    if (introduced.size() != 1)
+      throw ExportError("a predicate definition introduced " +
+                        std::to_string(introduced.size()) + " symbols");
+    unsigned sym = introduced.top().second;
+    Formula *body = is->formulaReplacedByIntroducedSymbol(sym);
+    if (body == nullptr) throw ExportError("a predicate definition has no body");
+    if (u->isClause()) throw ExportError("a predicate definition is a clause");
+
+    e.declarePred(sym);
+    e.put(sym);
+
+    // The parameters, which are the conclusion's universal variables in the order it
+    // binds them — rectification has already sorted them.
+    DHMap<unsigned, TermList> sorts;
+    SortHelper::collectVariableSorts(u, sorts);
+    std::vector<std::pair<unsigned, unsigned>> params;
+    if (u->getFormula()->connective() == FORALL)
+      for (auto vs : iterTraits(VSList::RefIterator(u->getFormula()->vars()->iter()))) {
+        e.declareSort(vs.second);
+        params.push_back({vs.first, vs.second.term()->functor()});
+      }
+    e.put(static_cast<uint32_t>(params.size()));
+    for (auto [v, sort] : params) { e.put(v); e.put(sort); }
+
+    size_t lenAt = e.code.size();
+    e.put(0);
+    size_t start = e.code.size();
+    e.writeFormula(body);
+    e.code[lenAt] = static_cast<uint32_t>(e.code.size() - start);
+  }
+
+  /// The function a definition introduction named, its parameters, and the term it
+  /// abbreviates — the left argument of the conclusion's equation, as
+  /// `LeanChecker::functionDefinitionIntroduction` reads it.
+  void writeFunctionDefinition(Unit *u) {
+    InferenceStore *is = InferenceStore::instance();
+    auto &introduced = is->getIntroducedSymbols(u);
+    if (introduced.size() != 1)
+      throw ExportError("a function definition introduced " +
+                        std::to_string(introduced.size()) + " symbols");
+    unsigned sym = introduced.top().second;
+    if (!u->isClause() || u->asClause()->size() != 1)
+      throw ExportError("a function definition is not a unit clause");
+    Literal *lit = (*u->asClause())[0];
+    if (!lit->isEquality()) throw ExportError("a function definition is not an equation");
+
+    e.declareFun(sym);
+    e.put(sym);
+
+    DHMap<unsigned, TermList> sorts;
+    SortHelper::collectVariableSorts(lit, sorts);
+    std::set<unsigned> vars;
+    for (unsigned v : iterTraits(sorts.domain())) vars.insert(v);
+    e.put(static_cast<uint32_t>(vars.size()));
+    for (unsigned v : vars) {
+      TermList sort = sorts.get(v);
+      e.declareSort(sort);
+      e.put(v);
+      e.put(sort.term()->functor());
+    }
+
+    size_t lenAt = e.code.size();
+    e.put(0);
+    size_t start = e.code.size();
+    e.writeTerm(lit->termArg(0));
+    e.code[lenAt] = static_cast<uint32_t>(e.code.size() - start);
   }
 
   void writeUnit(Unit *u) {

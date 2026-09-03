@@ -155,6 +155,16 @@ def run (names : Array String) (code : Array UInt32) (deciseconds : UInt32 := 10
   | 4 => return .failed s!"the proof could not be exported: {← messageRaw}"
   | _ => return .failed (← messageRaw)
 
+@[extern "lean_vampire_prover_output"]
+private opaque proverOutputRaw : BaseIO String
+
+/-- Anything the prover wrote to its own `stdout`/`stderr`.
+
+It is captured rather than let through: embedded in the elaborator it would surface in
+the editor as "Lean server printed an error", for text that is usually a note about
+strategy rather than a problem. `set_option trace.vampire.prover true` shows it. -/
+def proverOutput : BaseIO String := proverOutputRaw
+
 /-- Why the last run found no refutation — Vampire's own explanation. -/
 def message : BaseIO String := messageRaw
 

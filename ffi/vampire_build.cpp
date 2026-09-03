@@ -364,6 +364,12 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
   }
 }
 
+/** Anything the prover wrote to its own streams, which the shim captured. */
+lean_obj_res lean_vampire_prover_output(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return lean_mk_string(vampire_ffi::proverOutput().c_str());
+}
+
 /** Why the last run did not produce a proof, or how it failed. */
 lean_obj_res lean_vampire_message(lean_obj_arg) {
   vampire_ffi::EntryGuard guard;

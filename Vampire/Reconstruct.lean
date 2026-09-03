@@ -1,6 +1,7 @@
 import Lean
 import VampLean
 import Vampire.Proof
+import Vampire.Support
 
 /-!
 # Replaying a refutation as a Lean proof
@@ -112,6 +113,11 @@ structure Interp where
   pred : Nat → Option Expr
   /-- What input unit `n` stands for. -/
   input : Nat → Option Input
+  /-- The lambda an introduced predicate symbol abbreviates. Filled in as the
+  definition-introduction steps are replayed. -/
+  definedPred : Nat → Option Expr
+  /-- The lambda an introduced function symbol abbreviates. -/
+  definedFn : Nat → Option Expr
   /-- The term a skolem symbol stands for. Filled in as the skolemisation steps are
   replayed. -/
   skolem : Nat → Option Expr
@@ -137,6 +143,7 @@ private def sortExpr (i : Interp) (syms : Symbols) (s : Nat) : MetaM Expr := do
 
 private def fnExpr (i : Interp) (syms : Symbols) (f : Nat) : MetaM Expr := do
   if let some e := i.skolem f then return e
+  if let some e := i.definedFn f then return e
   let some e := i.fn f
     | throwError "vampire: the function symbol \
         '{(syms.funs[f]?).map (·.name) |>.getD (toString f)}' has no Lean meaning; \
@@ -145,6 +152,7 @@ private def fnExpr (i : Interp) (syms : Symbols) (f : Nat) : MetaM Expr := do
   return e
 
 private def predExpr (i : Interp) (syms : Symbols) (p : Nat) : MetaM Expr := do
+  if let some e := i.definedPred p then return e
   let some e := i.pred p
     | throwError "vampire: the predicate symbol \
         '{(syms.preds[p]?).map (·.name) |>.getD (toString p)}' has no Lean meaning; \
@@ -279,11 +287,76 @@ partial def termSyntax (i : Interp) (syms : Symbols) (witness : Nat → Option T
     let as ← args.mapM (termSyntax i syms witness)
     return ⟨Syntax.mkApp hdStx as⟩
 
+/-- The free variables of an expression. -/
+private partial def fvarsIn : Expr → Std.HashSet FVarId → Std.HashSet FVarId
+  | .fvar id, acc => acc.insert id
+  | .app f a, acc => fvarsIn a (fvarsIn f acc)
+  | .lam _ d b _, acc => fvarsIn b (fvarsIn d acc)
+  | .forallE _ d b _, acc => fvarsIn b (fvarsIn d acc)
+  | .letE _ t v b _, acc => fvarsIn b (fvarsIn v (fvarsIn t acc))
+  | .mdata _ e, acc => fvarsIn e acc
+  | .proj _ _ e, acc => fvarsIn e acc
+  | _, acc => acc
+
+/--
+The local context a step lemma is proved in.
+
+The generated file states each step as a top-level `theorem`, whose context is just its
+own premises. Replaying inside a goal, the context instead accumulates the user's
+hypotheses and every definition bound so far — and `grind` reads the context, so that
+accumulation is paid on every step. Measured on ALG130: 8ms per superposition in a small
+context, 100ms in the goal's.
+
+So the goal is built in a context holding only what the statement reaches, plus the
+plain variables and instances that a spliced term may mention. Proofs and definitions
+the statement does not reach are dropped.
+
+The definitions that remain lose their values. In the generated file a definition is a
+*section variable* — `variable {«_sP0» : Prop}` — inside every step theorem, and only
+`fullProof` binds it with a `let`. That opacity is not incidental: a definition names a
+formula Vampire deliberately did not expand, and a step lemma that can see through it
+gives `grind` the whole expansion to case-split. Stripping the value here restores it.
+The proof term still mentions the variable, and is still type-correct where the value is
+known, because a proof that works for an opaque `x` works for any particular one.
+-/
+def restrictedContext (type : Expr) (opaqueLets : Bool) :
+    MetaM (LocalContext × LocalInstances) := do
+  let lctx ← getLCtx
+  let mut needed : Std.HashSet FVarId := {}
+  let mut queue : Array FVarId := (fvarsIn type {}).toArray
+  while h : queue.size > 0 do
+    let fv := queue[queue.size - 1]
+    queue := queue.pop
+    if needed.contains fv then continue
+    needed := needed.insert fv
+    if let some d := lctx.find? fv then
+      let mut st := fvarsIn d.type {}
+      if let some v := d.value? then st := fvarsIn v st
+      queue := queue ++ st.toArray
+  let mut result := lctx
+  for d in lctx do
+    if needed.contains d.fvarId then
+      if opaqueLets && d.isLet then
+        result := result.modifyLocalDecl d.fvarId fun d =>
+          .cdecl d.index d.fvarId d.userName d.type .default d.kind
+      continue
+    -- A plain variable or instance can be mentioned by a term the script splices in —
+    -- an `Inhabited` witness, say — and costs nothing to keep. A proof or a definition
+    -- the statement does not reach is what makes the context expensive.
+    if d.isLet || (← isProp d.type) then
+      result := result.erase d.fvarId
+  return (result, ← getLocalInstances)
+
 /-- Prove `type` by running `tacs`. This is what `theorem … := by …` does in the
 generated file; here the result is a term rather than a declaration. -/
-def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData) :
-    TermElabM Expr := do
-  let mv ← mkFreshExprSyntheticOpaqueMVar type
+def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData)
+    (restrict : Bool := false) (opaqueLets : Bool := true) : TermElabM Expr := do
+  let mv ←
+    if restrict then
+      let (lctx, insts) ← restrictedContext type opaqueLets
+      mkFreshExprMVarAt lctx insts type .syntheticOpaque
+    else
+      mkFreshExprSyntheticOpaqueMVar type
   -- Stop once there is nothing left to prove. The generated file is one tactic block
   -- per lemma and assumes every line has a goal to act on; a script that closes early
   -- would make the next line fail with "no goals to be solved", which is not a failure
@@ -323,17 +396,86 @@ def inhabitant (ty : Expr) : MetaM (Option Expr) := do
     return some (← mkAppOptM ``Classical.choice #[ty, inst])
   return none
 
+/--
+Apply a tactic to a hypothesis and return the transformed proof.
+
+The replay sometimes needs what a VampLean tactic *does* to a hypothesis, not just that
+it closes a goal — `exists_prenex` before skolemisation, for instance. Its result type is
+not known in advance, so the tactic is first run on a throwaway goal to see what it
+produces, and then again to build a term of that type.
+-/
+def transformHyp (h : Expr) (tacs : Ident → TermElabM (Array (TSyntax `tactic)))
+    (what : MessageData) : TermElabM Expr := do
+  let hId := mkIdent `vh
+  -- The goal's target is left as a metavariable, so the closing `exact` both proves it
+  -- and tells us what the tactic produced. Running the block once matters: these are
+  -- `cnfify` and friends, which is where the time goes.
+  let target ← mkFreshExprMVar (some (Expr.sort .zero))
+  let goal ← mkFreshExprSyntheticOpaqueMVar target
+  let g ← goal.mvarId!.assert `vh (← inferType h) h
+  let (_, g) ← g.intro1P
+  let remaining ← withoutErrToSorry <| Tactic.run g do
+    (← tacs hId).forM Tactic.evalTactic
+    Tactic.evalTactic (← `(tactic| exact $hId))
+  unless remaining.isEmpty do
+    throwError "vampire: {what} left the hypothesis unusable"
+  let e ← instantiateMVars goal
+  -- Same guard as `proveBy`: a tactic that logs an error and admits its goal throws
+  -- nothing, and the `sorryAx` would only show up in `#print axioms`.
+  if e.hasSorry then
+    throwError "vampire: {what} was admitted rather than proved — the tactic reported \
+      an error without failing"
+  return e
+
 /-- `intro a b c`, or nothing when there is nothing to introduce. -/
 def intros (ids : Array Ident) : TermElabM (Array (TSyntax `tactic)) := do
   if ids.isEmpty then return #[]
   return #[← `(tactic| intro $ids*)]
 
 /-- `have iN := hN t₁ t₂ …` — `LeanChecker::instantiatePremiseVars`. -/
-def instantiate (target head : Ident) (args : Array Term) : TermElabM (TSyntax `tactic) := do
+def instantiate (target : Ident) (head : Term) (args : Array Term) :
+    TermElabM (TSyntax `tactic) := do
   if args.isEmpty then `(tactic| have $target:ident := $head)
   else `(tactic| have $target:ident := $head $args*)
 
 end Tac
+
+namespace Replay
+
+/--
+The lambda a definition introduction abbreviates.
+
+`LeanChecker` writes `let sP v… := φ` and then relies on `Iff.rfl`; here the symbol
+becomes that lambda outright, so the equation it has to prove holds by `rfl` for the
+same reason.
+-/
+def definedLambda (i : Interp) (syms : Symbols) (s : Step) (asFormula : Bool)
+    (wrap : Expr → MetaM Expr := pure) : MetaM Expr := do
+  go {} 0
+where
+  go (vs : Replay.Vars) (k : Nat) : MetaM Expr := do
+    if h : k < s.definedParams.size then
+      let (v, sort) := s.definedParams[k]
+      let ty ← Replay.sortExpr i syms sort
+      withLocalDeclD (varName v) ty fun x => do
+        mkLambdaFVars #[x] (← go (vs.insert v x) (k + 1))
+    else if asFormula then
+      wrap (← formExpr i syms vs s.definedBody)
+    else
+      wrap (← termExpr i syms vs s.definedTerm)
+
+/--
+`∀ v…, φ ↔ φ`, the equation `LeanChecker` writes as
+`have s : φ ↔ sP v… := Iff.rfl`.
+
+It is stated with `φ` on both sides rather than with the symbol on the right, because
+the symbol *is* the lambda: the two are the same proposition, and the alternatives that
+follow only need to move it into whatever shape preprocessing left the conclusion in. -/
+def definitionRfl (i : Interp) (syms : Symbols) (s : Step) : MetaM Expr :=
+  definedLambda i syms s true (fun φ => mkAppOptM ``Iff.refl #[φ])
+
+
+end Replay
 
 namespace Replay
 
@@ -448,25 +590,13 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
                ← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
                      try (first | assumption | trivial))]
     -- The parent clausifies into several clauses, of which this step is one. The
-    -- generated file shares the destructuring across all of them by putting it in the
-    -- enclosing block; a standalone lemma has to redo it, so each clause is taken out
-    -- of the conjunction by projection rather than by a `let` pattern.
-    let mut tacs := #[← `(tactic| intro $h:ident),
-                      ← `(tactic| prenexify at $h:ident),
-                      ← `(tactic| cnfify at $h:ident)]
-    let mut clauses : Array Ident := #[]
-    for k in [0:s.cnfCount] do
-      let c := mkIdent (Name.mkSimple s!"c{k}")
-      clauses := clauses.push c
-      let mut acc : Term := h
-      for _ in [0:k] do acc ← `($acc|>.2)
-      let proj ← if k + 1 == s.cnfCount then pure acc else `($acc|>.1)
-      tacs := tacs.push (← `(tactic| have $c:ident := $proj))
-    tacs := tacs.push (← `(tactic| ac_nf0 at $clauses*))
-    tacs := tacs.push (← `(tactic| try simp only))
-    tacs := tacs.push (← `(tactic| ac_nf0))
-    tacs := tacs.push (← `(tactic| assumption))
-    return tacs
+    -- generated file shares one destructuring across all of them by putting it in the
+    -- enclosing block, sized to Vampire's clause count; here the shape is only known
+    -- once `cnfify` has run, so `vampire_finish_clausify` looks instead.
+    return #[← `(tactic| intro $h:ident),
+             ← `(tactic| prenexify at $h:ident),
+             ← `(tactic| cnfify at $h:ident),
+             ← `(tactic| vampire_finish_clausify)]
   | .unusedPredDefRemoval =>
     return #[← `(tactic| intro $h:ident), ← `(tactic| simp only [$h:ident, imp_self, implies_true])]
   | .avatarContradiction =>
@@ -543,6 +673,39 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       simp (config := { failIfUnchanged := false }) only [eq_comm]))
     tacs := tacs.push (← `(tactic| ac_nf at $newForm:ident ⊢ <;> grind only [cases Or]))
     return tacs
+  | .predicateDefinition =>
+    -- `intro v…`, then the equation holds by `Iff.rfl` because the symbol *is* the
+    -- formula. The alternatives cover the shapes the conclusion can take once
+    -- preprocessing has moved the definition around.
+    let ids := s.definedParams.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+    let args := ids.map (fun (x : Ident) => (⟨x⟩ : Term))
+    let sIdent : Ident := mkIdent (Name.mkSimple "s")
+    let res : Ident := mkIdent (Name.mkSimple "res")
+    let rflStx ← exprToSyntax (← definitionRfl i syms s)
+    let mut tacs ← intros ids
+    tacs := tacs.push (← instantiate sIdent ⟨rflStx⟩ args)
+    tacs := tacs.push (← `(tactic|
+      first
+        | exact $sIdent
+        | exact or_comm.mp (imp_iff_not_or.mp ($sIdent).mpr)
+        | (have $res:ident := or_comm.mp (imp_iff_not_or.mp ($sIdent).mpr)
+           simp only [or_assoc] at $res:ident
+           trivial)
+        | exact imp_iff_not_or.mp ($sIdent).mp))
+    return tacs
+  | .functionDefinition =>
+    let ids := s.definedParams.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+    let mut tacs ← intros ids
+    tacs := tacs.push (← `(tactic| rfl))
+    return tacs
+  | .definitionFoldingPred =>
+    -- `have stepN := step<firstParent>; change <concl> at stepN`. Only the first parent
+    -- carries the proof; the others are the definitions being folded in, and the
+    -- conclusion is the first parent's statement with them substituted, so the two are
+    -- definitionally equal.
+    let mut tacs ← intros ((Array.range premises.size).map hyp)
+    tacs := tacs.push (← `(tactic| exact $(hyp 0)))
+    return tacs
   | .avatarDefinition | .avatarRefutation | .skolemise =>
     throwError "vampire: step {s.number} is built as a term, not by a script"
   | .skipped =>
@@ -579,8 +742,9 @@ def bridgeInput (i : Interp) (syms : Symbols) (s : Step) (src : Input) : TermEla
 The lemma for one derived step: `premise₁ → … → premiseₙ → conclusion`, proved by its
 script. This is `theorem inf_sN` in the generated file.
 -/
-def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
-    TermElabM Expr := do
+def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
+    (opaqueLets : Bool := true) : TermElabM Expr := do
+  let tTy ← IO.monoMsNow
   let ty ←
     try
       let mut ty ← stepType i syms s
@@ -591,8 +755,14 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       throwError "vampire: could not state step {s.number} ({s.ruleName}, handler \
         {repr s.handler})\
         {indentD (← e.toMessageData.toString)}"
+  let tTac ← IO.monoMsNow
   let tacs ← script i syms s premises
-  proveBy ty tacs m!"step {s.number} ({s.ruleName})"
+  let tRun ← IO.monoMsNow
+  let e ← proveBy ty tacs m!"step {s.number} ({s.ruleName})" (restrict := true) opaqueLets
+  let tEnd ← IO.monoMsNow
+  trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
+    script {tRun - tTac}ms, run {tEnd - tRun}ms"
+  return e
 
 /--
 The skolem constants a skolemisation introduces, and the proof of its conclusion.
@@ -603,25 +773,28 @@ to bring the symbols into scope for the rest of the block, and closes with
 lemma cannot state a conclusion mentioning `sk`. `Classical.choose` gives the same
 witnesses as closed terms instead, which every later step can then mention.
 
-Only prenex existentials are handled: a skolem *function*, from an existential under a
-universal, would need `Classical.skolem` and is reported.
+A skolem symbol of arity `n` is a function of the `n` universals its existential sits
+under, so it is `fun y… => Classical.choose (h y…)` and its specification is the same
+telescope over `Classical.choose_spec`. Arity zero is the same construction with an
+empty telescope.
 -/
 def skolemise (syms : Symbols) (s : Step) (parent : Expr) :
     TermElabM (Array (Nat × Expr) × Expr) := do
+  -- `exists_prenex` is what makes the witnesses reachable: it pulls every existential
+  -- to the front, using `Classical.skolem` to lift one out of a universal, so a symbol
+  -- of arity `n` comes back as a function rather than something buried under binders.
+  let mut h ← Tac.transformHyp parent
+    (fun v => do return #[← `(tactic| exists_prenex at $v:ident)])
+    m!"prenexing the parent of skolemisation {s.number}"
   let mut witnesses : Array (Nat × Expr) := #[]
-  let mut h := parent
   for f in s.skolems do
-    let some info := syms.funs[f]?
+    let some _ := syms.funs[f]?
       | throwError "vampire: the skolem symbol {f} was not declared"
-    unless info.arity == 0 do
-      throwError "vampire: step {s.number} introduces the skolem function \
-        '{info.name}' of arity {info.arity}; only skolem constants are ported"
     let ty ← inferType h
     unless ty.isAppOf ``Exists do
-      throwError "vampire: step {s.number} skolemises {ty}, which is not an existential \
-        — the parent was not in prenex form"
-    let w ← mkAppM ``Classical.choose #[h]
-    witnesses := witnesses.push (f, w)
+      throwError "vampire: step {s.number} has {s.skolems.size} skolem symbols but \
+        after prenexing its parent is {ty}, which has no further witness to take"
+    witnesses := witnesses.push (f, ← mkAppM ``Classical.choose #[h])
     h ← mkAppM ``Classical.choose_spec #[h]
   return (witnesses, h)
 
@@ -653,8 +826,10 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
     let mut ty := concl
     for prem in step.premises.reverse do
       ty ← mkArrow (← satClauseExpr i prem) ty
+    -- Pure propositional resolution over the split variables: it wants nothing from the
+    -- context, and giving it the context is what made the big AVATAR proofs slow.
     let lemma ← proveBy ty #[← `(tactic| grind only [cases Or])]
-      m!"a step of the SAT refutation at {s.number}"
+      m!"a step of the SAT refutation at {s.number}" (restrict := true)
     let mut args : Array Expr := #[]
     for prem in step.premises do
       let some a := have?[key prem]?
@@ -667,54 +842,114 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
   let some e := last | throwError "vampire: empty SAT derivation"
   return e
 
-/--
-Replay the whole refutation, returning a proof of `False`.
+/-- The clauses a formula produced, split apart and AC-normalised.
 
-The second loop of the generated file: each derived step is the lemma for it applied to
-the proofs of its premises, and the last step is the empty clause.
+`LeanChecker::clausify` destructures a parent once and lets every conclusion drawn from
+it share the result; redoing the destructuring per conclusion turned out to be most of
+the replay's cost, because `cnfify` is not cheap and a parent can yield dozens of
+conclusions. -/
+partial def clausesOf (parent : Expr) (what : MessageData) : TermElabM (Array Expr) := do
+  let cnf ← Tac.transformHyp parent
+    (fun v => do return #[← `(tactic| prenexify at $v:ident), ← `(tactic| cnfify at $v:ident)])
+    what
+  let parts ← split cnf
+  parts.mapM fun c =>
+    Tac.transformHyp c (fun v => do return #[← `(tactic| ac_nf0 at $v:ident)]) what
+where
+  /-- Take a nested conjunction apart. `whnf` is deliberately not used: it would unfold
+  the `let`-bound definitions, which is exactly what the `let` exists to prevent. -/
+  split (h : Expr) : TermElabM (Array Expr) := do
+    let ty ← instantiateMVars (← inferType h)
+    if ty.isAppOf ``And then
+      return (← split (← mkAppM ``And.left #[h])) ++ (← split (← mkAppM ``And.right #[h]))
+    else
+      return #[h]
+
+/-- What the replay carries from one step to the next. -/
+structure State where
+  interp : Interp
+  proofs : Std.HashMap Nat Expr := {}
+  byNumber : Std.HashMap Nat Step := {}
+  splitProps : Std.HashMap Nat Expr := {}
+  skolems : Std.HashMap Nat Expr := {}
+  definedPreds : Std.HashMap Nat Expr := {}
+  definedFns : Std.HashMap Nat Expr := {}
+  /-- The symbols the proof has bound so far, to be abstracted at the end. -/
+  bound : Array Expr := #[]
+  /-- Per parent unit, the clauses its clausification produced. -/
+  clauses : Std.HashMap Nat (Array Expr) := {}
+  last : Option Expr := none
+
+/--
+Replay the refutation from step `k`, returning a proof of `False`.
+
+The definitions are `let`-bound rather than substituted. Substituting is tempting —
+a definition names a formula, so the name *is* the formula — but it makes the definition
+transparent to the tactics that follow, and `cnfify` then distributes a conjunction
+Vampire had deliberately hidden behind the name, producing a different CNF from the one
+the proof was found in. The generated file writes `let sP := φ`, and that is load-bearing:
+`isDefEq` sees through a `let`, so `Iff.rfl` still proves the defining equation, while
+`simp` and `cnfify` leave it alone.
+
+That is also why this recurses rather than looping: a `let` scopes over what follows it.
 -/
-def replay (i₀ : Interp) (r : Refutation) : TermElabM Expr := do
-  let mut splitProps : Std.HashMap Nat Expr := {}
-  let mut skolems : Std.HashMap Nat Expr := {}
-  let mut i := i₀
-  let mut proofs : Std.HashMap Nat Expr := {}
-  let mut byNumber : Std.HashMap Nat Step := {}
-  let mut last : Option Expr := none
-  for s in r.steps do
+partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr := do
+  if h : k < r.steps.size then
+    let s := r.steps[k]
     trace[vampire.replay] "step {s.number} {s.ruleName} premises {s.premises}"
-    byNumber := byNumber.insert s.number s
+    let st := { st with byNumber := st.byNumber.insert s.number s }
     match s.handler with
-    | .input =>
-      let some h := i.input s.number
-        | throwError "vampire: no Lean hypothesis for input step {s.number}"
-      let e ← bridgeInput i r.symbols s h
-      proofs := proofs.insert s.number e
-      last := some e
-    | .avatarDefinition =>
-      -- The generated file writes `let sAv := C` and then `have stepN : (sAv ↔ C) :=
-      -- Iff.rfl`. Here `sAv` simply is `C`, so there is nothing to bind and the step is
-      -- `Iff.rfl` at `C ↔ C`. The `{sAv : Prop}` binders the file needs — which this
-      -- fork moved out of a section variable block, because Lean rescanned the block
-      -- once per declaration — have no counterpart at all.
-      let comp ← formExpr i r.symbols {} s.splitBody
-      splitProps := splitProps.insert s.splitVar comp
-      i := { i with splitProp := fun v => splitProps[v]? }
-      let e ← mkAppOptM ``Iff.refl #[comp]
-      proofs := proofs.insert s.number e
-      last := some e
     | .skipped =>
-      -- `isUncheckedInProof`: it is part of the derivation but contributes no Lean
-      -- step, and the rules that name it as a premise ignore it.
-      pure ()
+      -- `isUncheckedInProof`: part of the derivation, but no Lean step, and the rules
+      -- that name it as a premise ignore it.
+      replayFrom r st (k + 1)
+    | .input =>
+      let some src := st.interp.input s.number
+        | throwError "vampire: no Lean hypothesis for input step {s.number}"
+      let e ← bridgeInput st.interp r.symbols s src
+      replayFrom r { st with proofs := st.proofs.insert s.number e, last := some e } (k + 1)
+    | .avatarDefinition =>
+      let comp ← formExpr st.interp r.symbols {} s.splitBody
+      withLetDecl (Name.mkSimple s!"sA{s.splitVar}") (.sort .zero) comp fun x => do
+        let splitProps := st.splitProps.insert s.splitVar x
+        let e ← mkAppOptM ``Iff.refl #[x]
+        replayFrom r { st with
+          splitProps
+          interp := { st.interp with splitProp := fun v => splitProps[v]? }
+          proofs := st.proofs.insert s.number e
+          bound := st.bound.push x
+          last := some e } (k + 1)
+    | .predicateDefinition | .functionDefinition =>
+      let isPred := s.handler == .predicateDefinition
+      let lam ← definedLambda st.interp r.symbols s isPred
+      let name := Name.mkSimple (if isPred then s!"sP{s.definedSymbol}" else s!"sF{s.definedSymbol}")
+      withLetDecl name (← inferType lam) lam fun x => do
+        let interp ←
+          if isPred then
+            let m := st.definedPreds.insert s.definedSymbol x
+            pure ({ st.interp with definedPred := fun p => m[p]? }, m, st.definedFns)
+          else
+            let m := st.definedFns.insert s.definedSymbol x
+            pure ({ st.interp with definedFn := fun f => m[f]? }, st.definedPreds, m)
+        let (i', preds, fns) := interp
+        let st := { st with interp := i', definedPreds := preds, definedFns := fns }
+        -- The step that introduces a definition is the one place its value is needed:
+        -- it proves the defining equation.
+        let e ← stepLemma st.interp r.symbols s #[] (opaqueLets := false)
+        replayFrom r { st with
+          proofs := st.proofs.insert s.number e
+          bound := st.bound.push x
+          last := some e } (k + 1)
     | .skolemise =>
       let some parentNum := s.premises[0]?
         | throwError "vampire: skolemisation {s.number} has no parent"
-      let some parent := proofs[parentNum]?
+      let some parent := st.proofs[parentNum]?
         | throwError "vampire: the parent of skolemisation {s.number} is unproved"
       let (witnesses, spec) ← skolemise r.symbols s parent
+      let mut skolems := st.skolems
       for (f, w) in witnesses do skolems := skolems.insert f w
-      i := { i with skolem := fun f => skolems[f]? }
-      let want ← stepType i r.symbols s
+      let interp := { st.interp with skolem := fun f => skolems[f]? }
+      let want ← stepType interp r.symbols s
       let specStx ← exprToSyntax spec
       -- `symm_match using` wants a hypothesis, so the specification is bound first.
       let spec := mkIdent (Name.mkSimple "spec")
@@ -722,12 +957,13 @@ def replay (i₀ : Interp) (r : Refutation) : TermElabM Expr := do
         #[← `(tactic| have $spec:ident := $specStx),
           ← `(tactic| first | exact $spec | symm_match using $spec)]
         m!"skolemisation {s.number}"
-      proofs := proofs.insert s.number e
-      last := some e
+      replayFrom r { st with
+        skolems, interp
+        proofs := st.proofs.insert s.number e, last := some e } (k + 1)
     | _ =>
       let mut premises : Array Step := #[]
       for n in s.premises do
-        let some p := byNumber[n]?
+        let some p := st.byNumber[n]?
           | throwError "vampire: step {s.number} names premise {n}, which is not in \
               the exported proof"
         if p.handler == .skipped then continue
@@ -738,26 +974,41 @@ def replay (i₀ : Interp) (r : Refutation) : TermElabM Expr := do
         if s.handler == .avatarRefutation then s.premises.qsort (· < ·) else s.premises
       let mut args : Array Expr := #[]
       for n in order do
-        if ((byNumber[n]?).map (·.handler)) == some .skipped then continue
-        let some a := proofs[n]?
+        if ((st.byNumber[n]?).map (·.handler)) == some .skipped then continue
+        let some a := st.proofs[n]?
           | throwError "vampire: premise {n} of step {s.number} is unproved"
         args := args.push a
       let e ←
         if s.handler == .avatarRefutation then
-          avatarRefutation i s args
+          avatarRefutation st.interp s args
         else
-          pure (mkAppN (← stepLemma i r.symbols s premises) args)
-      proofs := proofs.insert s.number e
-      last := some e
-  let some e := last | throwError "vampire: the exported refutation is empty"
-  -- The steps are assembled by application, which `mkAppN` does not typecheck. Without
-  -- this a mismatch surfaces as a kernel error against the user's own theorem, with no
-  -- indication of which step is wrong.
-  try check e
-  catch err =>
-    throwError "vampire: the replayed proof does not typecheck\
-      {indentD (← err.toMessageData.toString)}"
-  return e
+          -- Folding a definition in is exactly a step of definitional unfolding, so it
+          -- is the one derived rule that needs to see through the `let`.
+          let opaqueLets := s.handler != .definitionFoldingPred
+          pure (mkAppN (← stepLemma st.interp r.symbols s premises opaqueLets) args)
+      replayFrom r { st with
+        proofs := st.proofs.insert s.number e, last := some e } (k + 1)
+  else
+    let some e := st.last | throwError "vampire: the exported refutation is empty"
+    -- Close every `let` the definitions opened.
+    let tAbs ← IO.monoMsNow
+    let e ← mkLetFVars st.bound e
+    let tChk ← IO.monoMsNow
+    trace[vampire.timing] "abstracted {st.bound.size} definitions in {tChk - tAbs}ms"
+    -- The steps are assembled by application, which `mkAppN` does not typecheck.
+    -- Without this a mismatch surfaces as a kernel error against the user's own
+    -- theorem, with no indication of which step is wrong.
+    try
+      check e
+      trace[vampire.timing] "checked the assembled term in {(← IO.monoMsNow) - tChk}ms"
+    catch err =>
+      throwError "vampire: the replayed proof does not typecheck\
+        {indentD (← err.toMessageData.toString)}"
+    return e
+
+/-- Replay a refutation as a Lean proof of `False`. -/
+def replay (i : Interp) (r : Refutation) : TermElabM Expr :=
+  replayFrom r { interp := i } 0
 
 end Replay
 

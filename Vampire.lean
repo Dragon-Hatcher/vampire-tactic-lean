@@ -2,6 +2,7 @@ import Vampire.Ffi
 import Vampire.Preprocess
 import Vampire.Proof
 import Vampire.Reconstruct
+import Vampire.Support
 import Vampire.Tactic
 import Vampire.Translate
 import Vampire.Translate.Bool

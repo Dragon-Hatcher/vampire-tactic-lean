@@ -33,9 +33,19 @@ Use `vampire?` to see the problem Vampire was given and the refutation it found;
 leaves the goal alone.
 -/
 
+/-- How long Vampire may search, in seconds. -/
+register_option vampire.timeout : Nat := {
+  defValue := 10
+  descr := "seconds Vampire may spend searching for a refutation"
+}
+
 namespace Vampire
 
 open Lean Elab Tactic Meta
+
+/-- The search budget, in deciseconds, from `set_option vampire.timeout`. -/
+def timeoutDeciseconds : MetaM UInt32 := do
+  return (((← getOptions).get `vampire.timeout (10 : Nat)) * 10).toUInt32
 
 /-- What the tactic did. -/
 inductive Outcome where
@@ -144,8 +154,14 @@ def problemAsVampireSeesIt : MetaM MessageData := do
 
 /-- Translate the goal, then build, solve and export in one call. -/
 def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM (Outcome × Built) := do
+  let t0 ← IO.monoMsNow
   let built ← buildProblem mv hs
-  match ← Ffi.run built.names built.code deciseconds with
+  let t1 ← IO.monoMsNow
+  trace[vampire.timing] "translated in {t1 - t0}ms"
+  let r ← Ffi.run built.names built.code deciseconds
+  trace[vampire.timing] "prover took {(← IO.monoMsNow) - t1}ms"
+  trace[vampire.prover] "{← Ffi.proverOutput}"
+  match r with
   | .refuted => return (.refuted, built)
   | .notRefuted => return (.notRefuted, built)
   | .failed what => throwError "vampire: {what}"
@@ -159,6 +175,8 @@ def interpOf (built : Built) (syms : Symbols) : Interp where
   -- Both filled in by `Replay.replay` as the steps that introduce them are reached.
   splitProp := fun _ => none
   skolem := fun _ => none
+  definedPred := fun _ => none
+  definedFn := fun _ => none
 
 /-- Replay the refutation Vampire found as a Lean proof of `False`, in the context of
 the preprocessed goal. -/
@@ -166,8 +184,11 @@ def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext 
   match ← Ffi.exportedRefutation with
   | .error e => throwError e
   | .ok refutation =>
-    trace[vampire] "replaying {refutation.steps.size} steps"
-    Replay.replay (interpOf built refutation.symbols) refutation
+    let t0 ← IO.monoMsNow
+    let e ← Replay.replay (interpOf built refutation.symbols) refutation
+    trace[vampire.timing] "replayed {refutation.steps.size} steps in \
+      {(← IO.monoMsNow) - t0}ms"
+    return e
 
 /-- Collect the hypotheses named in `vampire [h₁, h₂]`. -/
 private def elabHints (stx : Syntax) : TacticM (Array Expr) := do
@@ -194,7 +215,7 @@ elab_rules : tactic
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      match ← run g hs 100 with
+      match ← run g hs (← timeoutDeciseconds) with
       | (.notRefuted, _) =>
         throwError "vampire: no refutation found — {← Ffi.message}"
       | (.refuted, built) =>
@@ -209,7 +230,7 @@ elab_rules : tactic
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      let (outcome, _) ← run g hs 100
+      let (outcome, _) ← run g hs (← timeoutDeciseconds)
       let verdict := if outcome == .refuted then "refuted" else "no refutation found"
       let outlineText ← if outcome == .refuted then Ffi.proofOutline else pure ""
       let outline : MessageData :=
