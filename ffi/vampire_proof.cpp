@@ -293,10 +293,19 @@ struct Exporter {
     put(term->functor());
   }
 
-  void writeLiteral(Literal *l) {
+  /// `flip` undoes the reorientation Vampire applied when it shared the literal.
+  ///
+  /// `Literal::createEquality` orients an equation by the term ordering, and
+  /// `AtomicFormula` records on `flipForPrinting` that it did — the comment in
+  /// `Formula.hpp` says it exists so the input can be shown "in the original
+  /// orientation". Ignoring it means an input unit comes back with `a = b` where the
+  /// hypothesis it was translated from says `b = a`, and the two then have to be
+  /// bridged by a `simp only [eq_comm]` over the whole formula, which on a large one
+  /// costs more than the rest of the replay.
+  void writeLiteral(Literal *l, bool flip = false) {
     if (l->isEquality()) {
-      writeTerm(*l->nthArgument(0));
-      writeTerm(*l->nthArgument(1));
+      writeTerm(*l->nthArgument(flip ? 1 : 0));
+      writeTerm(*l->nthArgument(flip ? 0 : 1));
       TermList sort = SortHelper::getEqualityArgumentSort(l);
       declareSort(sort);
       put(PT_EQ);
@@ -311,29 +320,54 @@ struct Exporter {
     put(l->polarity() ? 1 : 0);
   }
 
+  /// A quantifier's variables, ascending.
+  ///
+  /// Not the order the list holds them in: `LeanPrinter::outputSortsWithQuantor` sorts
+  /// by variable number before printing, so the generated file always binds them
+  /// ascending, and every tactic written against that file expects it. Keeping the list
+  /// order gives a formula that binds `∀ v2 v1` where its own component clause binds
+  /// `∀ v1 v2`, and applying one to the other silently permutes the arguments.
   void writeVarList(VSList *vars) {
-    unsigned n = 0;
-    for (VSList *it = vars; VSList::isNonEmpty(it); it = it->tail()) n++;
-    put(n);
-    for (VSList *it = vars; VSList::isNonEmpty(it); it = it->tail()) {
-      declareSort(it->head().second);
-      put(it->head().first);
-      put(it->head().second.term()->functor());
+    std::vector<std::pair<unsigned, TermList>> vs;
+    for (VSList *it = vars; VSList::isNonEmpty(it); it = it->tail())
+      vs.push_back(it->head());
+    std::sort(vs.begin(), vs.end(),
+              [](auto a, auto b) { return a.first < b.first; });
+    put(static_cast<uint32_t>(vs.size()));
+    for (auto [v, sort] : vs) {
+      declareSort(sort);
+      put(v);
+      put(sort.term()->functor());
     }
   }
 
   void writeFormula(Formula *f) {
     switch (f->connective()) {
-      case LITERAL: writeLiteral(f->literal()); break;
+      case LITERAL: {
+        auto *atom = static_cast<AtomicFormula *>(f);
+        writeLiteral(atom->getLiteral(), atom->flipForPrinting);
+        break;
+      }
       case TRUE: put(PT_TRUE); break;
       case FALSE: put(PT_FALSE); break;
       case NOT: writeFormula(f->uarg()); put(PT_NOT); break;
       case AND:
       case OR: {
-        unsigned n = 0;
-        for (Formula *a : iterTraits(f->args()->iter())) { writeFormula(a); n++; }
+        // Reversed, to match how the formula is *printed*.
+        //
+        // `Formula::toString` walks a junction's arguments backwards ("we will reverse
+        // the order // but that should not matter"), and `LeanPrinter` does the same
+        // deliberately, with a `FormulaList::reverse`. So the generated file states a
+        // disjunction in the reverse of `args()` order — and VampLean's
+        // `nnf_transformation` and friends were written to produce exactly what that
+        // file states. Exporting `args()` order gives formulas that are correct but
+        // mirror images of the ones those tactics build, so `exact h` misses and the
+        // fallback `grind` is left to prove a commuted disjunction.
+        std::vector<Formula *> args;
+        for (Formula *a : iterTraits(f->args()->iter())) args.push_back(a);
+        for (auto it = args.rbegin(); it != args.rend(); ++it) writeFormula(*it);
         put(f->connective() == AND ? PT_AND : PT_OR);
-        put(n);
+        put(static_cast<uint32_t>(args.size()));
         break;
       }
       case IMP: writeFormula(f->left()); writeFormula(f->right()); put(PT_IMP); break;
@@ -757,6 +791,10 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
         e.declareSort(vs.second);
         params.push_back({vs.first, vs.second.term()->functor()});
       }
+    // Deliberately *not* sorted. `LeanChecker::predicateDefinitionIntroduction` prints
+    // the `let`'s parameters and the application of the symbol in the formula's own
+    // variable order, and only the `intros` in sorted order — so the lambda takes its
+    // arguments in this order while the statement binds them in that one.
     e.put(static_cast<uint32_t>(params.size()));
     for (auto [v, sort] : params) { e.put(v); e.put(sort); }
 

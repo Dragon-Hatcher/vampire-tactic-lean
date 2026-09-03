@@ -222,6 +222,12 @@ static void build(const std::vector<std::string> &names,
         // application it is the symbol's result sort, and for a variable it is the sort
         // recorded by the binder that introduced it.
         TermList sort = SortHelper::getResultSort(lhs, varSorts);
+        // `createEquality` orients the equation by the term ordering when it shares
+        // the literal, so an input equation can come back the other way round.
+        // `AtomicFormula::flipForPrinting` exists to record that — the TPTP parser sets
+        // it — and having the builder set it too does fix the one input bridge that
+        // needs it, but it restates every input unit, and the derived steps drawn from
+        // them stop matching what VampLean's tactics produce. ALG014 fails that way.
         pushFormula(new AtomicFormula(Literal::createEquality(polarity, lhs, rhs, sort)));
         break;
       }
@@ -232,6 +238,11 @@ static void build(const std::vector<std::string> &names,
       case OP_OR: {
         unsigned n = next();
         require(n >= 2, "junction of fewer than two formulas");
+        // `args()` in stream order. Building the reverse — so that Vampire *prints*
+        // what Lean sent, and an input unit round-trips exactly — does fix the input
+        // bridge, but it changes the problem Vampire is given: it then finds different
+        // proofs, and ALG014 fails on a clausification it had been replaying fine.
+        // Not worth trading a passing problem for a failing one.
         FormulaList *args = nullptr;
         for (unsigned i = 0; i < n; i++) FormulaList::push(popFormula(), args);
         pushFormula(new JunctionFormula(op == OP_AND ? AND : OR, args));

@@ -9,6 +9,7 @@ Working notes for picking the work back up. See `README.md` for what the library
       vampire/            our fork of vprover/vampire (upstream = vprover, branch
                           `avatar-resolution-replay`)
       vampire-tactic/     this package: the Lean tactic (branch `main`)
+        bench-tptp/       a second, wider TPTP benchmark; see its own README
       bodingbauer-etall/  the paper's artifacts, left as reference
         vamplean/         upstream reconstruction lemmas, required by the tactic
         demo/             the leancheck demo and the lean-smt hammer prototype
@@ -27,7 +28,7 @@ The whole loop, in process:
 
     theorem chained (α : Type) (f : α → α) (P : α → Prop) (a : α)
         (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
-      vampire
+      vampire [*]
     -- 'chained' depends on axioms: [propext, Classical.choice, Quot.sound]
 
 **Goal translation** is a port of lean-smt's pipeline — the `@[vampire_translate]`
@@ -49,13 +50,22 @@ outline of the refutation.
 - **Polymorphism.** Vampire's logic is monomorphic; lean-smt's monomorphisation pass is
   not ported. A polymorphic hypothesis swept up from the context is skipped; one named
   as a hint is reported. **This is the largest remaining gap on the way in.**
-- **The predicate and function definition introductions**, which bring a symbol into the
-  proof through a `let` whose body is a formula.
 - **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
 - **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
-- **`rectify` with a non-identity renaming**, the quantifier reordering after prenexing,
-  and skolem functions as opposed to constants.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
+- **The input-step bridge**, when Vampire's own recorded formula for an axiom differs
+  from the Lean hypothesis by more than orientation/associativity — see
+  `bench-tptp/README.md`, "input-step bridge".
+- **A skolemisation whose parent bundles an existential unrelated to the symbol it
+  introduces** (typically a not-yet-folded predicate-definition body sharing the
+  formula) — see `bench-tptp/README.md`, "skolemisation, parent has an extra
+  existential". Understood in some depth but not fixed; the fix that was tried and
+  reverted is documented there.
+
+Predicate and function definition introductions, and `rectify` with a non-identity
+renaming (including the quantifier-permutation case, not just plain alpha-renaming), are
+now ported — see `Vampire/Reconstruct.lean`'s `.predicateDefinition`/`.functionDefinition`
+and `.rectify` cases.
 
 ## Benchmark
 
@@ -80,7 +90,18 @@ shape — something the generated *file* gets from being a file:
 4. Multi-clause clausification cannot be sized by Vampire's clause count, because
    VampLean's `cnfify` need not split the same way.
 
-A fifth was a silent one: a tactic can *log* an error and admit its goal without
+A fifth was the subtlest, and it had been hiding behind a workaround. `Formula::toString`
+walks a junction's arguments *backwards* — "we will reverse the order // but that should
+not matter" — and `LeanPrinter` does the same deliberately, with a `FormulaList::reverse`.
+So the generated file states every disjunction in the reverse of the order Vampire holds
+it in, and VampLean's `nnf_transformation` and friends were written to produce exactly
+what that file states. Exporting `args()` order gave formulas that were correct but
+mirror images of the ones those tactics build, so `exact h` missed every time. Earlier in
+this work that showed up as ENNF producing `q ∨ ¬p` against Vampire's `q | ~p`, which was
+misread as the two disagreeing about disjunct order and patched with a `grind` fallback.
+They agree exactly. **When a formula comes back subtly wrong, suspect the printer.**
+
+A sixth was a silent one: a tactic can *log* an error and admit its goal without
 throwing, so a replay announced success while the proof depended on `sorryAx`, visible
 only in `#print axioms`. `proveBy` and `transformHyp` now inspect the term they built —
 `Expr.hasSorry` is the one check that cannot be evaded.
@@ -89,9 +110,25 @@ For calibration, `bench/work/ALG130+1.lean` — the *recorded* proof — checks 
 the same toolchain. Replaying a freshly-found proof of the same problem takes 15s, on a
 proof about 20% larger.
 
-**51 of 56 pass.** The five that do not: two where VampLean's `exists_prenex` fails on
-the parent of a skolemisation, one clausification, one input bridge, and one goal whose
-translation is not first-order.
+Error attribution matters here more than usual: a failing tactic is free to *log* its
+error and admit the goal, which throws nothing, so a replay reported success while the
+declaration carried `sorryAx`. Running scripts under `withoutRecover` makes a failure
+throw and name its step — and doing so immediately moved the blame for three problems
+from skolemisation, where it had been wrongly placed, to `nnf transformation`, which is
+where the ordering bug was.
+
+**Currently 56/57** on this benchmark (the one that doesn't pass, `SWC153`, is the
+input-step bridge case above).
+
+### `bench-tptp/`
+
+A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
+statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
+**128/138**. Every failure and what's understood about it — including the two `grind`
+fallbacks (clausification binder order, generic-step E-matching) that were found,
+verified, and then reverted along with an unresolved skolemisation fix, to keep this
+tree at a state that's fully understood rather than partially patched — is in
+`bench-tptp/README.md`. Scripts to regenerate and rerun it are there too.
 
 ## Things that will bite
 

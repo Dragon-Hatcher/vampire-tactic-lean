@@ -107,12 +107,15 @@ structure Built where
   transfers the replayed proof back to the user's goal. -/
   root : MVarId
 
-def buildProblem (mv : MVarId) (hs : Array Expr) : MetaM Built := mv.withContext do
-  -- Everything propositional in the local context, then the hints. Unlike lean-smt,
-  -- which sends only what it is given, the context is swept up automatically: this is
-  -- meant to be a hammer, and a hypothesis it cannot read is skipped rather than fatal.
-  let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
-  let hs := locals.filter (fun l => !hs.contains l) ++ hs
+def buildProblem (mv : MVarId) (hs : Array Expr) (all : Bool) : MetaM Built :=
+    mv.withContext do
+  -- Only with `[*]`: everything propositional in the local context, minus what has no
+  -- first-order reading. Without it, just what was named.
+  let hs ←
+    if all then do
+      let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
+      pure (locals.filter (fun l => !hs.contains l) ++ hs)
+    else pure hs
   let mv₀ := (← Meta.mkFreshExprMVar (← mv.getType)).mvarId!
   -- lean-smt prunes the context to what the hints mention. We keep it, so that instance
   -- synthesis still works during replay: a refutation can need an element of a sort,
@@ -153,9 +156,10 @@ def problemAsVampireSeesIt : MetaM MessageData := do
   return MessageData.joinSep lines.toList Format.line
 
 /-- Translate the goal, then build, solve and export in one call. -/
-def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM (Outcome × Built) := do
+def run (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :
+    MetaM (Outcome × Built) := do
   let t0 ← IO.monoMsNow
-  let built ← buildProblem mv hs
+  let built ← buildProblem mv hs all
   let t1 ← IO.monoMsNow
   trace[vampire.timing] "translated in {t1 - t0}ms"
   let r ← Ffi.run built.names built.code deciseconds
@@ -191,46 +195,60 @@ def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext 
     return e
 
 /-- Collect the hypotheses named in `vampire [h₁, h₂]`. -/
-private def elabHints (stx : Syntax) : TacticM (Array Expr) := do
-  if stx.getNumArgs == 0 then return #[]
+syntax vampireStar := "*"
+syntax vampireHintElem := vampireStar <|> term
+syntax hintList := (" [" withoutPosition(vampireHintElem,*,?) "]")?
+
+/-- The hints, and whether the whole local context was asked for with `*`. -/
+private def elabHints (stx : Syntax) : TacticM (Array Expr × Bool) := do
+  if stx.getNumArgs == 0 then return (#[], false)
   let mut hs := #[]
+  let mut all := false
   for arg in stx[0][1].getSepArgs do
-    hs := hs.push (← elabTerm arg none)
-  return hs
+    -- `syntax A := B <|> C` wraps the alternative, so the star is one level down.
+    if arg[0].getKind == ``vampireStar then all := true
+    else hs := hs.push (← elabTerm arg[0] none)
+  return (hs, all)
 
-syntax hintList := (" [" withoutPosition(term,*,?) "]")?
+/--
+Discharge the goal with Vampire.
 
-/-- Discharge the goal with Vampire. Hypotheses in the local context are used
-automatically; `vampire [h, thm]` adds more. -/
+Only what you name is sent: `vampire [h, thm]` sends those, and `vampire [*]` sends
+everything propositional in the local context. This follows `smt`, and for the same
+reason — the minimum problem is usually the one the prover has the best chance on, and
+naming what matters is cheap. The goal's own binders are always introduced and sent.
+
+Under `[*]`, a hypothesis with no first-order reading is skipped rather than being
+fatal; one you name explicitly is not.
+-/
 syntax (name := vampire) "vampire" hintList : tactic
 
 /-- Show the problem Vampire is given for this goal, and whether it refutes it. Leaves
-the goal alone. -/
+the goal alone. Takes the same hints as `vampire`. -/
 syntax (name := vampireQ) "vampire?" hintList : tactic
 
 elab_rules : tactic
   | `(tactic| vampire $hints:hintList) => do
-    let hs ← elabHints hints
+    let (hs, all) ← elabHints hints
     let g ← getMainGoal
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      match ← run g hs (← timeoutDeciseconds) with
+      match ← run g hs all (← timeoutDeciseconds) with
       | (.notRefuted, _) =>
         throwError "vampire: no refutation found — {← Ffi.message}"
       | (.refuted, built) =>
         let proof ← replayRefutation built
         built.goal.assign proof
         g.assign (.mvar built.root)
-        logInfo m!"vampire: closed by a refutation replayed from the prover"
 
   | `(tactic| vampire? $hints:hintList) => do
-    let hs ← elabHints hints
+    let (hs, all) ← elabHints hints
     let g ← getMainGoal
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      let (outcome, _) ← run g hs (← timeoutDeciseconds)
+      let (outcome, _) ← run g hs all (← timeoutDeciseconds)
       let verdict := if outcome == .refuted then "refuted" else "no refutation found"
       let outlineText ← if outcome == .refuted then Ffi.proofOutline else pure ""
       let outline : MessageData :=

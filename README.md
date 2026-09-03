@@ -67,10 +67,11 @@ Monomorphic first-order logic with equality: uninterpreted sorts, functions and
 predicates; the propositional connectives; `∀` and `∃`; `Bool` identified with `Prop`.
 A definition becomes a declaration plus its defining equation, since Vampire has none.
 
-Hypotheses are swept up from the local context automatically, and one with no
-first-order reading is skipped rather than being fatal — that is what makes sweeping
-reasonable. A hint named explicitly in `vampire [h]` is never skipped; failing to
-translate it is an error.
+Only what you name is sent: `vampire [h, thm]` sends those, `vampire [*]` sends
+everything propositional in the local context, and the goal's own binders always go.
+This follows `smt`. Under `[*]` a hypothesis with no first-order reading is skipped
+rather than being fatal, which is what makes sweeping reasonable; one you name
+explicitly is not.
 
 **Not translated: polymorphism.** Vampire's logic is monomorphic, and lean-smt's
 monomorphisation pass is not ported, so a polymorphic hypothesis is skipped when it is

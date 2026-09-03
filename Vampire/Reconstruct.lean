@@ -190,7 +190,11 @@ partial def formExpr (i : Interp) (syms : Symbols) (vs : Vars) : FForm → MetaM
   | .imp a b => do mkArrow (← formExpr i syms vs a) (← formExpr i syms vs b)
   | .iff a b => do mkAppM ``Iff #[← formExpr i syms vs a, ← formExpr i syms vs b]
   | .xor a b => do
-    mkAppM ``Not #[← mkAppM ``Iff #[← formExpr i syms vs a, ← formExpr i syms vs b]]
+    -- VampLean's `Xor'` is not `Not ∘ Iff`: it's the dedicated connective Vampire's own
+    -- `<~>` prints as, and the ennf/nnf lemma sets (`not_iff_xor`, `our_xor_to_nnf`, …)
+    -- rewrite *into* it. Desugaring to `¬(a ↔ b)` here would leave a formula those
+    -- lemmas never fire on, so the reference generator uses `Xor'` and so do we.
+    mkAppM ``Xor' #[← formExpr i syms vs a, ← formExpr i syms vs b]
   | .all vars f => quantified i syms vs vars f true 0
   | .ex vars f => quantified i syms vs vars f false 0
   | .split v => do
@@ -319,11 +323,11 @@ gives `grind` the whole expansion to case-split. Stripping the value here restor
 The proof term still mentions the variable, and is still type-correct where the value is
 known, because a proof that works for an opaque `x` works for any particular one.
 -/
-def restrictedContext (type : Expr) (opaqueLets : Bool) :
+def restrictedContext (seeds : Array Expr) (opaqueLets : Bool) :
     MetaM (LocalContext × LocalInstances) := do
   let lctx ← getLCtx
   let mut needed : Std.HashSet FVarId := {}
-  let mut queue : Array FVarId := (fvarsIn type {}).toArray
+  let mut queue : Array FVarId := (seeds.foldl (fun acc e => fvarsIn e acc) {}).toArray
   while h : queue.size > 0 do
     let fv := queue[queue.size - 1]
     queue := queue.pop
@@ -353,7 +357,7 @@ def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData)
     (restrict : Bool := false) (opaqueLets : Bool := true) : TermElabM Expr := do
   let mv ←
     if restrict then
-      let (lctx, insts) ← restrictedContext type opaqueLets
+      let (lctx, insts) ← restrictedContext #[type] opaqueLets
       mkFreshExprMVarAt lctx insts type .syntheticOpaque
     else
       mkFreshExprSyntheticOpaqueMVar type
@@ -364,10 +368,15 @@ def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData)
   -- Without this an elaboration error inside a script is *logged* and the offending
   -- term becomes `sorryAx`, so the replay reports success and the axiom only shows up
   -- in `#print axioms`.
-  let run : TermElabM (List MVarId) := withoutErrToSorry <| Tactic.run mv.mvarId! do
-    for t in tacs do
-      if (← Tactic.getGoals).isEmpty then break
-      Tactic.evalTactic t
+  -- `withoutRecover` as well as `withoutErrToSorry`: a tactic that fails is otherwise
+  -- free to *log* the error and carry on, which throws nothing, leaves the goal
+  -- admitted, and marks the whole declaration — so `#print axioms` reports `sorryAx`
+  -- for a theorem whose replayed proof is in fact complete.
+  let run : TermElabM (List MVarId) := withoutErrToSorry <| Tactic.run mv.mvarId! <|
+    Tactic.withoutRecover do
+      for t in tacs do
+        if (← Tactic.getGoals).isEmpty then break
+        Tactic.evalTactic t
   let remaining ←
     try run
     catch e =>
@@ -385,15 +394,22 @@ An element of `ty`, by instance synthesis.
 
 Vampire's logic assumes every sort is non-empty, and a refutation may use that: from
 `∀ x, P x` and `∀ x, ¬P x` it derives `⊥`, which in Lean needs an inhabitant of the
-domain. The generated file gets one from the `[Inhabited ι]` in its preamble, so this
-asks for the same instance — `Nonempty` too, since that is what the assumption really
+domain. The generated file gets one from the `[Inhabited ι]` in its preamble, so an
+instance is asked for first — `Nonempty` too, since that is what the assumption really
 needs and `Classical.choice` turns it into a term.
+
+Failing that, the local context is searched for a term of the type. A goal about a bare
+`α` often has one to hand without anyone having declared an instance, and it is a term
+the user already had.
 -/
 def inhabitant (ty : Expr) : MetaM (Option Expr) := do
   if let .some inst ← trySynthInstance (← mkAppM ``Inhabited #[ty]) then
     return some (← mkAppOptM ``default #[ty, inst])
   if let .some inst ← trySynthInstance (← mkAppM ``Nonempty #[ty]) then
     return some (← mkAppOptM ``Classical.choice #[ty, inst])
+  for d in ← getLCtx do
+    if d.isImplementationDetail then continue
+    if ← isDefEq d.type ty then return some d.toExpr
   return none
 
 /--
@@ -407,25 +423,50 @@ produces, and then again to build a term of that type.
 def transformHyp (h : Expr) (tacs : Ident → TermElabM (Array (TSyntax `tactic)))
     (what : MessageData) : TermElabM Expr := do
   let hId := mkIdent `vh
-  -- The goal's target is left as a metavariable, so the closing `exact` both proves it
-  -- and tells us what the tactic produced. Running the block once matters: these are
-  -- `cnfify` and friends, which is where the time goes.
-  let target ← mkFreshExprMVar (some (Expr.sort .zero))
-  let goal ← mkFreshExprSyntheticOpaqueMVar target
-  let g ← goal.mvarId!.assert `vh (← inferType h) h
+  let ty ← inferType h
+  -- Unrestricted, unlike a step lemma. These tactics need what the context provides:
+  -- `exists_prenex` hoists an existential out of a disjunction only when it can find a
+  -- `Nonempty`/`Inhabited` instance for the domain, and without one it silently stops
+  -- after the outer quantifier — leaving a witness the skolemisation then cannot take.
+  let (lctx, insts) := (← getLCtx, ← getLocalInstances)
+
+  -- The result type is not known in advance, so the block runs twice: once against a
+  -- throwaway goal to see what it leaves behind, then again to build a term of that
+  -- type. Letting the target be a metavariable instead would be one pass, but these
+  -- tactics reason about the goal — `exists_prenex` starts with a `by_contra` — and an
+  -- unknown target makes that nonsense.
+  -- `False`, which is what the generated file has: `exists_prenex` is applied inside
+  -- `fullProof`, whose goal is `False` after the `byContradiction`. It reads the goal,
+  -- and under a different one it prenexes differently — leaving an existential in place
+  -- that the skolemisation then has no witness for.
+  let probe ← mkFreshExprMVarAt lctx insts (.const ``False []) .syntheticOpaque
+  let g ← probe.mvarId!.assert `vh ty h
   let (_, g) ← g.intro1P
-  let remaining ← withoutErrToSorry <| Tactic.run g do
-    (← tacs hId).forM Tactic.evalTactic
-    Tactic.evalTactic (← `(tactic| exact $hId))
-  unless remaining.isEmpty do
-    throwError "vampire: {what} left the hypothesis unusable"
-  let e ← instantiateMVars goal
-  -- Same guard as `proveBy`: a tactic that logs an error and admits its goal throws
-  -- nothing, and the `sorryAx` would only show up in `#print axioms`.
-  if e.hasSorry then
-    throwError "vampire: {what} was admitted rather than proved — the tactic reported \
-      an error without failing"
-  return e
+  -- The probe is exploratory, so its messages are discarded: a tactic that logs an
+  -- error still marks the whole declaration, and `#print axioms` then reports `sorryAx`
+  -- for a theorem the build pass went on to prove properly. Errors that matter are
+  -- reported by that pass.
+  -- The probe runs inside `withoutModifyingState`: it is exploratory, and a tactic that
+  -- logs an error still marks the whole declaration, so `#print axioms` would report
+  -- `sorryAx` for a theorem the build pass went on to prove properly. Only the type it
+  -- discovered is carried out.
+  let newTy ← withoutModifyingState do
+    let gs ← withoutErrToSorry <| Tactic.run g <|
+      Tactic.withoutRecover ((← tacs hId).forM Tactic.evalTactic)
+    let some g := gs.head?
+      | throwError "vampire: {what} closed the goal instead of transforming a hypothesis"
+    g.withContext do
+      let some d := (← getLCtx).findFromUserName? `vh
+        | throwError "vampire: {what} removed the hypothesis it was applied to"
+      instantiateMVars d.type
+
+  -- Unrestricted, like the probe: the two passes must see the same context or they
+  -- transform differently, and the second would then be proving a different statement
+  -- from the one the first discovered.
+  let fn ← proveBy (← mkArrow ty newTy)
+    (#[← `(tactic| intro $hId:ident)] ++ (← tacs hId) ++ #[← `(tactic| exact $hId)])
+    what
+  return mkApp fn h
 
 /-- `intro a b c`, or nothing when there is nothing to introduce. -/
 def intros (ids : Array Ident) : TermElabM (Array (TSyntax `tactic)) := do
@@ -521,10 +562,10 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       let ty ← Replay.sortExpr i syms sort
       let some w ← inhabitant ty
         | throwError "vampire: step {s.number} instantiates a premise at a variable the \
-            conclusion does not bind, so it needs an element of {ty}, and there is no \
-            `Inhabited {ty}` or `Nonempty {ty}` instance. Vampire's logic assumes every \
-            sort is non-empty and this refutation uses that; add the instance to the \
-            context"
+            conclusion does not bind, so it needs an element of {ty}, and there is \
+            neither an `Inhabited {ty}` instance nor a term of that type in scope. \
+            Vampire's logic assumes every sort is non-empty and this refutation uses \
+            that"
       m := m.insert v (← exprToSyntax w)
     return fun v => m[v]?
   -- `have iN := hN t₁ t₂ …`, for every premise.
@@ -578,11 +619,29 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| remove_tauto at $h:ident <;> first | exact $h | grind)]
   | .rectify =>
-    -- The renaming loop is not ported; with every renaming the identity this is what
-    -- `LeanChecker::rectify` emits.
+    -- `LeanChecker::rectify` ends with `symm_match using h`, which covers a renaming
+    -- that is alpha-equivalent — most of them — and it emits a `conv … rw [rN]` per
+    -- renaming that is not. A rectification that permutes universal binders is not
+    -- alpha-equivalent, and the third alternative here handles it without that
+    -- machinery: introduce the conclusion's binders and let unification work out which
+    -- of the premise's arguments each one is.
+    -- Only the binders the conclusion actually opens with: `s.vars` is every free
+    -- variable of the statement, which for a formula includes the ones bound further in.
+    let prefixVars :=
+      if s.isClause then s.vars
+      else match s.statement with
+        | .all vs _ => vs
+        | _ => #[]
+    let binders := prefixVars.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+    let holes ← prefixVars.mapM (fun _ => do return (← `(_) : Term))
+    let steps := (← intros binders).push (← `(tactic| exact $h $holes*))
+    let byPermutation ← `(tacticSeq| $steps*)
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| try simp only [forall_const, exists_const, -iff_self, -eq_self] at $h:ident),
-             ← `(tactic| symm_match using $h)]
+             ← `(tactic| first
+                   | exact $h
+                   | symm_match using $h
+                   | $byPermutation)]
   | .clausify =>
     if s.cnfCount <= 1 then
       return #[← `(tactic| intro $h:ident),
@@ -677,8 +736,13 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- `intro v…`, then the equation holds by `Iff.rfl` because the symbol *is* the
     -- formula. The alternatives cover the shapes the conclusion can take once
     -- preprocessing has moved the definition around.
-    let ids := s.definedParams.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
-    let args := ids.map (fun (x : Ident) => (⟨x⟩ : Term))
+    -- `intro` in the order the statement binds them, which is ascending; apply the
+    -- defining equation in the order the symbol takes them, which is the formula's.
+    -- `LeanChecker` makes exactly this distinction — sorted `intros`, unsorted `let`
+    -- and unsorted application — and getting it wrong permutes the arguments.
+    let ids := (s.definedParams.qsort (fun a b => a.1 < b.1)).map
+      (fun (p : Nat × Nat) => mkIdent (varName p.1))
+    let args := s.definedParams.map (fun (p : Nat × Nat) => (⟨mkIdent (varName p.1)⟩ : Term))
     let sIdent : Ident := mkIdent (Name.mkSimple "s")
     let res : Ident := mkIdent (Name.mkSimple "res")
     let rflStx ← exprToSyntax (← definitionRfl i syms s)
@@ -729,9 +793,26 @@ def bridgeInput (i : Interp) (syms : Symbols) (s : Step) (src : Input) : TermEla
   match src with
   | .hypothesis h =>
     if ← isDefEq (← inferType h) want then return h
-    let hStx ← exprToSyntax h
-    proveBy want #[← `(tactic| first | exact $hStx | grind only [$hStx:term])]
-      m!"input step {s.number}"
+    -- The two can differ by more than orientation: Vampire states a junction in the
+    -- order it *prints*, which is the reverse of the order it holds it in, so a
+    -- conjunction can come back commuted as well as an equation reoriented. `grind`
+    -- with the hypothesis in context settles both; `grind only [h]` cannot, because a
+    -- hypothesis is not something it can extract a pattern from.
+    let vh := mkIdent `vh
+    -- `ac_nf0` first: the difference is usually nothing but the order of a junction's
+    -- arguments, and putting both sides in the same AC normal form settles that far
+    -- more reliably than asking `grind` to reason under the quantifiers.
+    proveBy want
+      #[← `(tactic| have $vh:ident := $(← exprToSyntax h)),
+        -- Rarely needed now that the export undoes Vampire's junction reversal and its
+        -- reorientation of input equations, but a hypothesis can still reach Vampire in
+        -- a shape it normalises further.
+        ← `(tactic| first
+              | exact $vh
+              | (ac_nf0 at $vh:ident; ac_nf0; assumption)
+              | grind)]
+      m!"input step {s.number}, whose Lean hypothesis is{indentD (← inferType h)}\n\
+        and whose statement as Vampire holds it is{indentD want}"
   | .definition d =>
     let dStx ← exprToSyntax d
     proveBy want
@@ -765,6 +846,34 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
   return e
 
 /--
+Run `k` with `Nonempty σ` in scope for each of the problem's sorts.
+
+Vampire's logic assumes every sort is non-empty, and `exists_prenex` needs to know it:
+hoisting `∃` out of a disjunction is only valid over a non-empty domain, and without an
+instance the tactic stops at the outer quantifier instead — leaving a witness the
+skolemisation cannot then take, with no error to say why. The instance is discharged
+from the same place a witness comes from, so this asserts nothing new.
+-/
+partial def withNonemptySorts (i : Interp) (syms : Symbols) (todo : List Nat)
+    (k : TermElabM (Array (Nat × Expr) × Expr)) :
+    TermElabM (Array (Nat × Expr) × Expr) := do
+  match todo with
+  | [] => k
+  | tc :: rest =>
+    let some σ := i.sort tc | withNonemptySorts i syms rest k
+    let cls ← mkAppM ``Nonempty #[σ]
+    if (← trySynthInstance cls) matches .some _ then withNonemptySorts i syms rest k
+    else match ← inhabitant σ with
+      | none => withNonemptySorts i syms rest k
+      | some w =>
+        let inst ← mkAppOptM ``Nonempty.intro #[σ, w]
+        withLetDecl (Name.mkSimple s!"vNonempty{tc}") cls inst fun x =>
+          withNewLocalInstance ``Nonempty x do
+            let (ws, spec) ← withNonemptySorts i syms rest k
+            let ws ← ws.mapM fun (f, w) => do return (f, ← mkLetFVars #[x] w)
+            return (ws, ← mkLetFVars #[x] spec)
+
+/--
 The skolem constants a skolemisation introduces, and the proof of its conclusion.
 
 `LeanChecker::skolemize` writes `exists_prenex at stepP`, then `let ⟨sk₁, …, h⟩ := stepP`
@@ -778,22 +887,45 @@ under, so it is `fun y… => Classical.choose (h y…)` and its specification is
 telescope over `Classical.choose_spec`. Arity zero is the same construction with an
 empty telescope.
 -/
-def skolemise (syms : Symbols) (s : Step) (parent : Expr) :
+def skolemise (i : Interp) (syms : Symbols) (s : Step) (parent : Expr) :
     TermElabM (Array (Nat × Expr) × Expr) := do
   -- `exists_prenex` is what makes the witnesses reachable: it pulls every existential
   -- to the front, using `Classical.skolem` to lift one out of a universal, so a symbol
   -- of arity `n` comes back as a function rather than something buried under binders.
+  -- Which sorts we could not establish non-emptiness for. Not an error in itself —
+  -- most proofs never need it — but it is overwhelmingly the reason a skolemisation
+  -- runs out of witnesses, so it is worth having to hand when one does.
+  let missing ← syms.sorts.toList.filterMapM fun (tc, name) => do
+    let some σ := i.sort tc | return none
+    if (← trySynthInstance (← mkAppM ``Nonempty #[σ])) matches .some _ then return none
+    if (← inhabitant σ).isSome then return none
+    return some (name, σ)
+  withNonemptySorts i syms (syms.sorts.toList.map (·.1)) do
   let mut h ← Tac.transformHyp parent
     (fun v => do return #[← `(tactic| exists_prenex at $v:ident)])
     m!"prenexing the parent of skolemisation {s.number}"
+  let prenexed ← inferType h
   let mut witnesses : Array (Nat × Expr) := #[]
   for f in s.skolems do
     let some _ := syms.funs[f]?
       | throwError "vampire: the skolem symbol {f} was not declared"
-    let ty ← inferType h
+    -- The generated file takes every witness from one `exists_prenex`, destructuring
+    -- `∃ sK0 sK1, …` in a single `let`. Taking them one at a time leaves the tail
+    -- re-buried — `Classical.choose_spec` gives back `∀ x, (∃ y, φ) ∨ ψ`, whose next
+    -- existential is no longer in the prefix — so it has to be hoisted again.
+    -- `consumeMData` first: a tactic can leave metadata wrapped around the type it
+    -- produced, and `isAppOf` sees through nothing — so the check would report "not an
+    -- existential" about a type that prints as exactly one.
+    unless (← instantiateMVars (← inferType h)).consumeMData.isAppOf ``Exists do
+      h ← Tac.transformHyp h
+        (fun v => do return #[← `(tactic| exists_prenex at $v:ident)])
+        m!"hoisting the next witness for skolemisation {s.number}"
+    let ty := (← instantiateMVars (← inferType h)).consumeMData
     unless ty.isAppOf ``Exists do
       throwError "vampire: step {s.number} has {s.skolems.size} skolem symbols but \
-        after prenexing its parent is {ty}, which has no further witness to take"
+        after prenexing its parent is{indentD ty}\nwhich has no further witness to \
+        take. The parent was{indentD (← inferType parent)}\nand `exists_prenex` made \
+        it{indentD prenexed}"
     witnesses := witnesses.push (f, ← mkAppM ``Classical.choose #[h])
     h ← mkAppM ``Classical.choose_spec #[h]
   return (witnesses, h)
@@ -864,6 +996,18 @@ where
       return (← split (← mkAppM ``And.left #[h])) ++ (← split (← mkAppM ``And.right #[h]))
     else
       return #[h]
+
+/-- Bind each skolem symbol with a `let`, then continue inside their scope.
+
+A `let` scopes over what follows it, so the rest of the replay has to happen inside. -/
+partial def withSkolems (ws : List (Nat × Expr)) (skolems : Std.HashMap Nat Expr)
+    (bound : Array Expr)
+    (k : Std.HashMap Nat Expr → Array Expr → TermElabM Expr) : TermElabM Expr := do
+  match ws with
+  | [] => k skolems bound
+  | (f, w) :: rest =>
+    withLetDecl (Name.mkSimple s!"sK{f}") (← inferType w) w fun x =>
+      withSkolems rest (skolems.insert f x) (bound.push x) k
 
 /-- What the replay carries from one step to the next. -/
 structure State where
@@ -945,21 +1089,26 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
         | throwError "vampire: skolemisation {s.number} has no parent"
       let some parent := st.proofs[parentNum]?
         | throwError "vampire: the parent of skolemisation {s.number} is unproved"
-      let (witnesses, spec) ← skolemise r.symbols s parent
-      let mut skolems := st.skolems
-      for (f, w) in witnesses do skolems := skolems.insert f w
-      let interp := { st.interp with skolem := fun f => skolems[f]? }
-      let want ← stepType interp r.symbols s
-      let specStx ← exprToSyntax spec
-      -- `symm_match using` wants a hypothesis, so the specification is bound first.
-      let spec := mkIdent (Name.mkSimple "spec")
-      let e ← proveBy want
-        #[← `(tactic| have $spec:ident := $specStx),
-          ← `(tactic| first | exact $spec | symm_match using $spec)]
-        m!"skolemisation {s.number}"
-      replayFrom r { st with
-        skolems, interp
-        proofs := st.proofs.insert s.number e, last := some e } (k + 1)
+      let (witnesses, spec) ← skolemise st.interp r.symbols s parent
+      -- Each skolem symbol is `let`-bound rather than substituted, for the same reason
+      -- the definitions are. `Classical.choose h` carries the proof `h`, and two
+      -- occurrences built from different — even equivalent — existentials are not
+      -- definitionally equal, so a clause mentioning one will not close a goal
+      -- mentioning the other. Binding it once makes every use the same variable, and
+      -- keeps `cnfify` from seeing a witness where Vampire has an opaque constant.
+      withSkolems witnesses.toList st.skolems st.bound fun skolems bound => do
+        let interp := { st.interp with skolem := fun f => skolems[f]? }
+        let want ← stepType interp r.symbols s
+        let specStx ← exprToSyntax spec
+        -- `symm_match using` wants a hypothesis, so the specification is bound first.
+        let specId := mkIdent (Name.mkSimple "spec")
+        let e ← proveBy want
+          #[← `(tactic| have $specId:ident := $specStx),
+            ← `(tactic| first | exact $specId | symm_match using $specId)]
+          m!"skolemisation {s.number}"
+        replayFrom r { st with
+          skolems, interp, bound
+          proofs := st.proofs.insert s.number e, last := some e } (k + 1)
     | _ =>
       let mut premises : Array Step := #[]
       for n in s.premises do

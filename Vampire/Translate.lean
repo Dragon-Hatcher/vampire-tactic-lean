@@ -158,11 +158,17 @@ where
     | lam .. =>
       throwError "vampire: cannot translate{indentD e}\n\
         first-order logic has no lambdas; try instantiating or eta-expanding it"
-    | forallE n t b bi => withScopedName n b fun n => do
+    | e@(forallE n t b bi) => withScopedName n b fun n => do
       let tmB ← Meta.withLocalDecl n bi t (translateBody b)
-      if !b.hasLooseBVars then
-        -- A non-dependent arrow between non-propositions is a function sort; between
-        -- propositions it is implication, which `Translate/Prop.lean` handles first.
+      -- What decides between a quantifier and a function sort is whether the whole
+      -- `∀` is a proposition, not whether its binder is used. `∀ (v : ι), ψ` where ψ
+      -- happens not to mention `v` is still a quantified formula; reading it as the
+      -- sort `ι → ψ` declares a symbol whose argument sort is a formula, which is not
+      -- first-order and is rejected further down with no hint of where it came from.
+      -- Implication between propositions is handled earlier, by `Translate/Prop.lean`.
+      if (← Meta.inferType e).isProp then
+        return forallT n.toString (← applyTranslators! t) tmB
+      else if !b.hasLooseBVars then
         return arrowT (← applyTranslators! t) tmB
       else
         return forallT n.toString (← applyTranslators! t) tmB
