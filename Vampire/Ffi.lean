@@ -161,4 +161,16 @@ def solve (deciseconds : UInt32 := 100) : BaseIO (Option Bool) := do
   | 1 => return some Bool.true
   | _ => return none
 
+@[extern "lean_vampire_solve_reason"]
+private opaque solveReasonRaw : BaseIO String
+
+/-- Why the last solve found no refutation — Vampire's own explanation. -/
+def solveReason : BaseIO String := solveReasonRaw
+
+@[extern "lean_vampire_proof_outline"]
+private opaque proofOutlineRaw : BaseIO String
+
+/-- A one-line-per-step outline of the last refutation, for diagnostics. -/
+def proofOutline : BaseIO String := proofOutlineRaw
+
 end Vampire.Ffi

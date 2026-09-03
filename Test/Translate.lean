@@ -95,15 +95,50 @@ example (α : Type) (f : α → α) (a : α) (h : ∀ (β : Type) (g : β → β
 
 end NotFirstOrder
 
-section Admitted
+section Closed
 
-/-! `vampire` runs the same pipeline and, when the prover refutes the goal, admits it
-with a warning: replaying an arbitrary refutation as a Lean proof is not implemented
-yet. The dependency on `sorryAx` is the honest record of that. -/
+/-! `vampire` runs the same pipeline and replays the refutation as a Lean proof term. -/
 
-theorem admitted_for_now (p q : Prop) (hp : p) (hpq : p → q) : q := by
+theorem modus_ponens (p q : Prop) (hp : p) (hpq : p → q) : q := by
   vampire
 
-#print axioms admitted_for_now
+theorem chained (α : Type) (f : α → α) (P : α → Prop) (a : α)
+    (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
+  vampire
 
-end Admitted
+theorem by_equality (α : Type) (f : α → α) (a : α) (h : ∀ x, f x = x) : f (f a) = a := by
+  vampire
+
+theorem congruence (α : Type) (f : α → α) (a b : α) (h : a = b) : f (f a) = f (f b) := by
+  vampire
+
+theorem symmetry_used (α : Type) (r : α → α → Prop) (h : ∀ x y, r x y → r y x) (a b : α) :
+    r a b → r b a := by
+  vampire
+
+-- Vampire's logic assumes every sort is non-empty and this refutation uses that: it
+-- resolves `∀ x, P x` against `∀ x, ¬P x`. The generated file gets its witness from an
+-- `[Inhabited ι]` in the preamble; here `a` supplies it.
+theorem exists_witness (α : Type) (P : α → Prop) (h : ∀ x, P x) (a : α) : ∃ y, P y := by
+  vampire
+
+-- Definitions, unfolded into their defining equations before the prover sees them.
+theorem near_of_dist (a b : Point) (h : dist a b = origin) : near a b := by
+  vampire [near]
+
+-- Several hypotheses, only some of them used.
+theorem picks_what_it_needs (α : Type) (r : α → α → Prop) (a b c : α)
+    (irrelevant : ∀ x, r x x) (trans : ∀ x y z, r x y → r y z → r x z)
+    (h₁ : r a b) (h₂ : r b c) : r a c := by
+  vampire
+
+#print axioms modus_ponens
+#print axioms chained
+#print axioms by_equality
+#print axioms congruence
+#print axioms symmetry_used
+#print axioms exists_witness
+#print axioms near_of_dist
+#print axioms picks_what_it_needs
+
+end Closed

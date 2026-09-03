@@ -23,42 +23,37 @@ Lean 4.33.0 everywhere. `lake build` runs the tests as `#eval`s and fails on reg
 
 ## What works
 
-**Goal translation.** `vampire?` preprocesses a goal, translates it, builds it inside
-Vampire and runs the prover:
+The whole loop, in process:
 
-    example (α : Type) (f : α → α) (P : α → Prop) (a : α)
+    theorem chained (α : Type) (f : α → α) (P : α → Prop) (a : α)
         (h₁ : ∀ x, P x → P (f x)) (h₂ : P a) : P (f (f a)) := by
-      vampire?
-    -- 1. 'P'(a) [input(axiom)]
-    -- 2. ! [X0 : 'α'] : ('P'(X0) => 'P'(f(X0))) [input(axiom)]
-    -- 3. ~'P'(f(f(a))) [input(axiom)]
-    -- refuted
+      vampire
+    -- 'chained' depends on axioms: [propext, Classical.choice, Quot.sound]
 
-Monomorphic FOL with equality; definitions become declarations plus defining equations.
-The pipeline is a port of lean-smt's — registry, dependency graph, preprocessing steps —
-with `Translate/Build.lean` replacing its SMT-LIB printer by compilation into Vampire's
-own structures. Attribution per file and in `NOTICE`.
+**Goal translation** is a port of lean-smt's pipeline — the `@[vampire_translate]`
+registry, the translation monad with its dependency tracking, the graph that orders
+declarations, the preprocessing steps — retargeted from SMT-LIB text at an embedded
+Vampire's own `Signature`/`Term`/`Literal`/`Formula`. Provenance in `NOTICE`.
 
-**Replay,** on one shape:
+**Proof translation** is a port of Vampire's own Lean code generator
+(`Shell/LeanChecker`): one lemma per inference with the same statement, proved by the
+same tactic script, chained the same way — as `Expr`s and tactic `Syntax` rather than
+source text. This fork's changes to those scripts are included.
 
-    theorem resolution_two_step (p q : Prop) (h : p ∨ q) (hp : ¬p) (hq : ¬q) : False := by
-      vampire_replay
-    -- 'resolution_two_step' does not depend on any axioms
-
-The problem there is built with `Signature`/`Literal`/`Clause`, saturation runs
-in-process, and the refutation crosses the FFI as unit numbers / rule ids / premise
-lists / `(atom, polarity)` pairs for `Vampire/Reconstruct.lean` to rebuild as `Or.elim`
-+ `absurd`.
+`vampire?` stops before the replay and shows the problem as Vampire renders it plus an
+outline of the refutation.
 
 ## What does not
 
-- **The two halves are not joined.** `vampire` translates and runs, then *admits* a
-  refuted goal with a warning (`sorryAx`). Joining them needs the refutation to come
-  back as first-order terms rather than `(atom, polarity)` pairs, and reconstruction to
-  handle more than binary propositional resolution.
 - **Polymorphism.** Vampire's logic is monomorphic; lean-smt's monomorphisation pass is
-  not ported, so a polymorphic hypothesis is skipped (or, if named as a hint, reported).
-- No arithmetic or other theories, no `ite`, no `let`, no datatypes.
+  not ported. A polymorphic hypothesis swept up from the context is skipped; one named
+  as a hint is reported.
+- **AVATAR.** Splitting, the SAT refutation, and this fork's resolution replay of it are
+  not ported, so the tactic runs with `avatar off`. Biggest remaining piece.
+- **Skolemisation and the definition introductions**, which bring symbols into the proof
+  that the goal has no term for.
+- **Multi-clause clausification**, `rectify` with a non-identity renaming, the
+  quantifier reordering after prenexing, and arithmetic.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
 
 ## Things that will bite
@@ -78,10 +73,16 @@ Recorded because each cost real time to find.
    with `find()`.
 5. **Function-local statics that cache Vampire objects** dangle after a reset. Fixed for
    the built-in sorts; six more are listed in the audit, unhandled.
-6. **A `Unit*` does not survive preprocessing.** The problem's unit list is replaced by
+6. **The inference replayer leaked its saturation algorithm.** A `SaturationAlgorithm`
+   registers itself and its indexes globally and unregisters only in its destructor, so
+   the second problem solved in a process saturated without finding a proof it had
+   found the first time. Invisible in a one-shot binary; fatal embedded. Fixed in the
+   fork; the same shape is worth suspecting whenever run *n+1* behaves differently from
+   run *n*.
+7. **A `Unit*` does not survive preprocessing.** The problem's unit list is replaced by
    clausification, so anything the FFI wants to report about the input must be captured
    when it is built, not read back afterwards.
-7. **Vampire generation is nondeterministic** under a wall-clock limit, so any
+8. **Vampire generation is nondeterministic** under a wall-clock limit, so any
    before/after comparison must transform one fixed generated file, or sample enough to
    average out. This produced a phantom "2.6× regression" earlier in the work.
 
@@ -94,6 +95,7 @@ Recorded because each cost real time to find.
     e3f62c2  `Lib::resetGlobalState` — more than one problem per process
     124034e  no exit(10); `Timer::startClock` so the timeout cannot _Exit the host
     9a593d8  re-arm the exit lock between runs
+    e101aa7  do not leak the inference replayer's saturation algorithm
 
 The first three are proof-generation work from before the FFI and are independent of
 it: all 14 ALG problems that Vampire solves now check, 874s → 233s, four former

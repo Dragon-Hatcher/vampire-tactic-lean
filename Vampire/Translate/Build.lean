@@ -54,6 +54,20 @@ structure Decl where
   arity : Nat
   deriving Inhabited
 
+/-- Where an assertion in the built problem came from.
+
+`Query` records one assertion per hypothesis, but a definition also contributes one —
+its defining equation, which Vampire needs because it has no definitions. That equation
+has no Lean hypothesis behind it: it holds by `rfl`. Keeping the distinction here is
+what lets the refutation find its way back to the right Lean term.
+-/
+inductive AssertSource where
+  /-- A translated hypothesis; the proof comes from `Query.asserted`. -/
+  | hypothesis
+  /-- The defining equation of `symbol`. -/
+  | definition (symbol : String)
+  deriving Inhabited
+
 structure BuildState where
   names : Array String := #[]
   nameIdx : Std.HashMap String Nat := {}
@@ -64,6 +78,8 @@ structure BuildState where
   /-- Bound variables in scope, by the name the translation gave them. -/
   vars : Std.HashMap String Nat := {}
   nextVar : Nat := 0
+  /-- The assertions emitted so far, in order. -/
+  asserts : Array AssertSource := #[]
   deriving Inhabited
 
 abbrev BuildM := StateT BuildState MetaM
@@ -210,7 +226,9 @@ private def compileCommand (c : Command) : BuildM Unit := do
   match c with
   | .declareSort nm arity => declareSort nm arity
   | .declare nm st => declareSymbol nm st
-  | .assert tm => compileForm tm; emitOp .assert; emitNat 0
+  | .assert tm =>
+    compileForm tm; emitOp .assert; emitNat 0
+    modify fun s => { s with asserts := s.asserts.push .hypothesis }
   | .defineSort nm _ _ =>
     throwError "vampire: the type abbreviation '{nm}' is not translated yet; \
       unfold it in the goal first"
@@ -226,19 +244,23 @@ private def compileCommand (c : Command) : BuildM Unit := do
     let eqn := ps.foldr (fun (n, s) t => .forallT n s t) body
     compileForm eqn
     emitOp .assert; emitNat 0
+    modify fun s => { s with asserts := s.asserts.push (.definition nm) }
 
 end BuildM
 
-/-- Compile the whole problem into the name table and instruction stream. -/
-def compile (cmds : List Command) : MetaM (Array String × Array UInt32) := do
+/-- Compile the whole problem into the name table and instruction stream, and say where
+each assertion came from. -/
+def compile (cmds : List Command) :
+    MetaM (Array String × Array UInt32 × Array AssertSource) := do
   let (_, st) ← (cmds.forM BuildM.compileCommand).run {}
-  return (st.names, st.code)
+  return (st.names, st.code, st.asserts)
 
-/-- Send a compiled problem to Vampire, which constructs it in its own structures. -/
-def send (cmds : List Command) : MetaM Unit := do
-  let (names, code) ← compile cmds
+/-- Send a compiled problem to Vampire, which constructs it in its own structures.
+Returns where each of its assertions came from, in order. -/
+def send (cmds : List Command) : MetaM (Array AssertSource) := do
+  let (names, code, asserts) ← compile cmds
   match ← Ffi.build names code with
-  | .ok => return
+  | .ok => return asserts
   | status => throwError "vampire: could not build the problem: {status}\n{← Ffi.buildError}"
 
 end Vampire

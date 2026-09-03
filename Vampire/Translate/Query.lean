@@ -184,13 +184,43 @@ where
 
 end QueryBuilderM
 
-def emitVertex (cmds : Std.HashMap Expr Command) (e : Expr) : StateT (List Command) MetaM Unit := do
+def emitVertex (cmds : Std.HashMap Expr Command) (e : Expr) :
+    StateT (List (Expr × Command)) MetaM Unit := do
   let some cmd := cmds[e]? | throwError "vampire: no command was computed for {e}"
-  modify (cmd :: ·)
+  modify ((e, cmd) :: ·)
 
-/-- Turn a list of hypotheses into the declarations and assertions Vampire is given. -/
+/-- The Lean term each declared symbol stands for, keyed by the name Vampire will know
+it under. This is the correspondence the proof comes back through, so it is kept rather
+than recovered by parsing names later. -/
+def symbolTable (cmds : List Command) (commands : Std.HashMap Expr Command) :
+    Std.HashMap String Expr :=
+  let named : Command → Option String
+    | .declareSort nm _ => some nm
+    | .declare nm _ => some nm
+    | .defineFun nm _ _ _ _ => some nm
+    | .defineSort nm _ _ => some nm
+    | .assert _ => none
+  let emitted := cmds.filterMap named
+  commands.fold (init := {}) fun m e c =>
+    match named c with
+    | some nm => if emitted.contains nm then m.insert nm e else m
+    | none => m
+
+/-- What `generateQuery` produces. -/
+structure Query where
+  /-- The declarations and assertions, in the order Vampire receives them. -/
+  commands : List Command
+  /-- What each declared symbol means in Lean, by the name Vampire knows it under. -/
+  symbols : Std.HashMap String Expr
+  /-- The proof of each assertion, in assertion order. Vampire numbers its input units
+  in that same order, so this is how a step of the refutation finds the Lean hypothesis
+  it came from. -/
+  asserted : Array Expr
+
+/-- Turn a list of hypotheses into the declarations and assertions Vampire is given,
+together with what each declared symbol means in Lean. -/
 def generateQuery (hs : List Expr) (fvNames : Std.HashMap FVarId String) :
-    MetaM (List Command) := do
+    MetaM Query := do
   trace[vampire.translate.query] "hypotheses: {hs}"
   -- A constant that is not a theorem carries content in its body, so define it rather
   -- than leaving it uninterpreted; the same goes for a `let` bound to a non-proof.
@@ -207,7 +237,12 @@ def generateQuery (hs : List Expr) (fvNames : Std.HashMap FVarId String) :
     |>.run {}
     |>.run { uniqueFVarNames := fvNames }
   trace[vampire.translate.query] "dependency graph: {st.graph}"
-  let (_, cmds) ← StateT.run (st.graph.orderedDfs hs (emitVertex st.commands)) []
-  return cmds.reverse
+  let (_, emitted) ← StateT.run (st.graph.orderedDfs hs (emitVertex st.commands)) []
+  let emitted := emitted.reverse
+  let cmds := emitted.map (·.2)
+  let asserted := emitted.filterMap fun (e, c) =>
+    match c with | .assert _ => some e | _ => none
+  return { commands := cmds, symbols := symbolTable cmds st.commands,
+           asserted := asserted.toArray }
 
 end Vampire.Query

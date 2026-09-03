@@ -24,12 +24,13 @@ hypotheses are jointly unsatisfiable. Translation maps each hypothesis onto a
 first-order formula, collecting the symbols it mentions; the query builder orders those
 into declarations; and the compiler constructs the whole thing inside Vampire.
 
-**The last arrow is not implemented for arbitrary goals.** `vampire` translates, builds
-and runs, but replaying the refutation only works for the propositional resolution
-demonstrated by `vampire_replay`. Until that catches up, `vampire` admits a refuted goal
-with a warning, so the proof depends on `sorryAx` and says so.
+Replay is a port of Vampire's own Lean code generator into the elaborator: the same
+lemma per inference, proved by the same tactic script, assembled into the same chain —
+built as `Expr`s and tactic `Syntax` rather than written to a file. See
+`Vampire/Reconstruct.lean`, which also lists the rules that are not ported yet.
 
-Use `vampire?` to see the problem Vampire was given; it leaves the goal alone.
+Use `vampire?` to see the problem Vampire was given and the refutation it found; it
+leaves the goal alone.
 -/
 
 namespace Vampire
@@ -79,24 +80,56 @@ Preprocess `mv`, translate it, and build the problem inside Vampire.
 Works on a copy of the goal, so nothing here changes what the user has to prove; the
 copy is returned along with the hypotheses that were sent.
 -/
-def buildProblem (mv : MVarId) (hs : Array Expr) :
-    MetaM (List Command × Array Expr × MVarId) := mv.withContext do
+structure Built where
+  /-- The declarations and assertions Vampire was given. -/
+  commands : List Command
+  /-- What each declared symbol means in Lean, by the name Vampire knows it under. -/
+  symbols : Std.HashMap String Expr
+  /-- What each assertion in the built problem is, in the order Vampire numbers its
+  input units — so input unit `k` is `inputs[k-1]`. -/
+  inputs : Array Input
+  /-- The preprocessed goal, whose target is `False`. -/
+  goal : MVarId
+  /-- The copy of the original goal that preprocessing worked on. Assigning it is what
+  transfers the replayed proof back to the user's goal. -/
+  root : MVarId
+
+def buildProblem (mv : MVarId) (hs : Array Expr) : MetaM Built := mv.withContext do
   -- Everything propositional in the local context, then the hints. Unlike lean-smt,
   -- which sends only what it is given, the context is swept up automatically: this is
   -- meant to be a hammer, and a hypothesis it cannot read is skipped rather than fatal.
   let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
   let hs := locals.filter (fun l => !hs.contains l) ++ hs
   let mv₀ := (← Meta.mkFreshExprMVar (← mv.getType)).mvarId!
-  let mv₀ ← mv₀.cleanup (← hs.foldlM (fun s h => return (← (Expr.collectFVars h).run s).snd) {}).fvarIds
+  -- lean-smt prunes the context to what the hints mention. We keep it: a refutation can
+  -- need an element of a sort to stand for a variable Vampire left free, and the term
+  -- that supplies it is often exactly the one pruning would drop — `a : α` in a goal
+  -- that only mentions `α` and `P`. Translation is limited by the dependency graph, not
+  -- by what is in scope, so nothing else changes.
   mv₀.withContext do
   let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs
     #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
   mv₁.withContext do
     let (fvNames, _) ← genUniqueFVarNames
-    let cmds ← Query.generateQuery hs₁.toList fvNames
-    trace[vampire] "problem:{indentD (MessageData.joinSep (cmds.map toMessageData) Format.line)}"
-    send cmds
-    return (cmds, hs₁, mv₁)
+    let q ← Query.generateQuery hs₁.toList fvNames
+    let rendered := MessageData.joinSep (q.commands.map toMessageData) Format.line
+    trace[vampire] "problem:{indentD rendered}"
+    let sources ← send q.commands
+    let mut inputs : Array Input := #[]
+    let mut next := 0
+    for src in sources do
+      match src with
+      | .hypothesis =>
+        let some p := q.asserted[next]?
+          | throwError "vampire: the problem has more assertions than hypotheses"
+        inputs := inputs.push (.hypothesis p)
+        next := next + 1
+      | .definition nm =>
+        let some e := q.symbols[nm]?
+          | throwError "vampire: no Lean term for the definition '{nm}'"
+        inputs := inputs.push (.definition e)
+    return { commands := q.commands, symbols := q.symbols, inputs,
+             goal := mv₁, root := mv₀ }
 
 /-- The problem as Vampire itself renders it, for diagnostics. -/
 def problemAsVampireSeesIt : MetaM MessageData := do
@@ -107,12 +140,28 @@ def problemAsVampireSeesIt : MetaM MessageData := do
   return MessageData.joinSep lines.toList Format.line
 
 /-- Build and run. -/
-def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM Outcome := do
-  let _ ← buildProblem mv hs
+def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM (Outcome × Built) := do
+  let built ← buildProblem mv hs
   match ← Ffi.solve deciseconds with
-  | some true => return .refuted
-  | some false => return .notRefuted
+  | some true => return (.refuted, built)
+  | some false => return (.notRefuted, built)
   | none => throwError "vampire: the prover raised an exception"
+
+/-- What the exported proof's symbols and input units mean in Lean. -/
+def interpOf (built : Built) (syms : Symbols) : Interp where
+  sort := fun s => (syms.sorts[s]?).bind (built.symbols[·]?)
+  fn := fun f => ((syms.funs[f]?).map (·.name)).bind (built.symbols[·]?)
+  pred := fun p => ((syms.preds[p]?).map (·.name)).bind (built.symbols[·]?)
+  input := fun n => if n == 0 then none else built.inputs[n - 1]?
+
+/-- Replay the refutation Vampire found as a Lean proof of `False`, in the context of
+the preprocessed goal. -/
+def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext do
+  match ← Ffi.exportProof with
+  | .error e => throwError e
+  | .ok refutation =>
+    trace[vampire] "replaying {refutation.steps.size} steps"
+    Replay.replay (interpOf built refutation.symbols) refutation
 
 /-- Collect the hypotheses named in `vampire [h₁, h₂]`. -/
 private def elabHints (stx : Syntax) : TacticM (Array Expr) := do
@@ -140,13 +189,13 @@ elab_rules : tactic
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
       match ← run g hs 100 with
-      | .notRefuted =>
-        throwError "vampire: no refutation found"
-      | .refuted =>
-        logWarning m!"vampire: the prover refuted the goal, but replaying its refutation \
-          as a Lean proof is not implemented for arbitrary goals yet, so the goal is \
-          admitted — this proof depends on `sorryAx`"
-        g.admit true
+      | (.notRefuted, _) =>
+        throwError "vampire: no refutation found — {← Ffi.solveReason}"
+      | (.refuted, built) =>
+        let proof ← replayRefutation built
+        built.goal.assign proof
+        g.assign (.mvar built.root)
+        logInfo m!"vampire: closed by a refutation replayed from the prover"
 
   | `(tactic| vampire? $hints:hintList) => do
     let hs ← elabHints hints
@@ -154,70 +203,12 @@ elab_rules : tactic
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      let outcome ← run g hs 100
+      let (outcome, _) ← run g hs 100
       let verdict := if outcome == .refuted then "refuted" else "no refutation found"
+      let outlineText ← if outcome == .refuted then Ffi.proofOutline else pure ""
+      let outline : MessageData :=
+        if outlineText.isEmpty then m!"" else m!"\nrefutation:{indentD outlineText}"
       logInfo m!"vampire: the problem, as Vampire received it:\
-        {indentD (← problemAsVampireSeesIt)}\n{verdict}"
-
-/-- The propositional replay demonstrated end to end. The problem is hard-coded, so this
-only closes `(p ∨ q) → ¬p → ¬q → False`; what it shows is that a refutation coming back
-across the FFI becomes a real proof term, with no axioms beyond Lean's own. -/
-syntax (name := vampireReplay) "vampire_replay" : tactic
-
-/-- Match `(a ∨ b) → ¬a → ¬b → False` and return `(a, b, h₁, h₂, h₃)`. -/
-private def matchBuiltinGoal (g : MVarId) : MetaM (Option (Expr × Expr × Expr × Expr × Expr)) :=
-  g.withContext do
-    let lctx ← getLCtx
-    let mut disj : Option (Expr × Expr × Expr) := none
-    let mut negs : Array (Expr × Expr) := #[]
-    for d in lctx do
-      if d.isImplementationDetail then continue
-      let ty ← instantiateMVars d.type
-      match ty.app2? ``Or with
-      | some (a, b) => if disj.isNone then disj := some (a, b, d.toExpr)
-      | none =>
-        if let some a := ty.not? then negs := negs.push (a, d.toExpr)
-    let some (a, b, hOr) := disj | return none
-    let some (_, hA) := negs.find? (fun (x, _) => x == a) | return none
-    let some (_, hB) := negs.find? (fun (x, _) => x == b) | return none
-    return some (a, b, hOr, hA, hB)
-
-elab_rules : tactic
-  | `(tactic| vampire_replay) => do
-    let g ← getMainGoal
-    g.withContext do
-      unless (← Ffi.init) == .ok do
-        throwError "vampire: the embedded prover is not available"
-
-      unless (← g.getType).isConstOf ``False do
-        throwError m!"vampire_replay: the goal must be `False` (the problem is \
-          hard-coded); got {← g.getType}"
-
-      let some (a, b, hOr, hA, hB) ← matchBuiltinGoal g
-        | throwError "vampire_replay: no hypotheses matching the hard-coded problem \
-            `(p ∨ q), ¬p, ¬q`"
-
-      let some proof ← Ffi.runBuiltinProblem
-        | throwError "vampire_replay: no refutation found"
-
-      let p ← Ffi.atom 0
-      let q ← Ffi.atom 1
-      let interp : Interp := {
-        atom := fun x => if x == p then some a else if x == q then some b else none
-        input := fun n =>
-          match proof.find? (fun s => s.number == n) with
-          | none => none
-          | some s =>
-            if s.literals.size == 2 then some hOr
-            else if s.literals.size == 1 && s.literals[0]!.atom == p then some hA
-            else if s.literals.size == 1 && s.literals[0]!.atom == q then some hB
-            else none }
-
-      let term ← reconstruct interp proof
-      unless (← isDefEq (← inferType term) (.const ``False [])) do
-        throwError m!"vampire_replay: replayed proof has type {← inferType term}, \
-          expected False"
-      g.assign term
-      logInfo m!"vampire: closed by a {proof.size}-step refutation replayed from the prover"
+        {indentD (← problemAsVampireSeesIt)}\n{verdict}{outline}"
 
 end Vampire

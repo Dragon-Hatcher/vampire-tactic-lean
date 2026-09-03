@@ -51,9 +51,13 @@ No `sorry` and no axioms at all: propositional resolution replays as `Or.elim` a
 - **The whole problem crosses in one call.** The FFI entry lock makes a call atomic but
   not a sequence of them, and Vampire's signature is process-global, so a build spread
   over many calls could be interleaved by another elaboration thread.
-- **Replay through VampLean.** Proof checking uses the upstream reconstruction lemmas
-  (`vamp_lean`), so this library owns translation and replay, not the inference-level
-  lemmas.
+- **Replay is a port of Vampire's own Lean code generator.**
+  `Shell/LeanChecker/LeanChecker.cpp` writes a Lean file: one `theorem inf_sN` per
+  inference, proved by a tactic script, chained by a `fullProof` that applies them in
+  turn. `Vampire/Reconstruct.lean` produces the same proof in the elaborator, as `Expr`s
+  and tactic `Syntax` rather than as source text, including this fork's own changes to
+  those scripts. The tactics themselves come from VampLean, so this library owns
+  translation and replay, not the inference-level lemmas.
 
 ## What translates
 
@@ -66,9 +70,25 @@ first-order reading is skipped rather than being fatal — that is what makes sw
 reasonable. A hint named explicitly in `vampire [h]` is never skipped; failing to
 translate it is an error.
 
-Not translated: polymorphism (Vampire's logic is monomorphic — lean-smt's
-monomorphisation pass is not ported), arithmetic and other theories, `ite`, `let`,
-datatypes, higher-order arguments.
+**Not translated: polymorphism.** Vampire's logic is monomorphic, and lean-smt's
+monomorphisation pass is not ported, so a polymorphic hypothesis is skipped when it is
+swept up from the context and reported when it is named as a hint. Also not translated:
+arithmetic and other theories, `ite`, `let`, datatypes, higher-order arguments.
+
+## What replays
+
+The rules the ported handlers cover: resolution, superposition, demodulation,
+factoring, equality resolution and factoring, subsumption resolution, the literal
+tidying rules, definition unfolding, the normal forms (ENNF, NNF, flattening, tautology
+removal), rectification, single-clause clausification, and unused predicate definition
+removal.
+
+**Not replayed: AVATAR.** Splitting, the SAT refutation and the resolution replay of it
+this fork added are not ported, so the tactic runs Vampire with `avatar off` rather than
+producing steps it cannot replay. That costs search power on large problems and is the
+biggest piece still missing. Skolemisation, the definition introductions, multi-clause
+clausification, and `rectify` with a non-identity renaming are also unported.
+`Vampire/Reconstruct.lean` lists them, and a step that needs one is reported by name.
 
 ## Layout
 
@@ -83,11 +103,11 @@ datatypes, higher-order arguments.
     Vampire/Translate/Build.lean    compile into Vampire, across the FFI
     Vampire/Ffi.lean                typed bindings to the embedded prover
     Vampire/Proof.lean              the refutation, read back as structured data
-    Vampire/Reconstruct.lean        refutation -> Lean proof term
-    Vampire/Tactic.lean             `vampire`, `vampire?`, `vampire_replay`
+    Vampire/Reconstruct.lean        the port of Vampire's Lean code generator
+    Vampire/Tactic.lean             `vampire` and `vampire?`
     ffi/vampire_ffi.cpp             environment, reset, threading
     ffi/vampire_build.cpp           builds a translated problem, runs it
-    ffi/vampire_problem.cpp         the hard-coded problem behind `vampire_replay`
+    ffi/vampire_proof.cpp           exports the refutation as structured data
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
     docs/STATUS.md                  working notes
 

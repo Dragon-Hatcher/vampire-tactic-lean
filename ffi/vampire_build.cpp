@@ -16,6 +16,7 @@
 
 #include "vampire_lock.hpp"
 
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@
 #include "Lib/Reset.hpp"
 #include "Lib/Timer.hpp"
 #include "Kernel/Formula.hpp"
+#include "Kernel/InferenceStore.hpp"
 #include "Kernel/FormulaUnit.hpp"
 #include "Kernel/Inference.hpp"
 #include "Kernel/OperatorType.hpp"
@@ -287,6 +289,7 @@ extern "C" {
 uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_arg);
 
 static std::string g_error;
+static std::string g_solveReason;
 
 uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_arg) {
   vampire_ffi::EntryGuard guard;
@@ -318,6 +321,12 @@ uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_
     g_error = "unknown C++ exception";
     return 2;
   }
+}
+
+/** Why the last solve did not produce a refutation. */
+lean_obj_res lean_vampire_solve_reason(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return lean_mk_string(g_solveReason.c_str());
 }
 
 /** The message from the last failed build. */
@@ -361,10 +370,71 @@ uint32_t lean_vampire_solve(uint32_t deciseconds, lean_obj_arg) {
   try {
     if (g_built == nullptr) return 0;
     env.options->setTimeLimitInDeciseconds(deciseconds);
+    // The options the Lean code generator is written against. `proof_extra lean` is
+    // what makes preprocessing record the information the replay needs — how many
+    // clauses a formula clausified into, which literal a subsumption selected — and
+    // without it those come back empty rather than wrong, which is worse.
+    env.options->set("proof", "leancheck");
+    env.options->set("proof_extra", "lean");
+    env.options->set("skolemization", "syntactic");
+    // AVATAR is off because its proof steps are not ported yet: the SAT refutation,
+    // the split clauses and the per-theorem split binders all need machinery the Lean
+    // replay does not have. Turning it off costs search power on large problems and
+    // nothing on small ones; turning it back on is what the port needs next.
+    env.options->set("avatar", "off");
     Saturation::ProvingHelper::runVampire(*g_built, *env.options);
-    return env.statistics->refutation != nullptr ? 1 : 0;
-  } catch (...) {
+    if (env.statistics->refutation != nullptr) return 1;
+    std::ostringstream why;
+    env.statistics->explainRefutationNotFound(why);
+    g_solveReason = why.str();
+    if (g_solveReason.empty())
+      g_solveReason = "the search finished without a refutation";
+    return 0;
+  } catch (Exception &e) {
+    g_solveReason = e.msg();
     return 2;
+  } catch (...) {
+    g_solveReason = "unknown C++ exception";
+    return 2;
+  }
+}
+
+/**
+ * A one-line-per-step outline of the refutation: unit number, rule, premises.
+ *
+ * A survey, not the proof: `vampire_proof.cpp` exports the proof as structured data.
+ */
+lean_obj_res lean_vampire_proof_outline(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  try {
+    Unit *refutation = env.statistics->refutation;
+    if (refutation == nullptr) return lean_mk_string("");
+    struct Survey : public InferenceStore::AbstractProofPrinter {
+      std::string text;
+      Survey(std::ostream &o, InferenceStore *is) : AbstractProofPrinter(o, is) {}
+      void printStep(Unit *u) override {
+        text += std::to_string(u->number());
+        text += "  ";
+        text += ruleName(u->inference().rule());
+        text += "  [";
+        bool first = true;
+        for (Unit *p : iterTraits(u->getParents())) {
+          if (!first) text += ",";
+          text += std::to_string(p->number());
+          first = false;
+        }
+        text += "]  ";
+        text += u->toString();
+        text += "\n";
+      }
+    };
+    std::ostringstream sink;
+    Survey s(sink, InferenceStore::instance());
+    s.scheduleForPrinting(refutation);
+    s.print();
+    return lean_mk_string(s.text.c_str());
+  } catch (...) {
+    return lean_mk_string("");
   }
 }
 
