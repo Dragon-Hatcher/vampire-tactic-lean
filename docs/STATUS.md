@@ -180,15 +180,20 @@ Recorded because each cost real time to find.
 9. **Vampire generation is nondeterministic** under a wall-clock limit, so any
    before/after comparison must transform one fixed generated file, or sample enough to
    average out. This produced a phantom "2.6× regression" earlier in the work.
-10. **Enough `+mono` goals in one module and the prover segfaults.** Cumulative work,
-   not any one goal and not a count: the goal that crashes proves in seconds on its own,
-   replacing it with a trivial goal crashes just the same, thirty copies of one small
-   goal are fine, and so are fifteen varied small ones — but two large searches back to
-   back are enough. `Test/GroupTheory.lean` and `Test/GroupAbelian.lean` are split for
-   this reason, and their notes record the measurements. `+mono` is implicated: the same
-   statements written first-order by hand all pass in one module. The likely cause is
-   the allocator never being reset across runs, which is already an open question below;
-   this is the first thing to make it fail rather than merely grow.
+10. **Two large problems in one process used to segfault** — fixed, but the shape is
+   worth remembering. `TermPartialOrdering` cached relations in function-local statics,
+   and a cached relation keeps a `const Ordering&`; the second problem got the first
+   problem's ordering and died on a vtable call into freed memory. It only showed up on
+   problems large enough for forward demodulation, and only on the *second* one, because
+   nothing read the stale cache until then. `Lib::resetGlobalState` drops it now. Two
+   things made this hard to see: a wrong hypothesis (`+mono`, which was merely correlated
+   with the problems being large), and a broken reproducer — see 11.
+11. **`lean` needs `--load-dynlib` for the extern lib as well as `--plugin` for each
+   precompiled module.** `lake setup-file`'s JSON has both a `plugins` and a `dynlibs`
+   key; miss the second and the FFI symbols are unresolved and the process dies before
+   running anything. Two hours went into a backtrace of that crash rather than the real
+   one. Validate any hand-built `lean` invocation on a goal you know passes before
+   believing what it says about one that fails.
 
 ## Fork changes, in order
 
@@ -200,6 +205,7 @@ Recorded because each cost real time to find.
     124034e  no exit(10); `Timer::startClock` so the timeout cannot _Exit the host
     9a593d8  re-arm the exit lock between runs
     e101aa7  do not leak the inference replayer's saturation algorithm
+    4473042  reset TermPartialOrdering's caches between problems
 
 The first three are proof-generation work from before the FFI and are independent of
 it: all 14 ALG problems that Vampire solves now check, 874s → 233s, four former

@@ -141,12 +141,31 @@ signature and term-sharing table, and because the static is already initialised 
 stale pointer is returned for the rest of the process's life. They are file-scope
 pointers now, filled lazily, and `Term::resetBuiltinCache()` drops them.
 
+`TermPartialOrdering.cpp` had two of the same shape and they did bite — this is the one
+that made the second large problem in a process segfault:
+
+```cpp
+static TermPartialOrdering empty(ord);                       // getEmpty
+static DHMap<tuple<...>, const TermPartialOrdering*> cache;  // set
+```
+
+A `TermPartialOrdering` keeps a `const Ordering&` and `TermList`s from the term-sharing
+table, so relations cached under the first problem's ordering were handed to the second,
+which died on the first `_ord.compare` — a vtable call through a destroyed `Ordering`.
+Reached from forward demodulation by way of `TermOrderingDiagram`, which is why only
+problems large enough to demodulate ever saw it, and why one such problem alone looked
+fine: nothing read the wreckage until the next run. Both are file-scope now and
+`TermPartialOrdering::resetCache()` drops them.
+
+`PartialOrdering.cpp` has caches of the same shape but is indexed by `size_t` and holds
+no reference to the signature or the ordering, so it is stale rather than dangling.
+
 Others of this shape that are *not* yet handled, because nothing has needed them:
 `Clause.cpp:218` (`static Clause* selected`), `TermIterators.cpp:154`,
 `LookaheadLiteralSelector.cpp:266`, `Term.cpp:1689` (`static RobSubstitution
-checkSortSubst`), `TermPartialOrdering.cpp:127`, and `Perfect<T>::_ids`
-(`Lib/Perfect.hpp:44`), a global interning map. These hold scratch state rather than
-signature-dependent objects, but any of them could bite the same way.
+checkSortSubst`), and `Perfect<T>::_ids` (`Lib/Perfect.hpp:44`), a global interning map.
+These hold scratch state rather than signature-dependent objects, but the
+`TermPartialOrdering` case is what the rest of this list looks like just before it bites.
 
 ## 7. Threading: Lean elaborates in parallel
 
