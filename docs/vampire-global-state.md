@@ -160,12 +160,36 @@ fine: nothing read the wreckage until the next run. Both are file-scope now and
 `PartialOrdering.cpp` has caches of the same shape but is indexed by `size_t` and holds
 no reference to the signature or the ordering, so it is stale rather than dangling.
 
-Others of this shape that are *not* yet handled, because nothing has needed them:
-`Clause.cpp:218` (`static Clause* selected`), `TermIterators.cpp:154`,
-`LookaheadLiteralSelector.cpp:266`, `Term.cpp:1689` (`static RobSubstitution
-checkSortSubst`), and `Perfect<T>::_ids` (`Lib/Perfect.hpp:44`), a global interning map.
-These hold scratch state rather than signature-dependent objects, but the
-`TermPartialOrdering` case is what the rest of this list looks like just before it bites.
+`TermOrderingDiagram::createForSingleComparison` has the same shape and is fixed with
+it: the key is a pair of `TermList`s and the value keeps a `const Ordering&`. It is less
+immediately fatal, because a lookup is keyed by term *address* and the next problem's
+terms are usually elsewhere — but the allocator recycles the memory the sharing table
+just released, so "usually" is the whole guarantee. `TermOrderingDiagram::resetCache()`
+drops it.
+
+The rest of the list, gone through after that:
+
+| where | verdict |
+| --- | --- |
+| `Clause.cpp` `static Clause* selected` | inside `#if VDEBUG`, and we build `-DVDEBUG=0`. Not compiled. |
+| `Term.cpp` `static RobSubstitution checkSortSubst` | `#if VDEBUG` too, and `reset()` at each use. Not compiled, and scratch anyway. |
+| `LookaheadLiteralSelector.cpp` `runifs`, `candidates`, `selectable` | scratch buffers, `ensure`d or `reset()` at the top of each call. Nothing survives. |
+| `TermIterators.cpp` `static TermStack args` | scratch, and under `isLambdaTerm` — higher-order only, which the translation never produces. |
+| `TermOrderingDiagram::Polynomial::get` `static Set<Polynomial*>` | content-keyed and holds only integers and variable numbers. Leaks; does not dangle. |
+| `Perfect<T>::_ids` (`Lib/Perfect.hpp`) | instantiated at `MonomFactors` and `FuncTerm` — polynomial normalisation, so arithmetic only. |
+| `InterpretedLiteralEvaluator.cpp` cached `zero`/`one` `TermList`s | the built-in-constant bug exactly, but arithmetic only. |
+| `OperatorType::operatorTypes()` | **an open hazard.** See below. |
+
+`OperatorType::operatorTypes()` interns `OperatorType`s in a static map keyed by
+`OperatorKey = Vector<TermList>` — a vector of *sort* terms from the sharing table
+`env.reset()` deletes. Nothing clears it, so the next problem can in principle match a
+stale key against recycled memory and be handed a type built over freed sorts. It has
+never been observed to bite, and there is a plausible reason: the sorts are re-created in
+the same order each run, so a stale key that matches is likely to have matched something
+structurally identical. That is luck, not an argument. It is left alone because clearing
+it means reaching into `Environment::reset`'s teardown order — between `delete signature`
+and `init()`, since `init()` starts refilling the map — and there is no test that
+exercises the failure. Fixing an allocation path blind is how the next bug gets written.
 
 ## 7. Threading: Lean elaborates in parallel
 

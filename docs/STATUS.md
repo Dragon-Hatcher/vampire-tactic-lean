@@ -206,6 +206,7 @@ Recorded because each cost real time to find.
     9a593d8  re-arm the exit lock between runs
     e101aa7  do not leak the inference replayer's saturation algorithm
     4473042  reset TermPartialOrdering's caches between problems
+    b120371  reset TermOrderingDiagram's single-comparison cache too
 
 The first three are proof-generation work from before the FFI and are independent of
 it: all 14 ALG problems that Vampire solves now check, 874s → 233s, four former
