@@ -101,7 +101,10 @@ shape — something the generated *file* gets from being a file:
    definitional: the introduction itself and definition folding.
 3. Each step is proved in a restricted context. `grind` reads the local context, and
    ours accumulates the goal's hypotheses and every definition so far. Measured: 8ms per
-   superposition in a small context, 100ms in the goal's.
+   superposition in a small context, 100ms in the goal's. The restriction keeps class
+   instances even when they are `Prop`s: `Nonempty` is both, and `inhabitant` hands back
+   `Classical.choice inst`, so dropping `inst` for being a `Prop` leaves the witness
+   naming a variable that is out of scope.
 4. Multi-clause clausification cannot be sized by Vampire's clause count, because
    VampLean's `cnfify` need not split the same way.
 
@@ -177,6 +180,15 @@ Recorded because each cost real time to find.
 9. **Vampire generation is nondeterministic** under a wall-clock limit, so any
    before/after comparison must transform one fixed generated file, or sample enough to
    average out. This produced a phantom "2.6× regression" earlier in the work.
+10. **Enough `+mono` goals in one module and the prover segfaults.** Cumulative work,
+   not any one goal and not a count: the goal that crashes proves in seconds on its own,
+   replacing it with a trivial goal crashes just the same, thirty copies of one small
+   goal are fine, and so are fifteen varied small ones — but two large searches back to
+   back are enough. `Test/GroupTheory.lean` and `Test/GroupAbelian.lean` are split for
+   this reason, and their notes record the measurements. `+mono` is implicated: the same
+   statements written first-order by hand all pass in one module. The likely cause is
+   the allocator never being reset across runs, which is already an open question below;
+   this is the first thing to make it fail rather than merely grow.
 
 ## Fork changes, in order
 

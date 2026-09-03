@@ -354,7 +354,16 @@ def restrictedContext (seeds : Array Expr) (opaqueLets : Bool) :
     -- A plain variable or instance can be mentioned by a term the script splices in —
     -- an `Inhabited` witness, say — and costs nothing to keep. A proof or a definition
     -- the statement does not reach is what makes the context expensive.
-    if d.isLet || (← isProp d.type) then
+    --
+    -- An instance is kept even when it is a `Prop`, which `Nonempty` is: `inhabitant`
+    -- reaches for a `Nonempty` instance before anything else and hands back
+    -- `Classical.choice inst`, so erasing `inst` on the grounds that it is a `Prop`
+    -- leaves the spliced witness naming a variable that is no longer in scope. That
+    -- surfaces as "synthetic hole ... assigned to value incompatible with the current
+    -- context", which says nothing about instances at all. Monomorphisation is what
+    -- makes it bite: it asserts non-emptiness as a local `Nonempty` hypothesis, where a
+    -- hand-written goal more often carries `Inhabited`, which is not a `Prop`.
+    if d.isLet || ((← isProp d.type) && (← isClass? d.type).isNone) then
       result := result.erase d.fvarId
   return (result, ← getLocalInstances)
 
