@@ -38,7 +38,8 @@ Vampire's own `Signature`/`Term`/`Literal`/`Formula`. Provenance in `NOTICE`.
 **Proof translation** is a port of Vampire's own Lean code generator
 (`Shell/LeanChecker`): one lemma per inference with the same statement, proved by the
 same tactic script, chained the same way — as `Expr`s and tactic `Syntax` rather than
-source text. This fork's changes to those scripts are included.
+source text. This fork's changes are included, AVATAR's resolution replay among them.
+AVATAR runs, and its splitting, components, split clauses and SAT refutation all replay.
 
 `vampire?` stops before the replay and shows the problem as Vampire renders it plus an
 outline of the refutation.
@@ -47,13 +48,13 @@ outline of the refutation.
 
 - **Polymorphism.** Vampire's logic is monomorphic; lean-smt's monomorphisation pass is
   not ported. A polymorphic hypothesis swept up from the context is skipped; one named
-  as a hint is reported.
-- **AVATAR.** Splitting, the SAT refutation, and this fork's resolution replay of it are
-  not ported, so the tactic runs with `avatar off`. Biggest remaining piece.
-- **Skolemisation and the definition introductions**, which bring symbols into the proof
-  that the goal has no term for.
-- **Multi-clause clausification**, `rectify` with a non-identity renaming, the
-  quantifier reordering after prenexing, and arithmetic.
+  as a hint is reported. **This is the largest remaining gap on the way in.**
+- **The predicate and function definition introductions**, which bring a symbol into the
+  proof through a `let` whose body is a formula.
+- **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
+- **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
+- **`rectify` with a non-identity renaming**, the quantifier reordering after prenexing,
+  and skolem functions as opposed to constants.
 - `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
 
 ## Things that will bite
@@ -73,16 +74,20 @@ Recorded because each cost real time to find.
    with `find()`.
 5. **Function-local statics that cache Vampire objects** dangle after a reset. Fixed for
    the built-in sorts; six more are listed in the audit, unhandled.
-6. **The inference replayer leaked its saturation algorithm.** A `SaturationAlgorithm`
+6. **The whole run is one FFI call, deliberately.** Build, solve and export together.
+   Splitting them left a window in which another elaboration thread's build landed
+   between this thread's build and its solve, which showed up as one goal in a file
+   failing while the same goal passed alone.
+7. **The inference replayer leaked its saturation algorithm.** A `SaturationAlgorithm`
    registers itself and its indexes globally and unregisters only in its destructor, so
    the second problem solved in a process saturated without finding a proof it had
    found the first time. Invisible in a one-shot binary; fatal embedded. Fixed in the
    fork; the same shape is worth suspecting whenever run *n+1* behaves differently from
    run *n*.
-7. **A `Unit*` does not survive preprocessing.** The problem's unit list is replaced by
+8. **A `Unit*` does not survive preprocessing.** The problem's unit list is replaced by
    clausification, so anything the FFI wants to report about the input must be captured
    when it is built, not read back afterwards.
-8. **Vampire generation is nondeterministic** under a wall-clock limit, so any
+9. **Vampire generation is nondeterministic** under a wall-clock limit, so any
    before/after comparison must transform one fixed generated file, or sample enough to
    average out. This produced a phantom "2.6× regression" earlier in the work.
 

@@ -22,8 +22,6 @@ inductive Status where
   | noEnv
   /-- A C++ exception escaped into the shim. -/
   | exception
-  /-- The instruction stream handed to the problem builder was malformed. -/
-  | malformed
   /-- The C++ side returned a code this side does not know. -/
   | unknown (code : UInt32)
   deriving Repr, DecidableEq, Inhabited
@@ -40,7 +38,6 @@ instance : ToString Status where
     | .ok => "ok"
     | .noEnv => "vampire environment not constructed"
     | .exception => "C++ exception crossed the FFI boundary"
-    | .malformed => "the problem builder was given a malformed instruction stream"
     | .unknown c => s!"unknown status {c}"
 
 @[extern "lean_vampire_init"]
@@ -106,19 +103,21 @@ def reset : BaseIO Status := do
 /-- Self-test: add a fresh function symbol, returning the new symbol count. -/
 def selftestDirty : BaseIO UInt32 := selftestDirtyRaw
 
-/-- The problem builder failed to walk the instruction stream: a bug in
-`Vampire/Translate/Build.lean` rather than something a goal can provoke. -/
-def Status.ofBuildCode : UInt32 → Status
-  | 0 => .ok
-  | 2 => .exception
-  | 3 => .malformed
-  | c => .unknown c
+/-- What a whole run did. -/
+inductive RunResult where
+  /-- A refutation was found and exported. -/
+  | refuted
+  /-- The search finished without one. -/
+  | notRefuted
+  /-- Something went wrong; the message says what. -/
+  | failed (what : String)
+  deriving Repr, DecidableEq, Inhabited
 
-@[extern "lean_vampire_build"]
-private opaque buildRaw : (@& Array String) → (@& Array UInt32) → BaseIO UInt32
+@[extern "lean_vampire_run"]
+private opaque runRaw : (@& Array String) → (@& Array UInt32) → UInt32 → BaseIO UInt32
 
-@[extern "lean_vampire_build_error"]
-private opaque buildErrorRaw : BaseIO String
+@[extern "lean_vampire_message"]
+private opaque messageRaw : BaseIO String
 
 @[extern "lean_vampire_problem_size"]
 private opaque problemSizeRaw : BaseIO UInt32
@@ -126,51 +125,53 @@ private opaque problemSizeRaw : BaseIO UInt32
 @[extern "lean_vampire_problem_unit"]
 private opaque problemUnitRaw : UInt32 → BaseIO String
 
-@[extern "lean_vampire_solve"]
-private opaque solveRaw : UInt32 → BaseIO UInt32
+@[extern "lean_vampire_proof_outline"]
+private opaque proofOutlineRaw : BaseIO String
+
+@[extern "lean_vampire_proof_code"]
+private opaque proofCodeRaw : BaseIO (Array UInt32)
+
+@[extern "lean_vampire_proof_names"]
+private opaque proofNamesRaw : BaseIO (Array String)
 
 /--
-Build a problem in Vampire from a compiled instruction stream.
+Build the problem, solve it, and export the refutation — the whole run, in one call.
 
-The whole problem crosses in one call. The entry lock makes a call atomic but not a
-sequence of them, and the signature being built into is process-global, so a build
-spread over many calls could be interleaved by another elaboration thread.
+Not three calls, because the entry lock makes a call atomic but not a sequence of them:
+Lean elaborates declarations in parallel, and another thread's build would otherwise be
+able to land between this thread's build and its solve. What the run produces is read
+back afterwards from per-thread buffers, which hold plain numbers and strings copied out
+of Vampire's structures.
 
-This resets Vampire's global state first, so it discards any problem already there.
+`deciseconds` bounds the search with a soft time limit, which throws out of the loop
+rather than killing the process.
 -/
-def build (names : Array String) (code : Array UInt32) : BaseIO Status := do
-  return Status.ofBuildCode (← buildRaw names code)
+def run (names : Array String) (code : Array UInt32) (deciseconds : UInt32 := 100) :
+    BaseIO RunResult := do
+  match ← runRaw names code deciseconds with
+  | 0 => return .refuted
+  | 1 => return .notRefuted
+  | 3 => return .failed s!"the problem could not be built: {← messageRaw}"
+  | 4 => return .failed s!"the proof could not be exported: {← messageRaw}"
+  | _ => return .failed (← messageRaw)
 
-/-- The message from the last failed `build`. -/
-def buildError : BaseIO String := buildErrorRaw
+/-- Why the last run found no refutation — Vampire's own explanation. -/
+def message : BaseIO String := messageRaw
 
-/-- How many units the built problem has. -/
+/-- How many units the last run's problem had. -/
 def problemSize : BaseIO UInt32 := problemSizeRaw
 
-/-- Vampire's own rendering of unit `i` of the built problem.
+/-- Vampire's own rendering of unit `i` of the last run's problem.
 
 Text, but going the other way: this is what Vampire says it received, which is evidence
 about the transfer rather than the medium of it. -/
 def problemUnit (i : UInt32) : BaseIO String := problemUnitRaw i
 
-/-- Preprocess and saturate the built problem. `deciseconds` bounds the search with a
-soft time limit, which throws out of the loop rather than killing the process. -/
-def solve (deciseconds : UInt32 := 100) : BaseIO (Option Bool) := do
-  match ← solveRaw deciseconds with
-  | 0 => return some Bool.false
-  | 1 => return some Bool.true
-  | _ => return none
-
-@[extern "lean_vampire_solve_reason"]
-private opaque solveReasonRaw : BaseIO String
-
-/-- Why the last solve found no refutation — Vampire's own explanation. -/
-def solveReason : BaseIO String := solveReasonRaw
-
-@[extern "lean_vampire_proof_outline"]
-private opaque proofOutlineRaw : BaseIO String
-
 /-- A one-line-per-step outline of the last refutation, for diagnostics. -/
 def proofOutline : BaseIO String := proofOutlineRaw
+
+/-- The exported refutation, as the stream and the names it indexes. -/
+def exportedProof : BaseIO (Array UInt32 × Array String) := do
+  return (← proofCodeRaw, ← proofNamesRaw)
 
 end Vampire.Ffi

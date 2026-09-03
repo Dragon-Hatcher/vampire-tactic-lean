@@ -88,6 +88,9 @@ structure Built where
   /-- What each assertion in the built problem is, in the order Vampire numbers its
   input units — so input unit `k` is `inputs[k-1]`. -/
   inputs : Array Input
+  /-- The compiled problem: the symbol names and the instruction stream. -/
+  names : Array String
+  code : Array UInt32
   /-- The preprocessed goal, whose target is `False`. -/
   goal : MVarId
   /-- The copy of the original goal that preprocessing worked on. Assigning it is what
@@ -101,11 +104,11 @@ def buildProblem (mv : MVarId) (hs : Array Expr) : MetaM Built := mv.withContext
   let locals ← filterTranslatable ((← Preprocess.getPropHyps).map Expr.fvar)
   let hs := locals.filter (fun l => !hs.contains l) ++ hs
   let mv₀ := (← Meta.mkFreshExprMVar (← mv.getType)).mvarId!
-  -- lean-smt prunes the context to what the hints mention. We keep it: a refutation can
-  -- need an element of a sort to stand for a variable Vampire left free, and the term
-  -- that supplies it is often exactly the one pruning would drop — `a : α` in a goal
-  -- that only mentions `α` and `P`. Translation is limited by the dependency graph, not
-  -- by what is in scope, so nothing else changes.
+  -- lean-smt prunes the context to what the hints mention. We keep it, so that instance
+  -- synthesis still works during replay: a refutation can need an element of a sort,
+  -- and the `[Inhabited α]` that supplies it is exactly the kind of unmentioned binding
+  -- pruning drops. Translation is limited by the dependency graph, not by what is in
+  -- scope, so nothing else changes.
   mv₀.withContext do
   let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs
     #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
@@ -114,7 +117,7 @@ def buildProblem (mv : MVarId) (hs : Array Expr) : MetaM Built := mv.withContext
     let q ← Query.generateQuery hs₁.toList fvNames
     let rendered := MessageData.joinSep (q.commands.map toMessageData) Format.line
     trace[vampire] "problem:{indentD rendered}"
-    let sources ← send q.commands
+    let (names, code, sources) ← compile q.commands
     let mut inputs : Array Input := #[]
     let mut next := 0
     for src in sources do
@@ -128,7 +131,7 @@ def buildProblem (mv : MVarId) (hs : Array Expr) : MetaM Built := mv.withContext
         let some e := q.symbols[nm]?
           | throwError "vampire: no Lean term for the definition '{nm}'"
         inputs := inputs.push (.definition e)
-    return { commands := q.commands, symbols := q.symbols, inputs,
+    return { commands := q.commands, symbols := q.symbols, inputs, names, code,
              goal := mv₁, root := mv₀ }
 
 /-- The problem as Vampire itself renders it, for diagnostics. -/
@@ -139,13 +142,13 @@ def problemAsVampireSeesIt : MetaM MessageData := do
     lines := lines.push (← Ffi.problemUnit i.toUInt32)
   return MessageData.joinSep lines.toList Format.line
 
-/-- Build and run. -/
+/-- Translate the goal, then build, solve and export in one call. -/
 def run (mv : MVarId) (hs : Array Expr) (deciseconds : UInt32) : MetaM (Outcome × Built) := do
   let built ← buildProblem mv hs
-  match ← Ffi.solve deciseconds with
-  | some true => return (.refuted, built)
-  | some false => return (.notRefuted, built)
-  | none => throwError "vampire: the prover raised an exception"
+  match ← Ffi.run built.names built.code deciseconds with
+  | .refuted => return (.refuted, built)
+  | .notRefuted => return (.notRefuted, built)
+  | .failed what => throwError "vampire: {what}"
 
 /-- What the exported proof's symbols and input units mean in Lean. -/
 def interpOf (built : Built) (syms : Symbols) : Interp where
@@ -153,11 +156,14 @@ def interpOf (built : Built) (syms : Symbols) : Interp where
   fn := fun f => ((syms.funs[f]?).map (·.name)).bind (built.symbols[·]?)
   pred := fun p => ((syms.preds[p]?).map (·.name)).bind (built.symbols[·]?)
   input := fun n => if n == 0 then none else built.inputs[n - 1]?
+  -- Both filled in by `Replay.replay` as the steps that introduce them are reached.
+  splitProp := fun _ => none
+  skolem := fun _ => none
 
 /-- Replay the refutation Vampire found as a Lean proof of `False`, in the context of
 the preprocessed goal. -/
 def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext do
-  match ← Ffi.exportProof with
+  match ← Ffi.exportedRefutation with
   | .error e => throwError e
   | .ok refutation =>
     trace[vampire] "replaying {refutation.steps.size} steps"
@@ -190,7 +196,7 @@ elab_rules : tactic
         throwError "vampire: the embedded prover is not available"
       match ← run g hs 100 with
       | (.notRefuted, _) =>
-        throwError "vampire: no refutation found — {← Ffi.solveReason}"
+        throwError "vampire: no refutation found — {← Ffi.message}"
       | (.refuted, built) =>
         let proof ← replayRefutation built
         built.goal.assign proof

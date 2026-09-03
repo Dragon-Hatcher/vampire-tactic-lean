@@ -21,11 +21,13 @@
 
 #include <lean/lean.h>
 
+#include "vampire_export.hpp"
 #include "vampire_lock.hpp"
 
 #include <algorithm>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -47,10 +49,12 @@
 #include "Kernel/Unit.hpp"
 #include "Lib/Environment.hpp"
 #include "SATSubsumption/SATSubsumptionAndResolution.hpp"
+#include "Kernel/MLVariant.hpp"
 #include "Saturation/Splitter.hpp"
 #include "Shell/FunctionDefinition.hpp"
 #include "Shell/InferenceRecorder.hpp"
 #include "Shell/InferenceReplay.hpp"
+#include "Shell/LeanChecker/VariablePrenexOrderingTree.hpp"
 #include "Shell/Options.hpp"
 #include "Shell/Statistics.hpp"
 
@@ -81,6 +85,7 @@ enum ProofOp : uint32_t {
   PT_XOR     = 22,
   PT_FORALL  = 23, // n (var sort)*
   PT_EXISTS  = 24, // n (var sort)*
+  PT_SPLIT   = 25, // satVar — the proposition AVATAR named for a component
 };
 
 /// Which of `LeanChecker`'s handlers a rule is emitted by. This mirrors the switch in
@@ -102,6 +107,13 @@ enum Handler : uint32_t {
   H_UNUSED_PRED_DEF_REMOVAL = 10,
   H_AVATAR_CONTRADICTION    = 11,
   H_DEFINITION_UNFOLDING    = 12,
+  H_AVATAR_DEFINITION       = 13,  // `sAv ↔ C`, true by `Iff.rfl` once `sAv` is `C`
+  H_AVATAR_COMPONENT        = 14,
+  H_AVATAR_SPLIT_CLAUSE     = 15,
+  H_AVATAR_REFUTATION       = 16,
+  H_EVALUATION              = 17,
+  H_SKOLEMISE               = 18,
+  H_SKIP                    = 19,  // `isUncheckedInProof`: contributes nothing
   H_UNSUPPORTED             = 255,
 };
 
@@ -140,9 +152,29 @@ static uint32_t handlerFor(InferenceRule rule) {
       return H_UNUSED_PRED_DEF_REMOVAL;
     case InferenceRule::AVATAR_CONTRADICTION_CLAUSE: return H_AVATAR_CONTRADICTION;
     case InferenceRule::DEFINITION_UNFOLDING: return H_DEFINITION_UNFOLDING;
+    case InferenceRule::AVATAR_DEFINITION: return H_AVATAR_DEFINITION;
+    case InferenceRule::AVATAR_COMPONENT: return H_AVATAR_COMPONENT;
+    case InferenceRule::AVATAR_SPLIT_CLAUSE: return H_AVATAR_SPLIT_CLAUSE;
+    case InferenceRule::AVATAR_REFUTATION:
+    case InferenceRule::AVATAR_REFUTATION_SMT: return H_AVATAR_REFUTATION;
+    case InferenceRule::EVALUATION: return H_EVALUATION;
+
+    // `LeanChecker::outputInferenceStep` ends its switch with `genericInference`, so
+    // an unlisted rule gets a statement of premises implying conclusion and `grind`.
+    // The exceptions are the rules it handles in `outputProofStep` instead, which need
+    // machinery the replay does not have yet.
+    case InferenceRule::SKOLEMIZE: return H_SKOLEMISE;
+    case InferenceRule::SKOLEM_SYMBOL_INTRODUCTION: return H_SKIP;
+
+    case InferenceRule::PREDICATE_DEFINITION:
+    case InferenceRule::FUNCTION_DEFINITION:
+    case InferenceRule::DEFINITION_FOLDING_PRED:
+      return H_UNSUPPORTED;
 
     default:
-      return H_UNSUPPORTED;
+      return isTheoryAxiomRule(rule) || rule == InferenceRule::DISTINCTNESS_AXIOM
+        ? H_UNSUPPORTED   // emitted as a Lean `axiom`, which a tactic cannot do
+        : H_GENERIC;
   }
 }
 
@@ -163,6 +195,10 @@ struct ExportError {
   std::string what;
   explicit ExportError(std::string w) : what(std::move(w)) {}
 };
+
+/// The SAT variable a named formula stands for. Defined before the exporter because
+/// `writeFormula` needs it.
+static unsigned splitVarOfName(NamedFormula *f);
 
 /// Collects the stream and the names it indexes.
 struct Exporter {
@@ -307,6 +343,12 @@ struct Exporter {
         writeVarList(f->vars());
         break;
       }
+      case NAME:
+        // An AVATAR split proposition. The definition unit that introduced it says
+        // what it stands for; see `writeUnit`.
+        put(PT_SPLIT);
+        put(splitVarOfName(static_cast<NamedFormula *>(f)));
+        break;
       default:
         throw ExportError("connective " + Formula::toString(f->connective()) +
                           " is not exported yet");
@@ -327,19 +369,52 @@ struct Exporter {
   }
 };
 
-/// The splits a clause holds under, as (sat variable, polarity) pairs. Mirrors
-/// `LeanChecker::outputCumulativeSplits`, which prints `sAv` or `¬sAv` per level.
+/// The SAT variable a named formula stands for.
+///
+/// `Splitter` names split levels `sA<n>` where `n` is the variable; `InferenceStore`
+/// records the string. Recovering the number from it is unpleasant but the name is the
+/// only link the formula carries back to the level.
+static unsigned splitVarOfName(NamedFormula *f) {
+  const std::string &n = f->name();
+  size_t i = 0;
+  while (i < n.size() && (n[i] < '0' || n[i] > '9')) i++;
+  if (i == n.size()) throw ExportError("cannot read a split variable from '" + n + "'");
+  return static_cast<unsigned>(std::stoul(n.substr(i)));
+}
+
+/// The splits a clause holds under, as (sat variable, polarity) pairs, ordered by
+/// variable. Mirrors `LeanChecker::outputCumulativeSplits`, which collects them into a
+/// `std::set` and prints `sAv` or `¬sAv` per level.
 static std::vector<std::pair<unsigned, bool>> splitsOf(Unit *u) {
   std::vector<std::pair<unsigned, bool>> out;
   if (!u->isClause()) return out;
   Clause *cl = u->asClause();
   if (cl->noSplits()) return out;
+  std::map<unsigned, bool> seen;
   SplitSet &s = *cl->splits();
   for (int i = 0; i < s.size(); i++) {
     SAT::SATLiteral l = Saturation::Splitter::getLiteralFromName(s[i]);
-    out.push_back({l.var(), l.positive()});
+    seen.insert({l.var(), l.positive()});
   }
+  for (auto [v, p] : seen) out.push_back({v, p});
   return out;
+}
+
+/// The SAT clause a unit carries, if any. A unit with one — an AVATAR split clause, or
+/// a parent of the SAT refutation — *is* that clause as far as the Lean proof is
+/// concerned; `LeanChecker` prints it with `outputSatClause` rather than printing the
+/// unit.
+static bool satClauseOf(Unit *u, std::vector<std::pair<unsigned, bool>> &out) {
+  InferenceRule rule = u->inference().rule();
+  if (rule != InferenceRule::AVATAR_SPLIT_CLAUSE &&
+      rule != InferenceRule::AVATAR_CONTRADICTION_CLAUSE)
+    return false;
+  if (env.proofExtra.find(u) == nullptr) return false;
+  std::map<unsigned, bool> seen;   // ordered by variable, as LeanChecker prints them
+  for (SAT::SATLiteral l : env.proofExtra.get<Indexing::SATClauseExtra>(u).clause->iter())
+    seen.insert({l.var(), l.positive()});
+  for (auto [v, p] : seen) out.push_back({v, p});
+  return true;
 }
 
 /// True for the rules whose Lean proof needs the unifier, i.e. the ones
@@ -435,6 +510,217 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     return subs;
   }
 
+  /// The literals of a SAT clause, ordered by variable.
+  void putSatClause(SAT::SATClause *cl) {
+    std::map<unsigned, bool> seen;
+    for (SAT::SATLiteral l : cl->iter()) seen.insert({l.var(), l.positive()});
+    e.put(static_cast<uint32_t>(seen.size()));
+    for (auto [v, p] : seen) { e.put(v); e.put(p ? 1 : 0); }
+  }
+
+  /// Everything the AVATAR handlers need beyond the common fields.
+  void writeAvatarPayload(Unit *u, InferenceRule rule) {
+    switch (handlerFor(rule)) {
+      case H_AVATAR_DEFINITION: writeAvatarDefinition(u); break;
+      case H_AVATAR_SPLIT_CLAUSE: writeAvatarSplitClause(u); break;
+      case H_AVATAR_REFUTATION: writeAvatarRefutation(u); break;
+      case H_SKOLEMISE: writeSkolemisation(u); break;
+      default: break;
+    }
+  }
+
+  /// The variable AVATAR named, and the component it named. The unit's statement is
+  /// `sAv ↔ C`; Lean takes `sAv` to *be* `C`, so the step holds by `Iff.rfl`.
+  void writeAvatarDefinition(Unit *u) {
+    if (u->isClause() || u->getFormula()->connective() != IFF)
+      throw ExportError("an AVATAR definition was not an equivalence");
+    Formula *named = u->getFormula()->left();
+    if (named->connective() != NAME)
+      throw ExportError("an AVATAR definition did not name a proposition");
+    e.put(splitVarOfName(static_cast<NamedFormula *>(named)));
+    size_t lenAt = e.code.size();
+    e.put(0);
+    size_t start = e.code.size();
+    e.writeFormula(u->getFormula()->right());
+    e.code[lenAt] = static_cast<uint32_t>(e.code.size() - start);
+  }
+
+  /// Mirrors `LeanChecker::avatarSplitClause`: which premises are rewritten with and
+  /// which against, the split hypotheses to introduce, and the arguments the parent
+  /// clause is applied to. The variable correspondence is the same reconstruction the
+  /// generator does, via `Splitter::getComponents` and matching each class against a
+  /// component up to renaming.
+  void writeAvatarSplitClause(Unit *u) {
+    UnitIterator parents = u->getParents();
+    if (!parents.hasNext()) throw ExportError("an AVATAR split clause has no parent");
+    Clause *parent = parents.next()->asClause();
+
+    std::set<unsigned> previousSplits;
+    if (!parent->noSplits())
+      for (unsigned split : iterTraits(parent->splits()->iter()))
+        previousSplits.insert(Saturation::Splitter::getLiteralFromName(split).var());
+
+    std::map<unsigned, bool> currentSplits;
+    for (SAT::SATLiteral l : env.proofExtra.get<Indexing::SATClauseExtra>(u).clause->iter())
+      currentSplits.insert({l.var(), l.positive()});
+
+    std::unordered_map<unsigned, Clause *> components;
+    std::map<unsigned, std::pair<unsigned, Clause *>> splitToParent;
+    std::vector<bool> rewrites;      // per premise after the first
+    unsigned index = 0;
+    for (Unit *p : iterTraits(u->getParents())) {
+      if (index++ == 0) continue;
+      auto dex = env.proofExtra.get<Shell::SplitDefinitionExtra>(p);
+      unsigned component = dex.component->splits()->sval();
+      components.insert({component, dex.component});
+      unsigned var = Saturation::Splitter::getLiteralFromName(component).var();
+      bool isNew = previousSplits.find(var) == previousSplits.end();
+      if (isNew) splitToParent.insert({var, {index - 1, dex.component}});
+      rewrites.push_back(isNew);
+    }
+
+    // Map each variable of the parent clause to the split whose component covers it,
+    // and to the variable it is called by there.
+    Stack<LiteralStack> disjoint;
+    if (!Saturation::Splitter::getComponents(parent, disjoint)) {
+      disjoint.reset();
+      LiteralStack one;
+      for (Literal *l : parent->iterLits()) one.push(l);
+      disjoint.push(std::move(one));
+    }
+    Substitution fullSubst;
+    std::map<unsigned, unsigned> varToSplit;
+    decltype(disjoint)::Iterator classes(disjoint);
+    while (classes.hasNext()) {
+      LiteralStack klass = classes.next();
+      Substitution subst;
+      for (auto [name, component] : components) {
+        if (klass.size() != component->length()) continue;
+        subst.reset();
+        unsigned var = Saturation::Splitter::getLiteralFromName(name).var();
+        if (klass.size() == 1 && klass[0]->ground() &&
+            Literal::positiveLiteral(klass[0]) == Literal::positiveLiteral((*component)[0])) {
+          DHMap<unsigned, TermList> map;
+          SortHelper::collectVariableSorts(klass[0], map);
+          auto dom = map.domain();
+          while (dom.hasNext()) varToSplit.insert({dom.next(), var});
+          break;
+        }
+        if (Kernel::MLVariant::isVariant(klass.begin(), component, false, &subst)) {
+          for (auto [v, term] : iterTraits(subst.items())) {
+            fullSubst.bind(term.var(), TermList::var(v));
+            varToSplit.insert({term.var(), var});
+          }
+          break;
+        }
+      }
+    }
+
+    e.put(static_cast<uint32_t>(rewrites.size()));
+    for (bool r : rewrites) e.put(r ? 1 : 0);
+
+    // `intros x<split>a<var> …`, in the order the generator introduces them.
+    std::vector<std::pair<unsigned, unsigned>> intros;
+    for (auto [split, _] : currentSplits) {
+      auto it = splitToParent.find(split);
+      if (it == splitToParent.end()) continue;
+      DHMap<unsigned, TermList> map;
+      SortHelper::collectVariableSorts(it->second.second, map);
+      std::set<unsigned> vars;
+      for (unsigned v : iterTraits(map.domain())) vars.insert(v);
+      for (unsigned v : vars) intros.push_back({split, v});
+    }
+    e.put(static_cast<uint32_t>(intros.size()));
+    for (auto [split, v] : intros) { e.put(split); e.put(v); }
+
+    // The arguments the parent clause is applied to.
+    DHMap<unsigned, TermList> parentSorts;
+    SortHelper::collectVariableSorts(parent, parentSorts);
+    std::set<unsigned> sortedVars;
+    for (unsigned v : iterTraits(parentSorts.domain())) sortedVars.insert(v);
+    e.put(static_cast<uint32_t>(sortedVars.size()));
+    for (unsigned v : sortedVars) {
+      TermList applied = fullSubst.apply(v);
+      if (!applied.isVar()) throw ExportError("a split variable did not map to a variable");
+      auto it = varToSplit.find(v);
+      if (it == varToSplit.end())
+        throw ExportError("a parent variable belongs to no split component");
+      e.put(it->second);
+      e.put(applied.var());
+    }
+  }
+
+  /// The solver's own derivation, as `avatarRefutationByResolution` walks it: a
+  /// post-order list of derived clauses, each with the premises it came from. Replaying
+  /// it beats asking Lean to re-solve the SAT problem, which is why this fork added it.
+  void writeAvatarRefutation(Unit *u) {
+    // The parents' clauses are the hypotheses; the derivation's leaves are matched to
+    // them by literal content, not by pointer.
+    std::set<Unit *, CompareUnits> sortedParents;
+    for (Unit *p : iterTraits(u->getParents())) sortedParents.insert(p);
+    e.put(static_cast<uint32_t>(sortedParents.size()));
+    for (Unit *p : sortedParents)
+      putSatClause(env.proofExtra.get<Indexing::SATClauseExtra>(p).clause);
+
+    SAT::SATClause *proof = u->inference().satPremise();
+    if (proof == nullptr) { e.put(0); return; }
+
+    std::vector<SAT::SATClause *> order;
+    std::set<SAT::SATClause *> visited;
+    std::vector<std::pair<SAT::SATClause *, bool>> todo{{proof, false}};
+    while (!todo.empty()) {
+      SAT::SATClause *cl = todo.back().first;
+      bool expanded = todo.back().second;
+      todo.pop_back();
+      if (expanded) { order.push_back(cl); continue; }
+      if (!visited.insert(cl).second) continue;
+      SAT::SATInference *inf = cl->inference();
+      if (!inf || inf->getType() != SAT::SATInference::PROP_INF) continue;
+      todo.push_back({cl, true});
+      for (SAT::SATClause *prem : iterTraits(inf->propInf()->getPremises()->iter()))
+        todo.push_back({prem, false});
+    }
+
+    e.put(static_cast<uint32_t>(order.size()));
+    for (SAT::SATClause *cl : order) {
+      putSatClause(cl);
+      std::vector<SAT::SATClause *> prems;
+      for (SAT::SATClause *prem : iterTraits(cl->inference()->propInf()->getPremises()->iter()))
+        prems.push_back(prem);
+      e.put(static_cast<uint32_t>(prems.size()));
+      for (SAT::SATClause *prem : prems) putSatClause(prem);
+    }
+  }
+
+  /// The skolem symbols a skolemisation introduced, in the order the existentials they
+  /// replace are stripped. `LeanChecker::skolemize` gets the order the same way, from a
+  /// `VariablePrenexOrderingTree` over the parent formula.
+  void writeSkolemisation(Unit *u) {
+    UnitIterator parents = u->getParents();
+    if (!parents.hasNext()) throw ExportError("a skolemisation has no parent");
+    Unit *parent = parents.next();
+    if (parent->isClause()) throw ExportError("a skolemisation's parent is a clause");
+
+    InferenceStore *is = InferenceStore::instance();
+    if (!is->hasIntroducedSymbols(u))
+      throw ExportError("a skolemisation introduced no symbols");
+    std::map<long, unsigned> byVar;
+    for (auto [_, sym] : iterTraits(is->getIntroducedSymbols(u).iter())) {
+      long replaced = is->variableReplacedByIntroducedSymbol(sym);
+      if (replaced < 0) throw ExportError("a skolem symbol replaced no variable");
+      byVar[replaced] = sym;
+    }
+
+    VariablePrenexOrderingTree tree;
+    tree.buildTreeFromFormula(parent->getFormula(), Kernel::EXISTS);
+    std::vector<unsigned> ordered;
+    for (unsigned v : tree.determineVariableOrdering())
+      if (byVar.count(v)) ordered.push_back(byVar[v]);
+
+    e.put(static_cast<uint32_t>(ordered.size()));
+    for (unsigned sym : ordered) { e.declareFun(sym); e.put(sym); }
+  }
+
   void writeUnit(Unit *u) {
     // The substitutions are computed first: replaying an inference disturbs the
     // saturation machinery, and doing it while half-way through writing the unit would
@@ -472,6 +758,18 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       auto splits = splitsOf(u);
       e.put(static_cast<uint32_t>(splits.size()));
       for (auto [v, pos] : splits) { e.put(v); e.put(pos ? 1 : 0); }
+    }
+
+    // A unit AVATAR gave a SAT clause *is* that clause for the Lean proof, whatever
+    // its own statement says; `LeanChecker` prints it with `outputSatClause`.
+    {
+      std::vector<std::pair<unsigned, bool>> sat;
+      bool has = satClauseOf(u, sat);
+      e.put(has ? 1 : 0);
+      if (has) {
+        e.put(static_cast<uint32_t>(sat.size()));
+        for (auto [v, pos] : sat) { e.put(v); e.put(pos ? 1 : 0); }
+      }
     }
 
     {
@@ -521,9 +819,16 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       }
     }
 
+    writeAvatarPayload(u, rule);
+
     // Per premise, the terms its variables are instantiated with. Absent (count 0)
     // when the rule needs no unifier, in which case Lean applies the premise to its own
     // variables unchanged.
+    //
+    // A substitution can send a premise variable to a variable the conclusion does not
+    // bind, and then Lean needs its sort to ask for an element of it. The sort is the
+    // premise's, since a substitution is well-sorted, so it is recorded on the way past.
+    std::map<unsigned, unsigned> rangeSorts;
     e.put(static_cast<uint32_t>(subs.size()));
     if (!subs.empty()) {
       unsigned i = 0;
@@ -536,96 +841,100 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
         while (it.hasNext()) vars.push_back(it.next());
         std::sort(vars.begin(), vars.end());
 
-        auto pSplits = splitsOf(p);
+        auto pSplits = splitsOf(p);   // ordered by variable, as `instantiatePremiseVars` prints them
         e.put(static_cast<uint32_t>(pSplits.size()));
         for (auto [v, pos] : pSplits) { e.put(v); e.put(pos ? 1 : 0); }
 
         e.put(static_cast<uint32_t>(vars.size()));
         for (unsigned v : vars) {
+          TermList applied = subs[i].apply(v);
+          if (applied.isVar()) {
+            TermList sort = premiseSorts.get(v);
+            e.declareSort(sort);
+            rangeSorts[applied.var()] = sort.term()->functor();
+          }
           size_t lenAt = e.code.size();
           e.put(0);
           size_t start = e.code.size();
-          e.writeTerm(subs[i].apply(v));
+          e.writeTerm(applied);
           e.code[lenAt] = static_cast<uint32_t>(e.code.size() - start);
         }
         i++;
       }
     }
+
+    e.put(static_cast<uint32_t>(rangeSorts.size()));
+    for (auto [v, sort] : rangeSorts) { e.put(v); e.put(sort); }
   }
 };
 
-static std::vector<uint32_t> g_code;
-static std::vector<std::string> g_names;
-static std::string g_error;
-
-} // namespace vampire_ffi
-
-using namespace vampire_ffi;
-
-static lean_obj_res mkUInt32Array(const std::vector<uint32_t> &v) {
-  lean_object *a = lean_alloc_array(v.size(), v.size());
-  for (size_t i = 0; i < v.size(); i++)
-    lean_array_set_core(a, i, lean_box_uint32(v[i]));
-  return a;
-}
-
-static lean_obj_res mkStringArray(const std::vector<std::string> &v) {
-  lean_object *a = lean_alloc_array(v.size(), v.size());
-  for (size_t i = 0; i < v.size(); i++)
-    lean_array_set_core(a, i, lean_mk_string(v[i].c_str()));
-  return a;
-}
-
-extern "C" {
-
-/**
- * Export the last refutation. Returns 0 on success, 1 if there is no refutation,
- * 2 on an exception, 3 if something in the proof cannot be exported yet; the message
- * for the last two is in `lean_vampire_export_error`.
- */
-uint32_t lean_vampire_export_proof(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
+uint32_t exportRefutation(std::vector<uint32_t> &code,
+                          std::vector<std::string> &names,
+                          std::string &error)
+{
   try {
-    g_error.clear();
-    g_code.clear();
-    g_names.clear();
+    error.clear();
+    code.clear();
+    names.clear();
     Unit *refutation = env.statistics->refutation;
     if (refutation == nullptr) return 1;
     std::ostringstream sink;
     ProofExporter ex(sink, InferenceStore::instance());
     ex.scheduleForPrinting(refutation);
     ex.print();
-    g_code = ex.e.finish();
-    g_names = std::move(ex.e.names);
+    code = ex.e.finish();
+    names = std::move(ex.e.names);
     return 0;
   } catch (ExportError &err) {
-    g_error = err.what;
+    error = err.what;
     return 3;
   } catch (Exception &err) {
-    g_error = err.msg();
+    error = err.msg();
     return 2;
   } catch (std::exception &err) {
-    g_error = err.what();
+    error = err.what();
     return 2;
   } catch (...) {
-    g_error = "unknown C++ exception";
+    error = "unknown C++ exception";
     return 2;
   }
 }
 
-lean_obj_res lean_vampire_export_error(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return lean_mk_string(g_error.c_str());
+std::string proofOutline()
+{
+  try {
+    Unit *refutation = env.statistics->refutation;
+    if (refutation == nullptr) return "";
+    struct Survey : public InferenceStore::AbstractProofPrinter {
+      std::string text;
+      Survey(std::ostream &o, InferenceStore *is) : AbstractProofPrinter(o, is) {}
+      void printStep(Unit *u) override {
+        text += std::to_string(u->number());
+        text += "  ";
+        text += ruleName(u->inference().rule());
+        text += "  [";
+        bool first = true;
+        for (Unit *p : iterTraits(u->getParents())) {
+          if (!first) text += ",";
+          text += std::to_string(p->number());
+          first = false;
+        }
+        text += "]  ";
+        text += u->toString();
+        text += "\n";
+      }
+    };
+    std::ostringstream sink;
+    Survey s(sink, InferenceStore::instance());
+    s.scheduleForPrinting(refutation);
+    s.print();
+    return s.text;
+  } catch (...) {
+    return "";
+  }
 }
 
-lean_obj_res lean_vampire_export_code(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return mkUInt32Array(g_code);
-}
+} // namespace vampire_ffi
 
-lean_obj_res lean_vampire_export_names(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return mkStringArray(g_names);
-}
+// The entry points live in `vampire_build.cpp`, which drives the whole run.
 
-} // extern "C"

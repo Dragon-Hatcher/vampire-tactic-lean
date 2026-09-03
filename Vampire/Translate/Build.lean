@@ -255,12 +255,4 @@ def compile (cmds : List Command) :
   let (_, st) ← (cmds.forM BuildM.compileCommand).run {}
   return (st.names, st.code, st.asserts)
 
-/-- Send a compiled problem to Vampire, which constructs it in its own structures.
-Returns where each of its assertions came from, in order. -/
-def send (cmds : List Command) : MetaM (Array AssertSource) := do
-  let (names, code, asserts) ← compile cmds
-  match ← Ffi.build names code with
-  | .ok => return asserts
-  | status => throwError "vampire: could not build the problem: {status}\n{← Ffi.buildError}"
-
 end Vampire

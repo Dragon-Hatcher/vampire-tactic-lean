@@ -48,9 +48,11 @@ No `sorry` and no axioms at all: propositional resolution replays as `Or.elim` a
   reparsing. The one thing that crosses as text is a symbol's name, once, at its
   declaration — Vampire's signature is keyed by name and needs one to name a symbol in
   a proof.
-- **The whole problem crosses in one call.** The FFI entry lock makes a call atomic but
-  not a sequence of them, and Vampire's signature is process-global, so a build spread
-  over many calls could be interleaved by another elaboration thread.
+- **A whole run is one call.** Build, solve and export happen together. The FFI entry
+  lock makes a call atomic but not a sequence of them, and Vampire's environment is
+  process-global, so with Lean elaborating declarations in parallel another thread's
+  build can land between this thread's build and its solve. What the run produces is
+  read back afterwards from per-thread buffers.
 - **Replay is a port of Vampire's own Lean code generator.**
   `Shell/LeanChecker/LeanChecker.cpp` writes a Lean file: one `theorem inf_sN` per
   inference, proved by a tactic script, chained by a `fullProof` that applies them in

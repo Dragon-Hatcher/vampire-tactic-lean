@@ -38,6 +38,8 @@ private def mkBool : Lean.Expr := toTypeExpr Bool
     return mkApp2 (symbolT "and") (← applyTranslators! p) (← applyTranslators! q)
   else if let some (p, q) := e.vampireOr? then
     return mkApp2 (symbolT "or") (← applyTranslators! p) (← applyTranslators! q)
+  else if let some (p, q) := e.app2? ``Iff then
+    return mkApp2 (symbolT "iff") (← applyTranslators! p) (← applyTranslators! q)
   else if let some (α, x, y) := e.eq? then
     if α == mkBool then return none
     -- Equality of propositions is not first-order equality: it relates formulas, so it

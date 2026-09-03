@@ -42,6 +42,9 @@ inductive FForm where
   | xor (a b : FForm)
   | all (vars : Array (Nat × Nat)) (f : FForm)
   | ex (vars : Array (Nat × Nat)) (f : FForm)
+  /-- The proposition AVATAR named for a component, by SAT variable. What it stands for
+  comes from the definition step that introduced it. -/
+  | split (satVar : Nat)
   deriving Inhabited, Repr
 
 /-- Which of `LeanChecker`'s handlers emits a step. Classified on the C++ side, where
@@ -63,8 +66,22 @@ inductive Handler where
   | clausify
   | unusedPredDefRemoval
   | avatarContradiction
+  /-- `avatarDefinitionIntroduction`: `sAv ↔ C`, by `Iff.rfl`. -/
+  | avatarDefinition
+  /-- `avatarComponent`. -/
+  | avatarComponent
+  /-- `avatarSplitClause`. -/
+  | avatarSplitClause
+  /-- `avatarRefutation`, by way of this fork's `avatarRefutationByResolution`. -/
+  | avatarRefutation
+  /-- `EVALUATION`, with the `norm_num1` script. -/
+  | evaluation
   /-- `definitionUnfolding`: rewrite with each defining equation, then `grind only`. -/
   | definitionUnfolding
+  /-- `skolemize`. -/
+  | skolemise
+  /-- Contributes nothing to the proof: `LeanChecker::isUncheckedInProof`. -/
+  | skipped
   /-- A rule whose handler is not ported yet. -/
   | unsupported
   deriving DecidableEq, Repr, Inhabited
@@ -76,6 +93,13 @@ def Handler.ofCode : Nat → Handler
   | 9 => .clausify        | 10 => .unusedPredDefRemoval
   | 11 => .avatarContradiction
   | 12 => .definitionUnfolding
+  | 13 => .avatarDefinition
+  | 14 => .avatarComponent
+  | 15 => .avatarSplitClause
+  | 16 => .avatarRefutation
+  | 17 => .evaluation
+  | 18 => .skolemise
+  | 19 => .skipped
   | _ => .unsupported
 
 /-- A function symbol, as Vampire has it. -/
@@ -102,6 +126,13 @@ structure PremiseInst where
   terms : Array FTerm
   deriving Inhabited
 
+/-- One step of the SAT solver's own derivation, as `avatarRefutationByResolution`
+walks it. Clauses are literal sets over split variables. -/
+structure SatStep where
+  concl : Array (Nat × Bool)
+  premises : Array (Array (Nat × Bool))
+  deriving Inhabited
+
 /-- One step of the refutation. -/
 structure Step where
   number : Nat
@@ -120,10 +151,32 @@ structure Step where
   statement : FForm
   /-- One entry per premise, empty when the rule needs no unifier. -/
   insts : Array PremiseInst
+  /-- Sorts for variables a substitution maps *into* that the conclusion does not bind.
+  Vampire knows them because a substitution is well-sorted; Lean needs them to ask for
+  an element of the sort. -/
+  rangeSorts : Array (Nat × Nat)
   /-- For a clausification, how many clauses the parent produced. -/
   cnfCount : Nat
   /-- For a definition unfolding, which way round each rewriting premise is used. -/
   rewriteForwards : Array Bool
+  /-- For an AVATAR definition: the variable named, and what it stands for. -/
+  splitVar : Nat
+  splitBody : FForm
+  /-- The SAT clause AVATAR gave this unit, if any. It stands in for the unit's own
+  statement — `LeanChecker` prints it with `outputSatClause`. -/
+  satClause : Option (Array (Nat × Bool))
+  /-- For an AVATAR split clause: which premises after the first are rewritten with
+  rather than against, the split hypotheses to introduce, and the arguments the parent
+  clause is applied to. -/
+  rewrites : Array Bool
+  introSplits : Array (Nat × Nat)
+  parentArgs : Array (Nat × Nat)
+  /-- For an AVATAR refutation: the parents' SAT clauses and the solver's derivation. -/
+  satParents : Array (Array (Nat × Bool))
+  derivation : Array SatStep
+  /-- For a skolemisation: the symbols introduced, in the order the existentials they
+  replace are stripped. -/
+  skolems : Array Nat
   deriving Inhabited
 
 /-- The symbol table the statements are written over. -/
@@ -162,6 +215,7 @@ def opIff := 21
 def opXor := 22
 def opForall := 23
 def opExists := 24
+def opSplit := 25
 
 structure State where
   code : Array UInt32
@@ -253,6 +307,8 @@ partial def readStream : M (Array Val) := do
       let (st'', a) ← popForm st'
       st := st''.push (.form (if op == opImp then .imp a b
                               else if op == opIff then .iff a b else .xor a b))
+    else if op == opSplit then
+      st := st.push (.form (.split (← next)))
     else if op == opForall || op == opExists then
       let n ← next
       let mut vars : Array (Nat × Nat) := #[]
@@ -298,6 +354,9 @@ def readUnit : M Unit := do
   let nVars ← next
   let vars ← readPairs nVars
   let splits ← readSplits
+  let hasSat := (← next) == 1
+  let satClause : Option (Array (Nat × Bool)) ←
+    if hasSat then do let c ← readSplits; pure (some c) else pure none
   let nPremises ← next
   let mut premises := #[]
   for _ in [0:nPremises] do premises := premises.push (← next)
@@ -307,6 +366,35 @@ def readUnit : M Unit := do
   if handler == .definitionUnfolding then
     let n ← next
     for _ in [0:n] do rewriteForwards := rewriteForwards.push ((← next) == 1)
+  let mut splitVar := 0
+  let mut splitBody : FForm := .tru
+  let mut rewrites : Array Bool := #[]
+  let mut introSplits : Array (Nat × Nat) := #[]
+  let mut parentArgs : Array (Nat × Nat) := #[]
+  let mut satParents : Array (Array (Nat × Bool)) := #[]
+  let mut derivation : Array SatStep := #[]
+  if handler == .avatarDefinition then
+    splitVar ← next
+    splitBody ← readForm
+  if handler == .avatarSplitClause then
+    let n ← next
+    for _ in [0:n] do rewrites := rewrites.push ((← next) == 1)
+    introSplits ← readPairs (← next)
+    parentArgs ← readPairs (← next)
+  let mut skolems : Array Nat := #[]
+  if handler == .skolemise then
+    let n ← next
+    for _ in [0:n] do skolems := skolems.push (← next)
+  if handler == .avatarRefutation then
+    let n ← next
+    for _ in [0:n] do satParents := satParents.push (← readSplits)
+    let k ← next
+    for _ in [0:k] do
+      let concl ← readSplits
+      let p ← next
+      let mut prems := #[]
+      for _ in [0:p] do prems := prems.push (← readSplits)
+      derivation := derivation.push { concl, premises := prems }
   let nInsts ← next
   let mut insts : Array PremiseInst := #[]
   for _ in [0:nInsts] do
@@ -315,9 +403,11 @@ def readUnit : M Unit := do
     let mut terms := #[]
     for _ in [0:nTerms] do terms := terms.push (← readTerm)
     insts := insts.push ({ splits, terms } : PremiseInst)
+  let rangeSorts ← readPairs (← next)
   let step : Step :=
     { number, handler, ruleName, inputType, isClause, vars, splits, premises,
-      statement, insts, cnfCount, rewriteForwards }
+      statement, insts, rangeSorts, cnfCount, rewriteForwards, splitVar, splitBody, satClause,
+      rewrites, introSplits, parentArgs, satParents, derivation, skolems }
   modify fun s => { s with steps := s.steps.push step }
 
 partial def run : M Unit := do
@@ -359,29 +449,10 @@ def Refutation.decode (code : Array UInt32) (names : Array String) :
 
 namespace Ffi
 
-@[extern "lean_vampire_export_proof"]
-private opaque exportProofRaw : BaseIO UInt32
-@[extern "lean_vampire_export_error"]
-private opaque exportErrorRaw : BaseIO String
-@[extern "lean_vampire_export_code"]
-private opaque exportCodeRaw : BaseIO (Array UInt32)
-@[extern "lean_vampire_export_names"]
-private opaque exportNamesRaw : BaseIO (Array String)
-
-/-- Export the last refutation as structured data.
-
-The whole proof is exported in one call, for the same reason the problem is built in
-one: the entry lock makes a call atomic but not a sequence of them. Reading the two
-arrays back afterwards is safe because they hold plain numbers and strings, copied out
-of Vampire's structures. -/
-def exportProof : BaseIO (Except String Refutation) := do
-  match ← exportProofRaw with
-  | 0 =>
-    let code ← exportCodeRaw
-    let names ← exportNamesRaw
-    return Refutation.decode code names
-  | 1 => return .error "vampire: there is no refutation to export"
-  | _ => return .error s!"vampire: the proof could not be exported: {← exportErrorRaw}"
+/-- Decode the refutation the last run exported. -/
+def exportedRefutation : BaseIO (Except String Refutation) := do
+  let (code, names) ← exportedProof
+  return Refutation.decode code names
 
 end Ffi
 

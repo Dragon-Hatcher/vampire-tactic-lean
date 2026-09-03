@@ -14,6 +14,7 @@
 
 #include <lean/lean.h>
 
+#include "vampire_export.hpp"
 #include "vampire_lock.hpp"
 
 #include <sstream>
@@ -78,6 +79,15 @@ struct Value {
 /// The problem most recently built, held so it can be inspected and then solved. It
 /// outlives the call because `env.setMainProblem` keeps a pointer to it.
 static Problem *g_built = nullptr;
+/// Everything a run produces, kept per thread so that reading it back cannot pick up
+/// another thread's results.
+thread_local std::vector<uint32_t> t_proofCode;
+thread_local std::vector<std::string> t_proofNames;
+thread_local std::vector<std::string> t_unitStrings;
+thread_local std::string t_outline;
+thread_local std::string t_message;
+thread_local bool t_refuted = false;
+
 /// Vampire's rendering of each unit, captured while it is built.
 ///
 /// Captured rather than kept as pointers: preprocessing replaces the problem's unit
@@ -280,21 +290,29 @@ using namespace vampire_ffi;
 extern "C" {
 
 /**
- * Build a problem from the compiled instruction stream.
+ * Build a problem, solve it, and export the refutation — the whole run, in one call.
  *
- * `names` indexes symbol names; `code` is the stream. Returns 0 on success, 2 if a
- * C++ exception escaped, 3 if the stream was malformed. The message for the latter is
- * available from `lean_vampire_build_error`.
+ * `names` indexes symbol names and `code` is the instruction stream from
+ * `Vampire/Translate/Build.lean`. Returns 0 if a refutation was found and exported,
+ * 1 if the search found none, 2 if a C++ exception escaped, 3 if the instruction
+ * stream was malformed, 4 if the refutation could not be exported. The reason is in
+ * `lean_vampire_message`.
+ *
+ * One call, not three, because the entry lock makes a call atomic but not a sequence of
+ * them: with Lean elaborating declarations in parallel, another thread's build could
+ * land between this thread's build and its solve, and Vampire's environment is shared.
  */
-uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_arg);
-
-static std::string g_error;
-static std::string g_solveReason;
-
-uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_arg) {
+uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
+                          uint32_t deciseconds, lean_obj_arg)
+{
   vampire_ffi::EntryGuard guard;
+  t_proofCode.clear();
+  t_proofNames.clear();
+  t_unitStrings.clear();
+  t_outline.clear();
+  t_message.clear();
+  t_refuted = false;
   try {
-    g_error.clear();
     std::vector<std::string> ns;
     for (size_t i = 0; i < lean_array_size(names); i++)
       ns.push_back(lean_string_cstr(lean_array_get_core(names, i)));
@@ -310,66 +328,8 @@ uint32_t lean_vampire_build(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_
     Lib::resetGlobalState();
     Lib::Timer::startClock();
     build(ns, cs);
-    return 0;
-  } catch (BuildError &e) {
-    g_error = e.what;
-    return 3;
-  } catch (Exception &e) {
-    g_error = e.msg();
-    return 2;
-  } catch (...) {
-    g_error = "unknown C++ exception";
-    return 2;
-  }
-}
+    t_unitStrings = g_unitStrings;
 
-/** Why the last solve did not produce a refutation. */
-lean_obj_res lean_vampire_solve_reason(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return lean_mk_string(g_solveReason.c_str());
-}
-
-/** The message from the last failed build. */
-lean_obj_res lean_vampire_build_error(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return lean_mk_string(g_error.c_str());
-}
-
-/** How many units the last build produced. */
-uint32_t lean_vampire_problem_size(lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  return static_cast<uint32_t>(g_unitStrings.size());
-}
-
-/**
- * Vampire's own rendering of unit `i`.
- *
- * This is the one place text appears, and it goes the other way: it is what Vampire
- * says it received, which is the point — it is evidence about the transfer rather than
- * the medium of it.
- */
-lean_obj_res lean_vampire_problem_unit(uint32_t i, lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  try {
-    if (i >= g_unitStrings.size()) return lean_mk_string("");
-    return lean_mk_string(g_unitStrings[i].c_str());
-  } catch (...) {
-    return lean_mk_string("");
-  }
-}
-
-/**
- * Preprocess and saturate the problem built by `lean_vampire_build`.
- *
- * Returns 1 if a refutation was found, 0 if not, 2 on an exception. Bounded by a soft
- * time limit, which throws out of the search loop; never the timer thread, which would
- * `_Exit` the host.
- */
-uint32_t lean_vampire_solve(uint32_t deciseconds, lean_obj_arg) {
-  vampire_ffi::EntryGuard guard;
-  try {
-    if (g_built == nullptr) return 0;
-    env.options->setTimeLimitInDeciseconds(deciseconds);
     // The options the Lean code generator is written against. `proof_extra lean` is
     // what makes preprocessing record the information the replay needs — how many
     // clauses a formula clausified into, which literal a subsumption selected — and
@@ -377,65 +337,79 @@ uint32_t lean_vampire_solve(uint32_t deciseconds, lean_obj_arg) {
     env.options->set("proof", "leancheck");
     env.options->set("proof_extra", "lean");
     env.options->set("skolemization", "syntactic");
-    // AVATAR is off because its proof steps are not ported yet: the SAT refutation,
-    // the split clauses and the per-theorem split binders all need machinery the Lean
-    // replay does not have. Turning it off costs search power on large problems and
-    // nothing on small ones; turning it back on is what the port needs next.
-    env.options->set("avatar", "off");
+    env.options->setTimeLimitInDeciseconds(deciseconds);
+
     Saturation::ProvingHelper::runVampire(*g_built, *env.options);
-    if (env.statistics->refutation != nullptr) return 1;
-    std::ostringstream why;
-    env.statistics->explainRefutationNotFound(why);
-    g_solveReason = why.str();
-    if (g_solveReason.empty())
-      g_solveReason = "the search finished without a refutation";
-    return 0;
+
+    if (env.statistics->refutation == nullptr) {
+      std::ostringstream why;
+      env.statistics->explainRefutationNotFound(why);
+      t_message = why.str();
+      if (t_message.empty()) t_message = "the search finished without a refutation";
+      return 1;
+    }
+    t_refuted = true;
+    t_outline = vampire_ffi::proofOutline();
+    uint32_t status = vampire_ffi::exportRefutation(t_proofCode, t_proofNames, t_message);
+    return status == 0 ? 0 : 4;
+  } catch (BuildError &e) {
+    t_message = e.what;
+    return 3;
   } catch (Exception &e) {
-    g_solveReason = e.msg();
+    t_message = e.msg();
     return 2;
   } catch (...) {
-    g_solveReason = "unknown C++ exception";
+    t_message = "unknown C++ exception";
     return 2;
   }
 }
 
+/** Why the last run did not produce a proof, or how it failed. */
+lean_obj_res lean_vampire_message(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return lean_mk_string(t_message.c_str());
+}
+
+/** How many units the last run's problem had. */
+uint32_t lean_vampire_problem_size(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return static_cast<uint32_t>(t_unitStrings.size());
+}
+
 /**
- * A one-line-per-step outline of the refutation: unit number, rule, premises.
+ * Vampire's own rendering of unit `i` of the last run's problem.
  *
- * A survey, not the proof: `vampire_proof.cpp` exports the proof as structured data.
+ * This is the one place text appears, and it goes the other way: it is what Vampire
+ * says it received, which is the point — it is evidence about the transfer rather than
+ * the medium of it.
  */
+lean_obj_res lean_vampire_problem_unit(uint32_t i, lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  if (i >= t_unitStrings.size()) return lean_mk_string("");
+  return lean_mk_string(t_unitStrings[i].c_str());
+}
+
+/** A one-line-per-step outline of the refutation, for diagnostics. */
 lean_obj_res lean_vampire_proof_outline(lean_obj_arg) {
   vampire_ffi::EntryGuard guard;
-  try {
-    Unit *refutation = env.statistics->refutation;
-    if (refutation == nullptr) return lean_mk_string("");
-    struct Survey : public InferenceStore::AbstractProofPrinter {
-      std::string text;
-      Survey(std::ostream &o, InferenceStore *is) : AbstractProofPrinter(o, is) {}
-      void printStep(Unit *u) override {
-        text += std::to_string(u->number());
-        text += "  ";
-        text += ruleName(u->inference().rule());
-        text += "  [";
-        bool first = true;
-        for (Unit *p : iterTraits(u->getParents())) {
-          if (!first) text += ",";
-          text += std::to_string(p->number());
-          first = false;
-        }
-        text += "]  ";
-        text += u->toString();
-        text += "\n";
-      }
-    };
-    std::ostringstream sink;
-    Survey s(sink, InferenceStore::instance());
-    s.scheduleForPrinting(refutation);
-    s.print();
-    return lean_mk_string(s.text.c_str());
-  } catch (...) {
-    return lean_mk_string("");
-  }
+  return lean_mk_string(t_outline.c_str());
+}
+
+/** The exported refutation: the instruction stream and the names it indexes. */
+lean_obj_res lean_vampire_proof_code(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  lean_object *a = lean_alloc_array(t_proofCode.size(), t_proofCode.size());
+  for (size_t i = 0; i < t_proofCode.size(); i++)
+    lean_array_set_core(a, i, lean_box_uint32(t_proofCode[i]));
+  return a;
+}
+
+lean_obj_res lean_vampire_proof_names(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  lean_object *a = lean_alloc_array(t_proofNames.size(), t_proofNames.size());
+  for (size_t i = 0; i < t_proofNames.size(); i++)
+    lean_array_set_core(a, i, lean_mk_string(t_proofNames[i].c_str()));
+  return a;
 }
 
 } // extern "C"

@@ -204,5 +204,6 @@ initialize Lean.registerTraceClass `vampire.translate
 initialize Lean.registerTraceClass `vampire.translate.expr
 initialize Lean.registerTraceClass `vampire.translate.query
 initialize Lean.registerTraceClass `vampire.preprocess
+initialize Lean.registerTraceClass `vampire.replay
 
 end Vampire
