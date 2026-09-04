@@ -18,12 +18,18 @@ def vampireCompileArgs : Array String := #[
   "-I" ++ (vampireDir / "cadical" / "src").toString
 ]
 
+/-- The C++ standard library to link against: libc++ under Apple's toolchain, libstdc++
+under GCC everywhere else. Vampire is C++ and the shim calls into it, so one of the two
+has to be named explicitly — `leanc` links C. -/
+def cxxStdlib : String :=
+  if System.Platform.isOSX then "-lc++" else "-lstdc++"
+
 package vampire where
   -- Link the embedded prover. `vampire_lib` is a static archive of the same objects
   -- the `vampire` executable is built from; see the fork's CMakeLists.
   moreLinkArgs := #[
     "-L" ++ vampireBuildDir.toString, "-lvampire_lib",
-    "-lc++"
+    cxxStdlib
   ]
 
 require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
