@@ -39,6 +39,12 @@ register_option vampire.timeout : Nat := {
   descr := "seconds Vampire may spend searching for a refutation"
 }
 
+/-- Whether to probe with a tight budget before spending the whole one. -/
+register_option vampire.escalate : Bool := {
+  defValue := true
+  descr := "search under a tight time limit first, then under the whole `vampire.timeout`"
+}
+
 namespace Vampire
 
 open Lean Elab Tactic Meta
@@ -46,6 +52,34 @@ open Lean Elab Tactic Meta
 /-- The search budget, in deciseconds, from `set_option vampire.timeout`. -/
 def timeoutDeciseconds : MetaM UInt32 := do
   return (((← getOptions).get `vampire.timeout (10 : Nat)) * 10).toUInt32
+
+/--
+The time limits to search under, in the order to try them.
+
+**The time limit is a search parameter, not just a cap.** Vampire's default saturation
+algorithm is the limited-resource strategy, which uses the limit to estimate which
+clauses it can still reach and discards the rest — so a *tighter* budget prunes harder
+and can reach a refutation sooner. Measured through the tactic on the benchmark, with
+the budget the only thing changed: `MGT035+2` 14.9s at 30s against 1.6s at 2s,
+`MGT035-2` 6.6s against 1.2s, `HEN009-5` 3.3s against 0.5s. Handing the prover the whole
+of a generous `vampire.timeout` is therefore the slow way to use it.
+
+So probe first and fall back. The last entry is always the whole budget, so a problem
+that needs the wide search still gets it and nothing that used to be provable stops
+being; what a probe costs when it fails is its own limit, which is why the limit has to
+be *enforced* — see `s_embeddedSoftTimeLimit` in `ffi/vampire_build.cpp`.
+
+The probes are absolute rather than fractions of the budget, because what makes a probe
+worth trying is that it is small in itself, not that it is small relative to what the
+user allowed. One at half the budget would mostly duplicate the fallback, so a probe is
+dropped once it reaches that.
+-/
+def searchSchedule (budget : UInt32) (escalate : Bool) : Array UInt32 := Id.run do
+  if !escalate then return #[budget]
+  let mut out := #[]
+  for probe in [(20 : UInt32), 80] do
+    if 2 * probe <= budget then out := out.push probe
+  return out.push budget
 
 /-- How the tactic is configured, as `vampire +mono [h]` and friends. Follows `smt`'s
 `Smt.Config`, which is where the `+mono` spelling comes from. -/
@@ -180,20 +214,67 @@ def problemAsVampireSeesIt : MetaM MessageData := do
     lines := lines.push (← Ffi.problemUnit i.toUInt32)
   return MessageData.joinSep lines.toList Format.line
 
-/-- Translate the goal, then build, solve and export in one call. -/
-def run (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :
-    MetaM (Outcome × Built) := do
+/--
+Translate the goal, then search for a refutation and make something of it — once per
+limit in `searchSchedule`, until one of them works.
+
+`use` is what a refutation has to survive to end the schedule: for `vampire` it is the
+whole replay, and for `vampire?` nothing at all. Escalating on a *replay* failure and
+not only on a search failure is what makes the probe safe. A tighter budget prunes, so
+it is a different search and finds a different proof, and a different proof can use a
+rule this port does not replay: probing turned `GRP427-1` from a 5.0s pass into a
+failure at "step 20895 (superposition) could not be replayed", where the wide search
+finds a proof that replays. Since the last limit in the schedule is the whole budget,
+falling through to it means nothing that used to replay stops replaying.
+
+Only the search is repeated. The translation happens once, and each `Ffi.run` rebuilds
+the problem from the same instruction stream, so a retry costs a rebuild and a search
+and nothing on this side.
+-/
+def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool)
+    (deciseconds : UInt32) (use : Built → TermElabM α) :
+    TermElabM (Built × Except MessageData α) := do
   let t0 ← IO.monoMsNow
   let built ← buildProblem cfg mv hs all
-  let t1 ← IO.monoMsNow
-  trace[vampire.timing] "translated in {t1 - t0}ms"
-  let r ← Ffi.run built.names built.code deciseconds
-  trace[vampire.timing] "prover took {(← IO.monoMsNow) - t1}ms"
-  trace[vampire.prover] "{← Ffi.proverOutput}"
-  match r with
-  | .refuted => return (.refuted, built)
-  | .notRefuted => return (.notRefuted, built)
-  | .failed what => throwError "vampire: {what}"
+  trace[vampire.timing] "translated in {(← IO.monoMsNow) - t0}ms"
+  let escalate := (← getOptions).getBool `vampire.escalate true
+  let schedule := searchSchedule deciseconds escalate
+  -- Why the schedule ran out, to report if it does. The last entry is the whole budget,
+  -- so this is the wide search's own reason and not a probe's.
+  let mut why : MessageData := m!"the search was not run"
+  for h : k in [0:schedule.size] do
+    let limit := schedule[k]
+    let isLast := k + 1 == schedule.size
+    let t1 ← IO.monoMsNow
+    let r ← Ffi.run built.names built.code limit
+    let reason ← Ffi.termination
+    trace[vampire.timing] "prover took {(← IO.monoMsNow) - t1}ms at {limit}ds ({reason})"
+    trace[vampire.prover] "{← Ffi.proverOutput}"
+    match r with
+    | .failed what => throwError "vampire: {what}"
+    | .notRefuted =>
+      why := m!"no refutation found ({reason}) — {← Ffi.message}"
+      -- A saturated space is not a budget problem, and no later limit changes it.
+      unless reason.mightYieldToMore do break
+    | .refuted =>
+      if isLast then return (built, .ok (← use built))
+      let saved ← saveState
+      try
+        return (built, .ok (← use built))
+      catch e =>
+        saved.restore
+        why := e.toMessageData
+        trace[vampire.replay] "the refutation found at {limit}ds was not usable, \
+          escalating:{indentD e.toMessageData}"
+  return (built, .error why)
+
+/-- Translate the goal, then search for a refutation, asking nothing of it. -/
+def run (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :
+    TermElabM (Outcome × Built) := do
+  -- Nothing is asked of the refutation, so the first limit that finds one ends the
+  -- schedule: what `vampire?` reports is what the prover would have handed the replay.
+  let (built, r) ← searchWith cfg mv hs all deciseconds (fun _ => pure ())
+  return (if r matches .ok _ then .refuted else .notRefuted, built)
 
 /-- What the exported proof's symbols and input units mean in Lean. -/
 def interpOf (built : Built) (syms : Symbols) : Interp where
@@ -210,10 +291,12 @@ def interpOf (built : Built) (syms : Symbols) : Interp where
 /-- Replay the refutation Vampire found as a Lean proof of `False`, in the context of
 the preprocessed goal. -/
 def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext do
+  let tExp ← IO.monoMsNow
   match ← Ffi.exportedRefutation with
   | .error e => throwError e
   | .ok refutation =>
     let t0 ← IO.monoMsNow
+    trace[vampire.timing] "read the refutation back in {t0 - tExp}ms"
     let e ← Replay.replay (interpOf built refutation.symbols) refutation
     trace[vampire.timing] "replayed {refutation.steps.size} steps in \
       {(← IO.monoMsNow) - t0}ms"
@@ -267,11 +350,16 @@ elab_rules : tactic
     g.withContext do
       unless (← Ffi.init) == .ok do
         throwError "vampire: the embedded prover is not available"
-      match ← run cfg g hs all (← timeoutDeciseconds) with
-      | (.notRefuted, _) =>
-        throwError "vampire: no refutation found — {← Ffi.message}"
-      | (.refuted, built) =>
-        let proof ← replayRefutation built
+      -- The replay is what the schedule has to get past, not just the search: a
+      -- refutation found under a probe's budget is a different proof, and it can use a
+      -- rule this port does not replay. `searchWith` escalates on either failure.
+      let (built, r) ← searchWith cfg g hs all (← timeoutDeciseconds) replayRefutation
+      match r with
+      -- The message is the wide search's own: either Vampire's account of why it found
+      -- nothing — which names the strategy, not the limit, so the termination reason
+      -- goes with it — or the replay's account of the step it could not do.
+      | .error why => throwError "vampire: {why}"
+      | .ok proof =>
         built.goal.assign proof
         g.assign (.mvar built.root)
 

@@ -1,8 +1,10 @@
 import Lean
 import VampLean
 import Vampire.Bridge
+import Vampire.Clause
 import Vampire.Prenex
 import Vampire.Proof
+import Vampire.Sat
 import Vampire.Support
 
 /-!
@@ -155,6 +157,10 @@ namespace Replay
 local constants standing for them. -/
 abbrev Vars := Std.HashMap Nat Expr
 
+/-- `¬e`. `Not` takes no implicit argument, so this is the whole of what `mkAppM`
+would do for it. -/
+private def notExpr (e : Expr) : Expr := mkApp (.const ``Not []) e
+
 private def sortExpr (i : Interp) (syms : Symbols) (s : Nat) : MetaM Expr := do
   let some e := i.sort s
     | throwError "vampire: the sort '{syms.sorts.getD s (toString s)}' has no Lean \
@@ -191,30 +197,41 @@ partial def termExpr (i : Interp) (syms : Symbols) (vs : Vars) : FTerm → MetaM
     let as ← args.mapM (termExpr i syms vs)
     return mkAppN hd as
 
-/-- A formula as a Lean `Prop`. Mirrors `LeanPrinter::printFormula`. -/
+/-- A formula as a Lean `Prop`. Mirrors `LeanPrinter::printFormula`.
+
+The connectives are built with `mkApp`, not `mkAppM`. `And`, `Or`, `Not` and `Iff` take
+no implicit argument, so there is nothing for `mkAppM` to unify and nothing it can do
+that naming the constant does not — but it still infers the type of every argument and
+runs `isDefEq` against `Prop` at every node of a formula, once per node per level of
+nesting. A clause with several hundred atoms in it is built once per step and once per
+premise of every step that uses it, so this is the innermost loop of stating a
+refutation. `Eq` does take one, and `mkEq` supplies it from the argument's type rather
+than through a metavariable — which is the same point `Vampire/Bridge.lean` records
+about `mkAppM`: assigning a metavariable makes `checkAssignment` walk the value. -/
 partial def formExpr (i : Interp) (syms : Symbols) (vs : Vars) : FForm → MetaM Expr
   | .lit p pol args => do
     let hd ← predExpr i syms p
     let e := mkAppN hd (← args.mapM (termExpr i syms vs))
-    if pol then return e else mkAppM ``Not #[e]
+    return if pol then e else notExpr e
   | .eq pol _ lhs rhs => do
     let l ← termExpr i syms vs lhs
     let r ← termExpr i syms vs rhs
-    let e ← mkAppM ``Eq #[l, r]
-    if pol then return e else mkAppM ``Not #[e]
+    let e ← mkEq l r
+    return if pol then e else notExpr e
   | .tru => return .const ``True []
   | .fls => return .const ``False []
-  | .neg f => do mkAppM ``Not #[← formExpr i syms vs f]
+  | .neg f => do return notExpr (← formExpr i syms vs f)
   | .conj fs => do foldBin ``And (← fs.mapM (formExpr i syms vs)) (.const ``True [])
   | .disj fs => do foldBin ``Or (← fs.mapM (formExpr i syms vs)) (.const ``False [])
   | .imp a b => do mkArrow (← formExpr i syms vs a) (← formExpr i syms vs b)
-  | .iff a b => do mkAppM ``Iff #[← formExpr i syms vs a, ← formExpr i syms vs b]
+  | .iff a b => do
+    return mkApp2 (.const ``Iff []) (← formExpr i syms vs a) (← formExpr i syms vs b)
   | .xor a b => do
     -- VampLean's `Xor'` is not `Not ∘ Iff`: it's the dedicated connective Vampire's own
     -- `<~>` prints as, and the ennf/nnf lemma sets (`not_iff_xor`, `our_xor_to_nnf`, …)
     -- rewrite *into* it. Desugaring to `¬(a ↔ b)` here would leave a formula those
     -- lemmas never fire on, so the reference generator uses `Xor'` and so do we.
-    mkAppM ``Xor' #[← formExpr i syms vs a, ← formExpr i syms vs b]
+    return mkApp2 (.const ``Xor' []) (← formExpr i syms vs a) (← formExpr i syms vs b)
   | .all vars f => quantified i syms vs vars f true 0
   | .ex vars f => quantified i syms vs vars f false 0
   | .split v => do
@@ -224,9 +241,10 @@ partial def formExpr (i : Interp) (syms : Symbols) (vs : Vars) : FForm → MetaM
 where
   foldBin (c : Name) (es : Array Expr) (unit : Expr) : MetaM Expr := do
     if es.isEmpty then return unit
+    let hd := Expr.const c []
     let mut e := es[es.size - 1]!
     for j in [1:es.size] do
-      e ← mkAppM c #[es[es.size - 1 - j]!, e]
+      e := mkApp2 hd es[es.size - 1 - j]! e
     return e
 
 /-- Bind `vars[k:]` and build the body under them. Universal binders become `∀`,
@@ -239,7 +257,8 @@ partial def quantified (i : Interp) (syms : Symbols) (vs : Vars)
     withLocalDeclD (varName v) ty fun x => do
       let body ← quantified i syms (vs.insert v x) vars f universal (k + 1)
       if universal then mkForallFVars #[x] body
-      else mkAppM ``Exists #[← mkLambdaFVars #[x] body]
+      else
+        return mkApp2 (.const ``Exists [← getLevel ty]) ty (← mkLambdaFVars #[x] body)
   else
     formExpr i syms vs f
 
@@ -252,7 +271,7 @@ A clause is the universal closure of the disjunction of its literals, which is w
 def splitLit (i : Interp) (v : Nat) (positive : Bool) : MetaM Expr := do
   let some e := i.splitProp v
     | throwError "vampire: the AVATAR split sA{v} is used before it is defined"
-  if positive then return e else mkAppM ``Not #[e]
+  return if positive then e else notExpr e
 
 /-- A SAT clause as a Lean disjunction, which is `LeanChecker::outputSatClause`. -/
 def satClauseExpr (i : Interp) (lits : Array (Nat × Bool)) : MetaM Expr := do
@@ -260,7 +279,7 @@ def satClauseExpr (i : Interp) (lits : Array (Nat × Bool)) : MetaM Expr := do
   let mut e ← splitLit i (lits[lits.size - 1]!).1 (lits[lits.size - 1]!).2
   for j in [1:lits.size] do
     let (v, p) := lits[lits.size - 1 - j]!
-    e ← mkAppM ``Or #[← splitLit i v p, e]
+    e := mkApp2 (.const ``Or []) (← splitLit i v p) e
   return e
 
 /--
@@ -795,9 +814,23 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     let ids := (Array.range premises.size).map hyp ++ conclusionBinders
     let mut tacs ← intros ids
     tacs := tacs ++ (← instantiations true)
-    tacs := tacs.push (←
+    -- Propagation first, `grind` behind it. Once the premises are instantiated the
+    -- inference is a propositional one — falsify the conclusion and the premises are
+    -- the conflict that conflict analysis, or subsumption, or the resolved literal,
+    -- already found — and `grind only [cases Or]` is being asked to rediscover that by
+    -- case analysis. It is the largest thing left in a replay: over the benchmark,
+    -- 11.3s of `forward subsumption resolution` and 9.0s of `resolution`.
+    -- `Vampire/Clause.lean` builds the propagation as a term instead.
+    --
+    -- The rules that reach `grind` are the ones whose premises differ from the
+    -- conclusion by a *rewrite*: superposition and demodulation match `L[s]` against
+    -- `L[t]` under `s = t`, which propagation does not see as the same literal.
+    let derivedIds := (Array.range premises.size).map derived
+    let fallback ←
       if s.handler == .genericSubs then `(tactic| grind only [cases Or])
-      else `(tactic| grind only))
+      else `(tactic| grind only)
+    tacs := tacs.push
+      (← `(tactic| first | vampire_resolve $derivedIds* | $fallback:tactic))
     return tacs
   | .generic =>
     -- `genericInference`'s script is a bare `grind`, and that is what a rule falling
@@ -971,20 +1004,38 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- 0.1s. It is weaker than `prenexify` and can order the prefix differently, so
     -- `prenexify` stays behind it over the whole rest of the script: which prenexing ran
     -- is only discoverable from whether what follows can use the result.
-    let tail (goalPrenex : TSyntax `tactic) : TermElabM (TSyntax ``tacticSeq) := do
-      let mut rest := #[goalPrenex, ← `(tactic| prenexify at $h0:ident)]
+    --
+    -- `hypPrenex` is `prenexify at h0`, which is there so that `h0` can be applied at
+    -- the variables the goal has just introduced: that needs its own `∀` prefix at the
+    -- front. A clause usually already has it there, and then this is a full simp
+    -- traversal that changes nothing — 2.4ms a step, and once the bridge closes the
+    -- step the largest line left in the script. Where `h0` does need hoisting the
+    -- application below does not typecheck, and the alternative that keeps the line
+    -- runs instead.
+    let tail (goalPrenex : TSyntax `tactic) (hypPrenex : Bool) :
+        TermElabM (TSyntax ``tacticSeq) := do
+      let mut rest := #[goalPrenex]
+      if hypPrenex then rest := rest.push (← `(tactic| prenexify at $h0:ident))
       rest := rest ++ (← intros introIds)
       rest := rest.push (← `(tactic| have $newForm:ident := $h0 $args*))
-      rest := rest.push (← `(tactic|
-        simp (config := { failIfUnchanged := false }) only [not_and_or, not_not, eq_comm]
-          at $newForm:ident))
-      rest := rest.push (← `(tactic|
-        simp (config := { failIfUnchanged := false }) only [eq_comm]))
-      rest := rest.push (← `(tactic| ac_nf at $newForm:ident ⊢ <;> grind only [cases Or]))
+      -- `newForm` is the parent at the split's own arguments, and what is left between
+      -- it and the conclusion is a reshuffle: the disjuncts in another order,
+      -- reassociated, with the split components dropped. The reference normalises both
+      -- sides until `grind` can see it, which is three simp traversals and a case split
+      -- for something the bridge builds by walking the two formulas together. On
+      -- `ALG165+1` it closes all 373 split clauses at 0.3ms each, against 4ms for the
+      -- four lines below; where it does not, the reference's script runs unchanged.
+      rest := rest.push (← `(tactic| first
+        | vampire_bridge $newForm:ident
+        | (simp (config := { failIfUnchanged := false })
+             only [not_and_or, not_not, eq_comm] at $newForm:ident
+           simp (config := { failIfUnchanged := false }) only [eq_comm]
+           ac_nf at $newForm:ident ⊢ <;> grind only [cases Or])))
       `(tacticSeq| $rest*)
     tacs := tacs.push (← `(tactic| first
-      | $(← tail (← `(tactic| vampire_or_prenex)))
-      | $(← tail (← `(tactic| prenexify)))))
+      | $(← tail (← `(tactic| vampire_or_prenex)) false)
+      | $(← tail (← `(tactic| vampire_or_prenex)) true)
+      | $(← tail (← `(tactic| prenexify)) true)))
     return tacs
   | .predicateDefinition =>
     -- `intro v…`, then the equation holds by `Iff.rfl` because the symbol *is* the
@@ -1044,17 +1095,37 @@ private partial def andLeaves (h : Expr) (ty : Expr) : MetaM (Array (Expr × Exp
            (← andLeaves (mkApp3 (.const ``And.right []) a b h) b)
   return #[(ty, h)]
 
-/-- The first of `leaves` whose statement is the one wanted.
+/--
+The proof of `want` among a clausified parent's leaves.
 
-Keyed on the statement first: the clause a step asks for is usually the leaf verbatim,
-and a refutation asks once per clause, so a linear `isDefEq` scan is quadratic in a
-split that `SYN472+1` makes 196 wide. The scan stays behind the lookup for the clauses
-that are equal without being identical. -/
+Three ways, cheapest first. Usually the clause *is* a leaf verbatim and the statement
+index finds it. Where it is not, it is that leaf in another order or association, or
+with an equation stated the other way round — so the leaves whose signature matches are
+tried, first for definitional equality and then through the bridge, which builds the
+reshuffle by walking the two formulas together.
+
+Only then the scan over every leaf. That scan used to be the whole of the second case,
+and it is quadratic in a number that is not small: `SYN472+1`'s conjecture clausifies
+196 ways, the refutation uses 141 of them, and 29 of those were not leaves verbatim —
+so 29 times over, `isDefEq` was run against all 196 formulas of seven hundred atoms
+each, and then `vampire_finish_clausify` rewrote both sides until `assumption` could see
+they agreed. Measured: 4.8s of that problem's 5.9s replay. It is kept behind the
+signature because a signature is not a decision — two leaves that are definitionally
+equal for a reason the signature cannot see, a definition unfolded on one side say,
+would otherwise stop being found.
+-/
 private def findLeaf (want : Expr) (index : Std.HashMap Expr Expr)
-    (clauses : Array (Expr × Expr)) : MetaM (Option Expr) := do
+    (clauses : Array (Expr × Expr)) (sigs : Array UInt64) : MetaM (Option Expr) := do
   if let some pf := index[want]? then return some pf
-  for (ty, pf) in clauses do
+  let s := Bridge.sig want
+  for h : k in [0:clauses.size] do
+    unless sigs[k]? == some s do continue
+    let (ty, pf) := clauses[k]
     if ← isDefEq ty want then return some pf
+    if let .inl e ← Bridge.tryTransport want pf then return some e
+  for h : k in [0:clauses.size] do
+    if sigs[k]? == some s then continue
+    if ← isDefEq clauses[k].1 want then return some clauses[k].2
   return none
 
 /--
@@ -1269,6 +1340,15 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
     let some p := premises[k]?
       | throwError "vampire: the AVATAR refutation is missing a premise proof"
     have? := have?.insert (key s.satParents[k]) p
+  -- The atom table is built once for the derivation, not once per step: two
+  -- occurrences of a literal are then the same `Expr`, which is what makes the assembled
+  -- term share and `Expr.abstract`'s and the kernel's caches hit.
+  let atoms? := Id.run do
+    let mut all := s.satParents
+    for step in s.derivation do
+      all := all.push step.concl
+      all := all ++ step.premises
+    return Sat.Atoms.of i.splitProp all
   let mut last : Option Expr := none
   for step in s.derivation do
     let concl ← satClauseExpr i step.concl
@@ -1276,9 +1356,22 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
     for prem in step.premises.reverse do
       ty ← mkArrow (← satClauseExpr i prem) ty
     -- Pure propositional resolution over the split variables: it wants nothing from the
-    -- context, and giving it the context is what made the big AVATAR proofs slow.
-    let lemma ← proveBy ty #[← `(tactic| grind only [cases Or])]
-      m!"a step of the SAT refutation at {s.number}" (restrict := true)
+    -- context, and it wants no search either. `Vampire/Sat.lean` falsifies the conclusion
+    -- and propagates, which is how the solver derived the step in the first place, and
+    -- builds the proof as a term. The reference's `grind` stays behind it for a
+    -- derivation propagation does not close. `ALG165+1`'s refutation is 1506 steps over
+    -- 116k literals: 15.3s of a 24s replay by `grind`, 0.7s by construction.
+    let lemma ←
+      match ← (match atoms? with
+               | none => pure none
+               | some as => Sat.resolveStep as step.premises step.concl) with
+      | some e =>
+        -- Ascribed, so that `applyChecked` below reads the statement off the hint
+        -- rather than walking the term it is about to apply.
+        mkExpectedTypeHint e ty
+      | none =>
+        proveBy ty #[← `(tactic| grind only [cases Or])]
+          m!"a step of the SAT refutation at {s.number}" (restrict := true)
     let mut args : Array Expr := #[]
     for prem in step.premises do
       let some a := have?[key prem]?
@@ -1315,6 +1408,11 @@ structure Clausified where
   proof : Expr
   index : Std.HashMap Expr Expr
   clauses : Array (Expr × Expr)
+  /-- `Bridge.sig` of each leaf, positionally. The signature ignores exactly what a
+  clausification's two renderings of a clause differ by — the order of a junction's
+  arguments and which way round an equation is stated — so it is what says which leaves
+  are worth looking at. -/
+  sigs : Array UInt64
   full : Bool
 
 /-- What the replay carries from one step to the next. -/
@@ -1360,7 +1458,9 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
     | .input =>
       let some src := st.interp.input s.number
         | throwError "vampire: no Lean hypothesis for input step {s.number}"
+      let t0 ← IO.monoMsNow
       let e ← bridgeInput st.interp r.symbols s src
+      trace[vampire.timing] "step {s.number} input: run {(← IO.monoMsNow) - t0}ms"
       replayFrom r { st with proofs := st.proofs.insert s.number e, last := some e } (k + 1)
     | .avatarDefinition =>
       let comp ← formExpr st.interp r.symbols {} s.splitBody
@@ -1412,10 +1512,13 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
         let specStx ← exprToSyntax spec
         -- `symm_match using` wants a hypothesis, so the specification is bound first.
         let specId := mkIdent (Name.mkSimple "spec")
+        let t0 ← IO.monoMsNow
         let e ← proveBy want
           #[← `(tactic| have $specId:ident := $specStx),
             ← `(tactic| first | exact $specId | symm_match using $specId)]
           m!"skolemisation {s.number}"
+        trace[vampire.timing] "step {s.number} skolemisation: run \
+          {(← IO.monoMsNow) - t0}ms"
         replayFrom r { st with
           skolems, interp, bound
           proofs := st.proofs.insert s.number e, last := some e } (k + 1)
@@ -1431,22 +1534,31 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
       let some parent := st.proofs[parentNum]?
         | throwError "vampire: the parent of clausification {s.number} is unproved"
       let mut st := st
+      let t0 ← IO.monoMsNow
       let mut cnf ←
         match st.clausified[parentNum]? with
         | some c => pure c
         | none =>
           let c ← clausifyParent parent s.number (full := false)
+          trace[vampire.timing] "clausified parent {parentNum} (weak prenex) in \
+            {(← IO.monoMsNow) - t0}ms"
           st := { st with clausified := st.clausified.insert parentNum c }
           pure c
+      let tPick ← IO.monoMsNow
       let want ← stepType st.interp r.symbols s
       let reorder ← clausifyReorder s
       let mut e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := !cnf.full)
       if e?.isNone then
         -- The cheap prenexing did not reach this clause. Prenex the parent the way
         -- `prenexify` does, for this parent and every later clause of it.
+        let tFull ← IO.monoMsNow
         cnf ← clausifyParent parent s.number (full := true)
+        trace[vampire.timing] "clausified parent {parentNum} (full prenex) in \
+          {(← IO.monoMsNow) - tFull}ms"
         st := { st with clausified := st.clausified.insert parentNum cnf }
         e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := false)
+      trace[vampire.timing] "step {s.number} cnf transformation (shared): run \
+        {(← IO.monoMsNow) - tPick}ms"
       let some e := e?
         | throwError "vampire: step {s.number} (cnf transformation) is not one of the \
             clauses its parent produced"
@@ -1507,7 +1619,7 @@ where
     let clauses ← andLeaves proof statement
     let index := clauses.foldl (init := ({} : Std.HashMap Expr Expr))
       fun m (ty, pf) => if m.contains ty then m else m.insert ty pf
-    return { statement, proof, index, clauses, full }
+    return { statement, proof, index, clauses, sigs := clauses.map (Bridge.sig ·.1), full }
 
   /--
   The proof of one clause, out of a clausified parent.
@@ -1522,9 +1634,12 @@ where
     -- nothing to prove: the projection out of the CNF *is* the proof. It is ascribed so
     -- that a later step reading this one with `inferType` gets the statement Vampire
     -- recorded rather than the leaf's own rendering of it.
-    if reorder.isEmpty then
-      if let some pf ← findLeaf want cnf.index cnf.clauses then
-        return some (← mkExpectedTypeHint pf want)
+    -- The reorder lines are tried too, and not only when there are none of them: what
+    -- they do is permute the goal's `∀` prefix into the order the exporter recorded,
+    -- and introducing a conclusion's binders and letting the premise's prefix be
+    -- instantiated is a rule the bridge already has.
+    if let some pf ← findLeaf want cnf.index cnf.clauses cnf.sigs then
+      return some (← mkExpectedTypeHint pf want)
     -- Otherwise the binder prefix wants permuting, or the clause wants the AC
     -- normalisation to be recognised. `vampire_finish_clausify` does what it always
     -- did, over the shared CNF rather than one it makes for itself.
@@ -1566,7 +1681,11 @@ where
       argOf := argOf.push n
     let e ←
       if s.handler == .avatarRefutation then
-        avatarRefutation st.interp s args
+        let t0 ← IO.monoMsNow
+        let e ← avatarRefutation st.interp s args
+        trace[vampire.timing] "step {s.number} avatar sat refutation: run \
+          {(← IO.monoMsNow) - t0}ms"
+        pure e
       else
         -- Folding a definition in is exactly a step of definitional unfolding, so it
         -- is the one derived rule that needs to see through the `let`.

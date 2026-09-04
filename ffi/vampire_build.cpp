@@ -36,6 +36,7 @@
 #include "Kernel/Term.hpp"
 #include "Kernel/Unit.hpp"
 #include "Saturation/ProvingHelper.hpp"
+#include "Saturation/SaturationAlgorithm.hpp"
 #include "Shell/Options.hpp"
 #include "Shell/Statistics.hpp"
 
@@ -87,6 +88,10 @@ thread_local std::vector<std::string> t_unitStrings;
 thread_local std::string t_outline;
 thread_local std::string t_message;
 thread_local bool t_refuted = false;
+/// `Shell::Statistics::TerminationReason` for the last run, as its own enumerator value.
+/// The caller needs it to tell a search that ran out of budget -- worth retrying with
+/// more -- from one that saturated, which no budget would change.
+thread_local uint32_t t_termination = 0;
 
 /// Vampire's rendering of each unit, captured while it is built.
 ///
@@ -323,6 +328,7 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
   t_outline.clear();
   t_message.clear();
   t_refuted = false;
+  t_termination = 0;
   try {
     std::vector<std::string> ns;
     for (size_t i = 0; i < lean_array_size(names); i++)
@@ -349,8 +355,18 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
     env.options->set("proof_extra", "lean");
     env.options->set("skolemization", "syntactic");
     env.options->setTimeLimitInDeciseconds(deciseconds);
+    // And bound the search by it. `setTimeLimitInDeciseconds` alone does not: it is
+    // read by the limited-resource strategy, which uses it to estimate which clauses it
+    // can still reach, but nothing in the loop stops when it is up. The executable is
+    // stopped by the thread `Timer::reinitialise` spawns, which `_Exit`s the process
+    // and cannot be used here, so what bounds an embedded run is the cooperative check
+    // in `SaturationAlgorithm::runImpl` -- and until this line nothing set the limit
+    // that check reads. A run therefore ignored its timeout: `BOO028-1` asked for two
+    // seconds and searched for thirty.
+    Saturation::SaturationAlgorithm::s_embeddedSoftTimeLimit = deciseconds;
 
     Saturation::ProvingHelper::runVampire(*g_built, *env.options);
+    t_termination = static_cast<uint32_t>(env.statistics->terminationReason);
 
     if (env.statistics->refutation == nullptr) {
       std::ostringstream why;
@@ -385,6 +401,19 @@ lean_obj_res lean_vampire_prover_output(lean_obj_arg) {
 lean_obj_res lean_vampire_message(lean_obj_arg) {
   vampire_ffi::EntryGuard guard;
   return lean_mk_string(t_message.c_str());
+}
+
+/**
+ * Why the last run stopped, as `Shell::Statistics::TerminationReason`.
+ *
+ * The caller escalates the time limit rather than passing the user's whole budget
+ * straight to the prover, so it has to know whether more budget could help: a run cut
+ * off by a limit, or one whose limited-resource pruning discarded clauses it then
+ * needed, is worth retrying, and a saturated one is not.
+ */
+uint32_t lean_vampire_termination(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return t_termination;
 }
 
 /** How many units the last run's problem had. */

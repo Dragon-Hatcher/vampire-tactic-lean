@@ -37,6 +37,10 @@ What it prints is Vampire's own rendering of the units it holds — evidence abo
 transfer, produced at the far end of it.
 
 `set_option vampire.timeout n` gives the prover `n` seconds to search (default 10).
+That is a budget and not a single attempt: the search is run under a tight limit first
+and under the whole budget only if it has to be, because Vampire's default saturation
+algorithm reads the limit as a *search parameter*. `set_option vampire.escalate false`
+makes it one attempt at the whole budget.
 
 When a goal is slow rather than wrong, `set_option trace.vampire.timing true` reports
 translation, search and replay, and one line per replayed step;
@@ -60,6 +64,28 @@ they are made, so this is a debugging aid rather than a safeguard.
   reparsing. The one thing that crosses as text is a symbol's name, once, at its
   declaration — Vampire's signature is keyed by name and needs one to name a symbol in
   a proof.
+- **A time limit is a search parameter, so probe with a small one.** Vampire's default
+  saturation algorithm is the limited-resource strategy: it uses the time limit to
+  estimate which clauses it can still reach in the time left and discards the rest. A
+  generous limit therefore prunes less and searches *longer* — `MGT035+2` is 14.9s
+  given 30s and 1.6s given 2s, and `HEN009-5` 3.3s against 0.5s. `vampire.timeout` is
+  the budget; the search runs at 2s, then 8s, then the budget, and stops at the first
+  limit that produces a proof the replay can use. The last attempt is always the whole
+  budget, so nothing that used to be provable stops being.
+
+  Escalating on the *replay* and not only on the search is the part that had to be
+  learned: a tighter budget is a different search and finds a different proof, and a
+  different proof can use a rule this port does not replay. Probing turned `GRP427-1`
+  from a pass into "step 20895 (superposition) could not be replayed" until the failure
+  fell through to the wide search.
+
+  This needed a bug fixed in the fork first. `docs/vampire-global-state.md` says an
+  embedded run bounds itself with `SaturationAlgorithm::setSoftTimeLimit`, because the
+  executable's own enforcement is a thread that `_Exit`s the process — and nothing was
+  calling it, so the limit reached only the strategy's estimate and never the loop.
+  `vampire.timeout` was not a timeout at all: `BOO028-1` asked for two seconds and
+  searched for thirty.
+
 - **A whole run is one call.** Build, solve and export happen together. The FFI entry
   lock makes a call atomic but not a sequence of them, and Vampire's environment is
   process-global, so with Lean elaborating declarations in parallel another thread's
@@ -87,6 +113,43 @@ they are made, so this is a debugging aid rather than a safeguard.
   `Vampire/Prenex.lean` does the quantifier hoisting as a term; the reference's script
   stays behind each of them, so nothing that used to be provable stops being. Measured
   on the two slowest problems in `bench-tptp/`, this is 79s to 7s and 77s to 11s.
+
+  A *multi*-clause clausification is the same lesson reached late. Its clause is looked
+  for among the leaves of the shared CNF, and where the leaf was not the clause verbatim
+  the search was a linear `isDefEq` over every leaf followed by `vampire_finish_clausify`
+  rewriting both sides until `assumption` agreed. `SYN472+1` clausifies 196 ways and 29
+  of the clauses it uses are not verbatim, so that scan ran 29 times over 196 formulas
+  of seven hundred atoms: 4.8s of a 5.9s replay. The leaves are now indexed by
+  `Bridge.sig`, which hashes a formula modulo exactly what the two renderings differ by,
+  and the candidates that match are bridged. 5.9s to 1.3s.
+- **A resolution is not a case split.** AVATAR's refutation is the SAT solver's own
+  resolution chain, and the generated file proves each of its steps with `grind only
+  [cases Or]` — rediscovering, by case analysis, a derivation the solver already
+  recorded. Falsify a step's conclusion and its premises are a conflict that unit
+  propagation reaches, because conflict analysis is what produced them; `Vampire/Sat.lean`
+  builds that proof directly. On `ALG165+1`, whose derivation is 1506 steps over 116k
+  literals, that is 15.3s of a 24s replay against 0.7s.
+
+- **Neither is a derived inference.** The same is true one level up, of resolution and
+  superposition themselves. `genericInferenceWithSubstitution` instantiates the premises
+  at the recorded substitution and hands the rest to `grind only [cases Or]`, and that
+  switch was the largest thing in a replay: over the benchmark, 11.3s of `forward
+  subsumption resolution`, 9.0s of `resolution`, 7.3s of `forward demodulation` and 5.4s
+  of `superposition`. Once the premises are instantiated the inference is the conflict
+  it was found as. `Vampire/Clause.lean` is `Sat.lean`'s construction over first-order
+  literals, with the three things such a literal has that a split variable does not: an
+  equation has two spellings, `¬(t = t)` refutes itself, and two literals can be the
+  same modulo an equation the inference itself supplies — which is what superposition
+  and demodulation are for, and is done by walking the two literals together and
+  abstracting the positions where they differ, not by rewriting. Those four rules
+  together: 33.3s to 6.7s.
+
+- **A formula is built by application, not by `mkAppM`.** `And`, `Or`, `Not` and `Iff`
+  take no implicit argument, so `mkAppM` had nothing to unify for them — but it still
+  inferred the type of every argument and checked it against `Prop`, once per node of a
+  formula, and a clause's statement is built once for the clause and once for each step
+  that names it as a premise. Stating every step of every refutation in the benchmark
+  went from 2.8s to 0.44s.
 
 ## What translates
 
@@ -164,6 +227,8 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     Vampire/Proof.lean              the refutation, read back as structured data
     Vampire/Bridge.lean             reconciling two renderings of the same formula
     Vampire/Prenex.lean             hoisting a goal's quantifiers out of its disjunctions
+    Vampire/Sat.lean                AVATAR's SAT refutation, by unit propagation
+    Vampire/Clause.lean             a derived inference, by unit propagation
     Vampire/Support.lean            tactics the replay needs and the generated file does not
     Vampire/Reconstruct.lean        the port of Vampire's Lean code generator
     Vampire/Tactic.lean             `vampire` and `vampire?`
@@ -188,9 +253,11 @@ run, which is what makes them a test of this port rather than of the generated f
 | `bench-tptp/`, that set plus 139 more | 196 | **196** |
 
 `bench-tptp/README.md` has the timing distribution, everything that used to fail and
-what each one turned out to be, and the scripts to reproduce the run. The median problem
-replays in 2.2s of CPU, the 90th percentile in 5.8s and the slowest in 20s, and no
-problem holds more than 2.2GB. Whichever way it is run, run the numbers you quote alone:
+what each one turned out to be, and the scripts to reproduce the run. Run one at a time
+the whole set is 464.6s of CPU, of which 344.6s is `lake lean` start-up and the
+statements' own elaboration — a floor measured by replacing `vampire [*]` with `sorry` —
+so the tactic's own work is 120.0s. The median problem is 1.95s of CPU and is start-up,
+the 90th percentile 3.3s and the slowest 12.9s, and no problem holds more than 2.0GB. Whichever way it is run, run the numbers you quote alone:
 a parallel run inflates CPU as well as wall time, because Lean elaborates on several
 threads and time they spend spinning for a core is charged to the process.
 `bench-tptp/sweep.py` runs the set and serves a live page while it does.

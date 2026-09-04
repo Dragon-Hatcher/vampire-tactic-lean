@@ -103,6 +103,55 @@ def reset : BaseIO Status := do
 /-- Self-test: add a fresh function symbol, returning the new symbol count. -/
 def selftestDirty : BaseIO UInt32 := selftestDirtyRaw
 
+/--
+Why a run stopped. Mirrors `Shell::Statistics::TerminationReason`, enumerator by
+enumerator, and is read back with `lean_vampire_termination`.
+-/
+inductive Termination where
+  | refutation
+  | satisfiable
+  /-- The search space was exhausted, but under a strategy that discards clauses — so
+  what it exhausted was not the whole space. -/
+  | refutationNotFound
+  | inappropriate
+  | unknown
+  | timeLimit
+  | instructionLimit
+  | memoryLimit
+  | activationLimit
+  /-- A code this side does not know. -/
+  | other (code : UInt32)
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Decode a raw termination reason from the shim. -/
+def Termination.ofCode : UInt32 → Termination
+  | 0 => .refutation      | 1 => .satisfiable     | 2 => .refutationNotFound
+  | 3 => .inappropriate   | 4 => .unknown         | 5 => .timeLimit
+  | 6 => .instructionLimit | 7 => .memoryLimit    | 8 => .activationLimit
+  | c => .other c
+
+instance : ToString Termination where
+  toString
+    | .refutation => "refutation" | .satisfiable => "satisfiable"
+    | .refutationNotFound => "refutation not found" | .inappropriate => "inappropriate"
+    | .unknown => "unknown" | .timeLimit => "time limit"
+    | .instructionLimit => "instruction limit" | .memoryLimit => "memory limit"
+    | .activationLimit => "activation limit" | .other c => s!"code {c}"
+
+/--
+Whether a bigger budget could turn this outcome into a refutation.
+
+A run stopped by a limit obviously could. So could one that reports the space exhausted
+*under a strategy that discards clauses*: the default saturation algorithm is the
+limited-resource strategy, which uses the time limit to estimate which clauses it can
+still reach and throws away the rest, so a tighter limit is a different — and
+incomplete — search. Saturating without discarding anything is the one outcome that
+says the problem itself has no refutation, and no budget changes that.
+-/
+def Termination.mightYieldToMore : Termination → Bool
+  | .satisfiable | .inappropriate | .refutation => false
+  | _ => true
+
 /-- What a whole run did. -/
 inductive RunResult where
   /-- A refutation was found and exported. -/
@@ -118,6 +167,9 @@ private opaque runRaw : (@& Array String) → (@& Array UInt32) → UInt32 → B
 
 @[extern "lean_vampire_message"]
 private opaque messageRaw : BaseIO String
+
+@[extern "lean_vampire_termination"]
+private opaque terminationRaw : BaseIO UInt32
 
 @[extern "lean_vampire_problem_size"]
 private opaque problemSizeRaw : BaseIO UInt32
@@ -167,6 +219,10 @@ def proverOutput : BaseIO String := proverOutputRaw
 
 /-- Why the last run found no refutation — Vampire's own explanation. -/
 def message : BaseIO String := messageRaw
+
+/-- Why the last run stopped. -/
+def termination : BaseIO Termination := do
+  return Termination.ofCode (← terminationRaw)
 
 /-- How many units the last run's problem had. -/
 def problemSize : BaseIO UInt32 := problemSizeRaw

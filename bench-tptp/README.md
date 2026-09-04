@@ -95,12 +95,59 @@ and the eight problems over ten seconds, which are the only figures worth quotin
     P_ALG160p1   15.9s   2.1GB
     Q_BIO006p1   12.5s   2.0GB
 
+### After the AVATAR and bridge work
+
+`docs/STATUS.md`'s "A fast path that silently never fires" cut the `ALG` family, which
+was every problem on the list above. The set was regenerated and rerun to check for
+regressions: **195/195** (the paper's 57 plus 138 newly generated — `gen.sh` gets a
+different number of problems through each time, since Vampire is nondeterministic under
+a wall-clock limit). The paper's 57 were timed before and after, back to back, the better
+of two runs each: 285.6s of CPU to 219.5s, and 146.0s to 79.8s with the 2.45s of `lake
+lean` start-up every problem pays taken out. The three that led the list above:
+
+    P_ALG165p1   27.5s -> 11.8s
+    P_ALG190p1   23.3s -> 11.6s
+    P_ALG160p1   22.5s -> 10.5s
+
+Those are on a machine that was not idle, so they are a ratio and not a replacement for
+the distribution above, which was measured alone. The wider set was rerun for pass/fail
+only, in parallel, and not timed.
+
 This used to have a much longer tail. `Q_PRD001p1` was 79s at 5.5GB and `Q_BIO006p1` 77s
 at 4.3GB, which is why `sweep.py` grew a `--triage` mode that runs everything in parallel
 under a short cap and then reruns the tail one at a time; both are now 7s and 12s, and no
 problem holds more than 2.2GB, so the whole set fits in one pass and the memory ceiling no
 longer decides `--jobs`. `../docs/STATUS.md`'s "Assigning a metavariable is not free, and
 a rewrite is not a reshuffle" has the measurements.
+
+### After the prover schedule and the propagation work
+
+`docs/STATUS.md`'s last three sections — the search budget, derived inferences by unit
+propagation, and the signature index over a clausified parent's leaves. The whole set
+was rerun before and after on the same machine, one problem at a time: **195/195** both
+ways, 536.1s of CPU to **464.6s**.
+
+`lake lean` start-up and the statement's own elaboration are a floor every problem pays
+whatever the tactic does, and here it is most of the total. Measured by replacing
+`vampire [*]` with `sorry` in all 195 files: **344.6s**, of which 331.5s is start-up at
+1.70s a file. So the tactic's own work is 191.5s before and **120.0s after (-37%)**, and
+that is the figure to read; the totals move by the same 71.5s but look like -13%.
+
+    median   1.96s -> 1.95s CPU     (start-up either way)
+    p90      4.45s -> 3.29s CPU
+    max     15.80s -> 12.88s CPU
+    peak RSS 2.09GB -> 2.03GB
+
+    Q_MGT035p2   15.8s -> 4.7s      Q_LCL166m1    7.2s -> 3.8s
+    Q_MGT035m2   11.0s -> 3.6s      Q_ALG165p1    7.7s -> 6.4s
+    Q_SYN472p1   10.0s -> 4.1s      Q_GRP111m1    7.9s -> 3.3s
+    Q_PRO014p3   11.0s -> 8.0s      Q_LCL010m1    6.7s -> 3.5s
+
+One problem got slower and it is understood: `Q_BOO028m1`, 5.1s to 5.8s, is the 2.1s its
+probe spends before timing out. `Q_SYN036p1` reads as 11.1s to 12.9s in the table and is
+not a regression — measured alone it is 10.4s, and it is the one problem in the set whose
+cost is the size of the proof term rather than anything the tactic does to it: 1.7s in
+`mkLetFVars` and most of the rest in the kernel.
 
 Whichever way it is run, **a timing taken beside other work is a measurement of the
 machine.** The same problems run flat out at `--jobs 3` on a machine that also had a

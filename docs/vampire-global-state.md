@@ -124,6 +124,24 @@ So an embedded run must:
 Note the soft check compares a *difference* from the loop's own start, so it stays
 correct regardless of when the clock was started.
 
+Point 3 was written and not done, and nothing noticed for a while, because a run that is
+never stopped looks exactly like a run that is fast enough. The shim set
+`Options::setTimeLimitInDeciseconds`, which the limited-resource strategy reads to
+estimate what it can reach but which no loop consults, so `vampire.timeout` bounded
+nothing: `BOO028-1` asked for two seconds and searched for thirty. The limit is now
+installed through `SaturationAlgorithm::s_embeddedSoftTimeLimit`, a static the shim sets
+before the run and the constructor copies into `_softTimeLimit`. It is 0 by default, so
+the executable is unchanged; `MainLoop::createFromOptions` builds the algorithm itself
+and there is no other moment between construction and `run()` at which a host can reach
+it.
+
+The check is against `Timer::elapsedDeciseconds`, which is **wall** time. That is
+upstream's meaning and not something to fix here, but it does mean a probe under a tight
+limit is load-dependent: the same problem can refute inside two seconds on an idle
+machine and time out beside other work. What follows from that is the fallback, not a
+different limit — `Vampire/Tactic.lean`'s schedule ends at the user's whole budget, so a
+probe that loses a race costs its own limit and nothing else.
+
 ## 6. Caches held in function-local statics
 
 Easy to miss, and the reason a naive `Environment::reset()` segfaults. `Kernel/Term.cpp`

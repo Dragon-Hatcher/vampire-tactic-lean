@@ -1,8 +1,10 @@
+import Vampire.Clause
 import Vampire.Ffi
 import Vampire.Prenex
 import Vampire.Preprocess
 import Vampire.Proof
 import Vampire.Reconstruct
+import Vampire.Sat
 import Vampire.Support
 import Vampire.Tactic
 import Vampire.Translate

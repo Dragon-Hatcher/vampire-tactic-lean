@@ -89,7 +89,10 @@ outline of the refutation.
   swept up from the context is skipped and one named as a hint is reported.
 - **Theory axioms** — the generated file emits a Lean `axiom`, which a tactic cannot.
 - **Arithmetic evaluation**, whose script needs `norm_num1`; VampLean dropped Mathlib.
-- `setSoftTimeLimit` bounds the saturation loop, not preprocessing or clausification.
+- **A timeout that is not the saturation loop's.** `setSoftTimeLimit` is installed now
+  (it was documented and not called — see below), but what it bounds is the saturation
+  loop and not preprocessing or clausification, and it is checked in *wall* time. A goal
+  whose clausification runs away still runs away.
 
 **The input-step bridge** is `Vampire/Bridge.lean`: a structural congruence prover that
 proves Vampire's recorded formula for an input unit from the Lean hypothesis it was
@@ -273,6 +276,296 @@ than usual here: the term-level prenexer is weaker than `prenexify` and can orde
 prefix differently, and nothing notices which prenexing ran until the rest of the script
 tries to use the result.
 
+### A fast path that silently never fires
+
+After the above, the whole benchmark's remaining cost sat in the problems where AVATAR
+does most of the work — the `ALG` family, which is every problem over 8s. Four things
+were behind it, in the order they were found. `set_option trace.vampire.timing` gives the
+per-step figures and `trace.vampire.timing.tactic` the per-line ones, and both were
+needed: a step whose script is one `first` reports one line, so more than once the answer
+was to flatten the script temporarily and let each line be timed on its own.
+
+The first thing measured was that **the step scripts were not where the time was**. On
+`ALG165+1` the trace accounted for 6.2s of a 20.3s replay. The other 14s was a *single
+step*: the AVATAR refutation, whose 1506 `grind only [cases Or]` calls are one `proveBy`
+each and are not step lemmas, so nothing in the per-step trace covered them.
+
+1. **A resolution is not a case split.** `LeanChecker::avatarRefutationByResolution`
+   states one lemma per step of the solver's derivation and proves it with `grind only
+   [cases Or]`, and this port followed it. `ALG165+1`'s derivation is 1506 steps naming
+   31125 premises between them, 116k literals in all: **15.3s of a 24s replay**, and
+   `ALG190+1` 21s of 34s. None of it is hard — falsify a step's conclusion and its
+   premises are a conflict that *unit propagation* reaches, because conflict analysis is
+   what produced them. `Vampire/Sat.lean` builds that proof as a term: one application
+   per literal, one propagation per resolved variable, no metavariables and no case
+   splitting. **15.3s to 0.7s.**
+
+   Written the obvious way first, it was *slower* than `grind` — 15.4s, and it took
+   `mkLetFVars` over the finished proof from 0.4s to 14s. The construction was building
+   each node with `withLocalDeclD` and abstracting it with `mkLambdaFVars`, and
+   abstracting a binder walks the term under it, so a chain of `k` of them walks the
+   accumulated proof `k` times. Every node is now a *named lemma applied to its
+   arguments* — `notOr`, `orCases`, `absurdFun`, eight one-liners at the top of the file
+   — and nothing is abstracted at all. This is the same lesson as `mkAppM` in point 1
+   above, in another key: **the cheap way to build a proof term is by application, and
+   anything that has to look under a binder is not that.**
+
+2. **`mdata` is invisible when you print a formula.** The bridge's tests are all
+   structural — `isAppOfArity ``Or 2` and friends — and a goal the elaborator made
+   carries an `mdata noImplicitLambda` wrapper around its type. So `vampire_bridge`,
+   asked to close an AVATAR split clause, decided the goal was not a disjunction, treated
+   the whole clause as one opaque disjunct, and failed. It failed that way on **307 of
+   `ALG160+1`'s 446** split clauses, every one of them for this reason and none because
+   the two formulas disagreed — and it failed *quietly*, because the reference's script
+   is behind it and simply ran. One `consumeMData` in `transport` took the hit rate on
+   `ALG165+1`'s split clauses from 208/373 to **373/373**, and with it went the three
+   simp traversals and the `grind` that the reference's script spends on each one.
+
+   The way this was found is the point. The error message named two formulas that were
+   *identical as printed*, which is what sent the investigation to defeq and to equation
+   orientation before `toString` on the raw `Expr` showed the wrapper. **When two
+   formulas look the same and are not, print the `Expr` and not the formula** — the
+   pretty-printer is a lossy view of the thing the code is actually matching on.
+
+3. **A search with no discriminator is quadratic, and the fallback hides it.** Behind the
+   same bridge, `pick` matched a conjunct of the conclusion by *attempting a transport
+   against every leaf of the hypothesis*, and `inject` found the disjunct that accepts a
+   proof the same way. A wrong candidate is only cheap when it fails at the head symbol,
+   and a junction inside a junction multiplies the attempts out: `ALG160+1`'s 528 bridges
+   made 35862 `transport` calls of which **20733 ended in "cannot reconcile"**, and 4012
+   of the 4276 `pick`s inside them failed. `Bridge.sig` hashes a formula modulo the two
+   things the bridge exists to reconcile — the order of a junction's arguments and which
+   way round an equation is stated — and the candidates that match are tried first.
+   Nothing is *decided* by it, so a weakening or a hoisted binder still bridges by
+   search. Per input step: **40ms to 10ms**; per flattening the same.
+
+4. **A `simp only` that changes nothing still costs a traversal.** The AVATAR
+   split-clause script runs `prenexify at h0` so that the parent can be applied at the
+   variables the goal has just introduced, which needs its own `∀` prefix at the front.
+   A clause usually already has it there. At 2.4ms a step over 1143 steps that was the
+   largest line left once the bridge was closing the step, and the script now tries the
+   sequence without it first: where `h0` does need hoisting, the application does not
+   typecheck and the alternative that keeps the line runs. **-17% of the replay** on the
+   three problems measured.
+
+Measured on the paper's 57 together, one problem at a time, the better of two runs each,
+before and after back to back on the same machine: **285.6s of CPU to 219.5s**, and with
+the 2.45s of `lake lean` start-up every problem pays taken out, **146.0s of work to
+79.8s (-45%)**. Nothing got slower. The work in the slowest problem went 25.1s to 9.4s
+and the 90th percentile 7.5s to 4.5s; the median problem does a quarter of a second of
+work either way and is start-up.
+
+The machine had a game on it throughout, so read these as a ratio and not as absolute
+figures — which is what `bench-tptp/README.md` says about every number in it, and the
+reason the two runs were done back to back and reported as the minimum of two.
+
+What is left, and where the next one would have to come from: `grind only [cases Or]` on
+the derived inferences (29% of what the tactic scripts now cost), the `repeat` and
+`cnfify` inside `clausifyParent` (21%), and the per-invocation floor of a tactic —
+around 0.5ms for a `simp only [x] at h` on a small formula, most of it in building the
+simp set again. There is no single step or rule left that is more than about a tenth of a
+replay; the remaining cost is a few thousand tactic invocations each near that floor,
+which is a question about driving the replay through tactic syntax at all rather than
+about any one script.
+
+### The timeout was never a timeout, and the budget is a search parameter
+
+Everything above is about the replay, and by the end of it the replay was no longer the
+larger half. Traced across the whole of `bench-tptp/` — 195 problems, one at a time —
+the split was **64.1s in the prover against 89.8s in the replay**, and the prover's
+share sat in about fifteen problems. `set_option trace.vampire.timing true` reports both;
+what it took to read the first number was noticing that `MGT035+2` spent 14.9s of a
+15.8s run inside `Ffi.run`.
+
+1. **`vampire.timeout` bounded nothing.** `vampire-global-state.md` says an embedded run
+   has to bound itself with `SaturationAlgorithm::setSoftTimeLimit`, because the
+   executable's enforcement is a thread that `_Exit`s the process and `Timer::startClock`
+   was added precisely to avoid spawning it. Nothing called it. The shim set
+   `Options::setTimeLimitInDeciseconds`, which reaches the strategy's estimate and no
+   loop, so the search ran until it finished: `BOO028-1` asked for two seconds and
+   searched for thirty. A missing timeout looks like a fast prover until a problem is
+   hard, which is why it survived the whole benchmark.
+
+2. **A tighter budget is a faster search, not just a shorter one.** The default
+   saturation algorithm is `lrs`, the limited-resource strategy: it uses the time limit
+   to estimate which clauses it can still reach and discards the rest. So the limit is
+   an input to the search and not a cap on it, and a generous one prunes less and runs
+   longer. Through the tactic, changing nothing but `vampire.timeout`: `MGT035+2` 14.9s
+   at 30s against 1.6s at 2s, `MGT035-2` 6.6s against 1.2s, `LCL166-1` 4.7s against
+   1.7s, `HEN009-5` 3.3s against 0.5s. Handing the prover the whole of a generous budget
+   is the slow way to use it.
+
+   `searchSchedule` therefore probes at 2s and 8s and only then spends the budget. The
+   probes are absolute rather than fractions of it: what makes a probe worth trying is
+   that it is small in itself. The last entry is always the whole budget, so nothing
+   that used to be provable stops being, and a failed probe costs exactly its own limit
+   — which is the reason the limit had to be *enforced* before any of this was safe.
+
+3. **Escalate on the replay, not only on the search.** The first version escalated when
+   the search found nothing, and it turned `GRP427-1` from a 5.0s pass into a failure at
+   "step 20895 (superposition) could not be replayed". A different budget is a different
+   search and finds a different proof, and a different proof can use a rule this port
+   does not replay. `searchWith` takes what the refutation has to survive as a callback
+   — the whole replay for `vampire`, nothing for `vampire?` — and escalates on either
+   failure. `GRP427-1` now probes, discards the proof, and replays the wide search's in
+   377ms.
+
+   `trace[vampire.replay]` says when a refutation was thrown away, because otherwise a
+   discarded probe is invisible and looks only like a slow prover.
+
+4. **The soft check is wall time**, which is upstream's meaning. So a probe is
+   load-dependent: `MGT035+2` refutes inside two seconds measured alone and times out
+   beside other work. That is a real limitation and the fallback is the whole of the
+   answer to it — a probe that loses the race costs its limit and the wide search runs.
+   It also means these figures understate the gain under load rather than overstating it.
+
+**Prover: 64.1s to 27.0s.** What is left is concentrated in the problems whose probe
+fails and which then pay for it: `PRO014+3` and `BOO028-1` spend 2.1s each on a probe
+that times out.
+
+### A derived inference is unit propagation too
+
+`Sat.lean`'s lesson, one level up, and it was the largest thing left in a replay.
+`grind only [cases Or]` on the derived rules cost **33.3s of the 58.9s of step scripts**:
+`forward subsumption resolution` 11.3s over 5136 steps, `resolution` 9.0s, `forward
+demodulation` 7.3s, `superposition` 5.4s. None of it is hard. Once
+`instantiatePremiseVars` has applied the recorded substitution, the premises and the
+negated conclusion are the conflict the inference *was*: a resolution's two premises
+disagree on the resolved literal, and a subsumption resolution's subsumer refutes the
+literal the subsumed clause loses.
+
+`Vampire/Clause.lean` is `Vampire/Sat.lean` over first-order literals — the same lemmas,
+the same flat construction, no metavariables and no case splitting — plus the three
+things such a literal has that an AVATAR split variable does not.
+
+1. **An equation has two spellings.** `Literal::createEquality` orients by the term
+   ordering and the two clauses of one inference need not have chosen the same way, so
+   `a = b` in one and `¬(b = a)` in another are the complementary pair. A decision
+   records the orientation its proof is in and `Eq.symm`/`Ne.symm` turn it round.
+
+2. **A literal can decide itself.** `¬(t = t)` is what equality resolution and trivial
+   inequality removal delete, and `rfl` refutes it with nothing else in hand; `t = t` in
+   a conclusion holds outright, and then no premise is needed at all.
+
+3. **Two literals can be the same modulo an equation the inference supplies.** This is
+   what superposition and demodulation are: the premise holds `L[s]`, the conclusion
+   `L[t]`, and `s = t` is the other premise. `motiveFor` walks the two literals together
+   and abstracts exactly the positions where one has `s` and the other `t`, which is the
+   motive `Eq.subst` wants. Walking the pair rather than rewriting one into the other is
+   what makes it exact: demodulation rewrites the occurrences it selected and not every
+   occurrence of `s`, so substituting all of them would give a term that is not the
+   other literal and substituting one would be a guess about which.
+
+Three bugs, and each was found by counting how often the fast path fired rather than by
+anything failing — `trace[vampire.clause]` prints the goal and premises it declined, and
+`grind` behind it meant a decline cost time and nothing else.
+
+- **Falsifying a positive literal makes its atom false.** The conclusion loop recorded
+  the literal's own polarity instead of its opposite, so every decision the negated
+  conclusion made was backwards. `PRD001+1` declined 226 steps of the plainest possible
+  shape — `¬A ∨ B`, `A`, conclusion `B` — and after the one-character fix, none.
+
+- **A decided atom must still be looked up modulo the equations.** `negLit` gave up as
+  soon as the assignment had an opinion about the atom, and the case that needs the
+  equations is exactly the one where it has the *wrong* opinion. That is what
+  `decisionConflict` asks about.
+
+- **The conflict need not be inside a clause.** A demodulation from `¬B` and `s = t` has
+  `¬B` as a unit premise, so propagation uses it to decide `B` false rather than to
+  refute anything, and the clause is then satisfied by its own decision and can never be
+  the conflict. What contradicts is that decision against the conclusion's, and only
+  once the other premise's equation is in hand — which was not yet true when `B` was
+  decided. `decisionConflict` is the scan propagation ends with rather than a rule of its
+  own.
+
+Zero declines on the `ALG` family afterwards. **The four rules: 33.3s to 6.7s.**
+
+`Test/Clause.lean` exercises it directly, for the reason `Test/Prenex.lean` gives about
+itself: behind a `first`, a bug is a slow replay and not a failing one. One of its cases
+was written as a decline and turned out not to be — propagation closes a *weakening*,
+because falsifying a conclusion with disjuncts the premise lacks decides those too.
+
+### `mkAppM` is not free even when there is nothing to unify
+
+`And`, `Or`, `Not` and `Iff` take no implicit argument. `mkAppM` therefore had nothing to
+solve for them — and still inferred the type of each argument and ran `isDefEq` against
+`Prop`, at every node of a formula, and `formExpr` recurses. A clause's statement is
+built once for the clause and once more for every step that names it as a premise, so
+this is the innermost loop of stating a refutation and it was invisible: the `type`
+column of `trace.vampire.timing` was **1.5s of the 15 problems' 20.9s**, spread over
+12000 steps with no single one large. `Eq` and `Exists` do take one, and `mkEq` and the
+sort's own level supply it without a metavariable — the same point `Bridge.lean` records
+about `mkAppM`, in the statement rather than in the proof.
+
+**Over the whole benchmark, 2.8s to 0.44s**, and `pure predicate removal` — 387 steps,
+mostly over `BIO006+1`'s formulas — from 2.3s to 1.5s.
+
+### A signature is what says which leaf to look at
+
+The last of the big items, and it was hiding in a function that looked like a lookup.
+`findLeaf` finds a multi-clause clausification's clause among the leaves of the shared
+CNF: the statement index gets it when the clause is a leaf verbatim, and behind that was
+a linear `isDefEq` over every leaf and then `vampire_finish_clausify`, which rewrites
+both sides until `assumption` can see they agree.
+
+`SYN472+1` clausifies 196 ways, the refutation uses 141 of them, and **29 are not
+verbatim** — so 29 times over, `isDefEq` ran against 196 formulas of seven hundred atoms
+and a triple simp traversal followed. 4.8s of that problem's 5.9s replay, in a step that
+the per-step trace attributed to nothing because the shared clausification is not a step
+lemma. It took adding a line per bucket of the replay that no step covers — the input
+bridge, the shared clausification, the SAT refutation, skolemisation — to see it at all.
+
+The leaves are now indexed by `Bridge.sig`, which hashes a formula modulo exactly what
+the two renderings differ by, and the candidates that match are tried by `isDefEq` and
+then bridged. The blind scan stays behind the signature, because a signature decides
+nothing: two leaves definitionally equal for a reason it cannot see would otherwise stop
+being found. **`SYN472+1` 5.9s to 1.3s**, `SWC153+1` 2.1s to 0.7s, `PUZ010-1` 2.1s to
+0.8s.
+
+### Where that leaves it
+
+Measured over `bench-tptp/`'s 195 problems, one at a time, before and after on the same
+machine. `lake lean` start-up and the statement's own elaboration are a floor every
+problem pays whatever the tactic does — 344.6s of it, measured by replacing `vampire [*]`
+with `sorry` — so the tactic's own work is quoted with that taken out.
+
+| | before | after |
+| --- | ---: | ---: |
+| total CPU | 536.1s | 464.6s |
+| the tactic's own work | 191.5s | **120.0s (-37%)** |
+| prover | 64.1s | 27.0s |
+| replay | 89.8s | 53.6s |
+| of which step scripts | 58.9s | 29.3s |
+| of which `mkLetFVars` | 5.2s | 5.2s |
+| stating the steps (the `type` column) | 2.8s | 0.44s |
+| 90th percentile | 4.45s | 3.29s |
+| slowest problem | 15.8s | 12.9s |
+| peak RSS | 2.09GB | 2.03GB |
+| pass | 195/195 | 195/195 |
+
+Nothing got slower except `BOO028-1`, by the 2.1s its probe spends before timing out.
+`SYN036+1` reads as a regression in the run and is not one: measured alone it is 10.4s
+against 11.1s, and the run that says 12.9s was measuring the machine.
+
+What is left, and where the next one would come from. The prover's 27.0s is mostly
+failed probes and two or three genuinely hard searches; a portfolio would answer that
+and Vampire's portfolio mode forks, which an embedded run cannot. Of the replay's 53.6s,
+29.3s is step scripts, and the largest single rule is now `avatar split clause` at 6.7s
+over 3705 steps — 1.8ms each, spread over the six or seven tactic invocations its script
+makes rather than concentrated in any one of them. A further 5.2s is `mkLetFVars` and
+the ~19s left is the buckets outside the step trace, of which `clausifyParent` on
+`BIO006+1` is 1.4s in a single `cnfify`.
+
+And about 40s of the tactic's work is not in any of these numbers, because it happens
+after the replay returns: the kernel typechecking the term. `SYN036+1` is the problem
+where that dominates — 1.7s to abstract 52 definitions over the proof and most of the
+rest inside the kernel — and it is the one measurement that says the *size* of the term,
+rather than the cost of building it, is the next thing to look at.
+
+Beyond that the answer is the same as it was two rounds ago and has only got more so:
+the remaining cost is thousands of tactic invocations at a floor of about half a
+millisecond, which is a question about driving the replay through tactic syntax at all.
+
 ### `bench-tptp/`
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
@@ -405,6 +698,7 @@ Recorded because each cost real time to find.
     e101aa7  do not leak the inference replayer's saturation algorithm
     4473042  reset TermPartialOrdering's caches between problems
     b120371  reset TermOrderingDiagram's single-comparison cache too
+    d7c7784  install the embedded soft time limit, so a run can be bounded
 
 The first three are proof-generation work from before the FFI and are independent of
 it: all 14 ALG problems that Vampire solves now check, 874s → 233s, four former

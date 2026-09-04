@@ -48,6 +48,7 @@ private partial def juncts (c : Name) (e : Expr) : Array Expr :=
   go e #[]
 where
   go (e : Expr) (acc : Array Expr) : Array Expr :=
+    let e := e.consumeMData
     if e.isAppOfArity c 2 then go e.appArg! (go e.appFn!.appArg! acc)
     else acc.push e
 
@@ -86,6 +87,86 @@ private def candidates (n i : Nat) : Array Nat := Id.run do
     if k != mirror then out := out.push k
   return out
 
+/--
+A hash of a formula that ignores exactly what the bridge is here to reconcile: the order
+of a junction's arguments, and which way round an equation is stated.
+
+Nothing is *decided* by this. It orders the candidates `pick` and `inject` consider, so
+that the one that is going to work is tried first. Two reconcilable formulas can still
+have different signatures — a weakening drops conjuncts, prenexing moves a binder across
+a junction, `flattening` drops a double negation — which is why the candidates that do
+not match stay in the order behind the ones that do rather than being dropped.
+
+It is what the search was missing. Trying candidates blind, `ALG160+1`'s 528 bridges
+made 35862 `transport` calls of which 20733 ended in "cannot reconcile", because a
+conjunction's leaf was matched by attempting it against every leaf of the hypothesis and
+a conjunction inside a conjunction multiplied that out.
+-/
+partial def sig (e0 : Expr) : UInt64 :=
+  let e := e0.consumeMData
+  if e.isAppOfArity ``And 2 then mixHash 3 (junction ``And e)
+  else if e.isAppOfArity ``Or 2 then mixHash 5 (junction ``Or e)
+  else if e.isAppOfArity ``Not 1 then mixHash 7 (sig e.appArg!)
+  else if e.isAppOfArity ``Iff 2 then
+    mixHash 11 (sig e.appFn!.appArg! + sig e.appArg!)
+  else if e.isAppOfArity ``Exists 2 then mixHash 13 (sig e.appArg!)
+  else if e.isLambda then mixHash 17 (sig e.bindingBody!)
+  else if e.isForall then
+    mixHash 19 (mixHash (sig e.bindingDomain!) (sig e.bindingBody!))
+  else match e.eq? with
+    -- `Literal::createEquality` orients by the term ordering, so which side is which
+    -- carries no information.
+    | some (_, l, r) => mixHash 23 (sig l + sig r)
+    -- An atom, whose `Expr` hash is already cached.
+    | none => e.hash
+where
+  /-- Commutative and associative over the leaves, which is the whole point. -/
+  junction (c : Name) (e : Expr) : UInt64 :=
+    (juncts c e).foldl (fun a x => a + sig x) 0
+
+/-- `want`'s disjuncts, indexed for `inject`: by the disjunct itself, and by signature. -/
+private structure OrIdx where
+  /-- The disjuncts, left to right. -/
+  leaves : Array Expr
+  /-- `sig` of each, computed once rather than once per injection. -/
+  sigs : Array UInt64
+  /-- Where a disjunct stated verbatim sits. -/
+  exact : Std.HashMap Expr Nat
+
+private def orIndex (want : Expr) : OrIdx := Id.run do
+  let leaves := juncts ``Or want
+  let mut exact : Std.HashMap Expr Nat := {}
+  for i in [0:leaves.size] do
+    unless exact.contains leaves[i]! do exact := exact.insert leaves[i]! i
+  return { leaves, sigs := leaves.map sig, exact }
+
+/-- How many leaves a nested disjunction has. -/
+private partial def orLeafCount (e : Expr) : Nat :=
+  if e.isAppOfArity ``Or 2 then
+    orLeafCount e.appFn!.appArg! + orLeafCount e.appArg!
+  else 1
+
+/-- `pf` proves `want`'s `idx`th disjunct: place it with the `Or.inl`/`Or.inr` chain that
+reaches that leaf. -/
+private partial def injectAt (want : Expr) (idx : Nat) (pf : Expr) : Option Expr :=
+  if want.isAppOfArity ``Or 2 then
+    let a := want.appFn!.appArg!
+    let b := want.appArg!
+    let m := orLeafCount a
+    if idx < m then (injectAt a idx pf).map (mkApp3 (.const ``Or.inl []) a b)
+    else (injectAt b (idx - m) pf).map (mkApp3 (.const ``Or.inr []) a b)
+  else if idx == 0 then some pf
+  else none
+
+/-- `order`, with the candidates whose signature matches `s` brought to the front. -/
+private def bySig (s : UInt64) (sigs : Array UInt64) (order : Array Nat) : Array Nat :=
+  Id.run do
+    let mut good : Array Nat := #[]
+    let mut rest : Array Nat := #[]
+    for k in order do
+      if (sigs[k]?).getD 0 == s then good := good.push k else rest := rest.push k
+    return good ++ rest
+
 /-- The universe levels of a term's head constant. `@Eq α a b` and `@Exists α p` carry
 the level `α` lives at, so `Eq.symm` and the `Exists` eliminators can be built without
 asking `getLevel` to work it out again. -/
@@ -120,8 +201,15 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     MetaM Expr := do
   if depth > maxDepth then
     throwError "bridge: gave up at depth {maxDepth}"
-  let want ← instantiateMVars want
-  let hty ← instantiateMVars hty
+  -- `consumeMData`, and not only for tidiness. Every test below is structural, and a
+  -- goal the elaborator made carries an `mdata noImplicitLambda` wrapper around its
+  -- type — which is invisible when the formula is printed and makes `isAppOfArity`
+  -- say no to a disjunction that plainly is one. The bridge then treated a whole
+  -- clause as a single opaque disjunct and failed on 307 of `ALG160+1`'s 446 AVATAR
+  -- split clauses, every one of them for that reason and none because the two
+  -- formulas disagreed.
+  let want := (← instantiateMVars want).consumeMData
+  let hty := (← instantiateMVars hty).consumeMData
   if ← isDefEq hty want then return h
 
   -- `a = b` against `b = a`. `Literal::createEquality` orients an equation by the term
@@ -224,30 +312,32 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     for (ty, pf) in hs do
       unless exact.contains ty do exact := exact.insert ty pf
     let ws := juncts ``And want
+    -- Once per conjunction, not once per leaf against every candidate.
+    let sigs := hs.map (fun (ty, _) => sig ty)
     let mut proofs : Array Expr := #[]
     for i in [0:ws.size] do
       match exact[ws[i]!]? with
       | some pf => proofs := proofs.push pf
-      | none => proofs := proofs.push (← pick ws[i]! hs (candidates hs.size i) depth)
+      | none => proofs := proofs.push (← pick ws[i]! hs sigs (candidates hs.size i) depth)
     let (e, _) ← assemble ws.size want proofs 0
     return e
 
   -- A disjunction: eliminate `h`'s disjuncts and inject each into `want`. Contravariant,
   -- so it is `h`'s tree that is taken apart and `want`'s that is built into.
   if want.isAppOfArity ``Or 2 then
-    return ← elimOr want h hty depth
+    return ← elimOr want (orIndex want) h hty depth
 
   -- `want` is not a junction but `h` is. This is a weakening: a rule that drops part of
   -- a formula and leaves the rest — `pure predicate removal` is the one that reaches
   -- here — so one of `h`'s conjuncts is what `want` wants.
   if hty.isAppOfArity ``And 2 then
     let hs ← conjLeaves h hty
-    return ← pick want hs (candidates hs.size 0) depth
+    return ← pick want hs (hs.map (fun (ty, _) => sig ty)) (candidates hs.size 0) depth
 
   -- The dual: `h` offers a choice and `want` does not, so `want` must follow from every
   -- disjunct.
   if hty.isAppOfArity ``Or 2 then
-    return ← elimOr want h hty depth
+    return ← elimOr want (orIndex want) h hty depth
 
   -- `h` quantifies and `want` does not: prenexing hoisted the binder out of a junction
   -- and the clause wants the premise at one particular term. Which term is what
@@ -268,13 +358,17 @@ private partial def introForall (want : Expr) (h : Expr) (hty : Expr) (depth : N
     mkLambdaFVars #[x] (← transport (want.bindingBody!.instantiate1 x) h hty (depth + 1))
 
 /-- The first candidate leaf of `hs` that transports to `w`. -/
-private partial def pick (w : Expr) (hs : Array (Expr × Expr)) (order : Array Nat)
-    (depth : Nat) : MetaM Expr := do
+private partial def pick (w : Expr) (hs : Array (Expr × Expr)) (sigs : Array UInt64)
+    (order : Array Nat) (depth : Nat) : MetaM Expr := do
   -- Defeq across every candidate first. It is far cheaper than a transport attempt, and
   -- on a weakening — where the leaf is carried over untouched — it is the whole answer.
   for k in order do
     let some (hty, hp) := hs[k]? | continue
     if ← isDefEq hty w then return hp
+  -- Then by transport, the candidates that say the same things first. A wrong candidate
+  -- is only cheap when it fails at the head, and inside a nested conjunction the wrong
+  -- ones multiply.
+  let order := bySig (sig w) sigs order
   let mut err : Option MessageData := none
   for k in order do
     let some (hty, hp) := hs[k]? | continue
@@ -302,36 +396,51 @@ private partial def assemble (fuel : Nat) (want : Expr) (proofs : Array Expr) (i
     return (p, i + 1)
 
 /-- Case on every disjunct of `h`, injecting each into `want`. -/
-private partial def elimOr (want : Expr) (h : Expr) (hty : Expr) (depth : Nat) :
-    MetaM Expr := do
+private partial def elimOr (want : Expr) (idx : OrIdx) (h : Expr) (hty : Expr)
+    (depth : Nat) : MetaM Expr := do
   if depth > maxDepth then throwError "bridge: gave up at depth {maxDepth}"
+  let hty := hty.consumeMData
   if hty.isAppOfArity ``Or 2 then
     let a := hty.appFn!.appArg!
     let b := hty.appArg!
     let l ← withLocalDeclD `bl a fun x => do
-      mkLambdaFVars #[x] (← elimOr want x a (depth + 1))
+      mkLambdaFVars #[x] (← elimOr want idx x a (depth + 1))
     let r ← withLocalDeclD `br b fun x => do
-      mkLambdaFVars #[x] (← elimOr want x b (depth + 1))
+      mkLambdaFVars #[x] (← elimOr want idx x b (depth + 1))
     return mkAppN (.const ``Or.elim []) #[a, b, want, h, l, r]
   else
-    inject want h hty depth
+    inject want idx h hty depth
 
-/-- Put `h` into whichever disjunct of `want` accepts it. -/
-private partial def inject (want : Expr) (h : Expr) (hty : Expr) (depth : Nat) :
-    MetaM Expr := do
+/--
+Put `h` into whichever disjunct of `want` accepts it.
+
+The disjunct is nearly always *there* — the export reversed the junction and changed
+nothing else — so it is looked up rather than searched for. Failing that, the disjuncts
+that say the same things are tried before the ones that do not: a wrong disjunct is only
+cheap when it fails at the head symbol, and `elimOr` asks this once per disjunct of the
+hypothesis, so trying them in tree order made reconciling two orderings of one clause
+quadratic in its width.
+-/
+private partial def inject (want : Expr) (idx : OrIdx) (h : Expr) (hty : Expr)
+    (depth : Nat) : MetaM Expr := do
   if depth > maxDepth then throwError "bridge: gave up at depth {maxDepth}"
-  if want.isAppOfArity ``Or 2 then
-    let (a, b) := (want.appFn!.appArg!, want.appArg!)
-    -- The export reversed this junction too, so the match is more often on the right;
-    -- either way a wrong branch fails on the head symbol and costs almost nothing.
+  if let some k := idx.exact[hty]? then
+    if let some e := injectAt want k h then return e
+  let order := bySig (sig hty) idx.sigs (Array.range idx.leaves.size)
+  let mut err : Option MessageData := none
+  for k in order do
+    let some w := idx.leaves[k]? | continue
     let st ← saveState
     try
-      return mkApp3 (.const ``Or.inr []) a b (← inject b h hty (depth + 1))
-    catch _ =>
+      let pf ← transport w h hty (depth + 1)
+      let some e := injectAt want k pf
+        | throwError "bridge: disjunct {k} is not a leaf of the conclusion"
+      return e
+    catch e =>
       st.restore
-      return mkApp3 (.const ``Or.inl []) a b (← inject a h hty (depth + 1))
-  else
-    transport want h hty (depth + 1)
+      if err.isNone then err := some (← e.toMessageData.toString)
+  throwError "bridge: no disjunct of the conclusion takes{indentD hty}\
+    {match err with | some m => m!"\nthe closest attempt said:{indentD m}" | none => m!""}"
 
 end
 
