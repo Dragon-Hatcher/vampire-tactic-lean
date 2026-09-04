@@ -52,8 +52,8 @@ def addDependency (e e' : Expr) : QueryBuilderM Unit :=
 free variables are not counted (they are binders of the enclosing telescope). -/
 def translateAndFindDeps (e : Expr) (fvarDeps := true) : QueryBuilderM (Term × Array Expr) := do
   let (tm, depConsts, depFVars) ← Translator.translateExpr e
-  let unknownConsts := depConsts.toArray.filterMap fun nm =>
-    if builtins.contains nm.toString then none else some (mkConst nm)
+  let unknownConsts := depConsts.toArray.filterMap fun (nm, us) =>
+    if builtins.contains nm.toString then none else some (mkConst nm us)
   if fvarDeps then
     return (tm, depFVars.toArray.map mkFVar ++ unknownConsts)
   else

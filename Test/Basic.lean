@@ -115,5 +115,11 @@ theorem coset_commutation_implies_normal
     : ∀ g h, H h → H (mul (mul g h) (inv g)) := by
   vampire [*]
 
-theorem aksjnxaksjn (a b : Nat) : a + b = a + b := by
-  vampire [*]
+-- Arithmetic reaches the translator as its elaborated form: `a + b` is
+-- `@HAdd.hAdd Nat Nat Nat instHAdd a b`, whose first three arguments are types in term
+-- position. Plain `vampire` therefore cannot take this goal, trivial though it is, and
+-- says so; `+mono` abstracts the operation into an uninterpreted symbol and it goes
+-- through. Kept as a test because the diagnostic and this remedy are what a user hitting
+-- arithmetic will meet.
+theorem add_refl (a b : Nat) : a + b = a + b := by
+  vampire +mono [*]

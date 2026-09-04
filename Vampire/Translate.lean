@@ -42,15 +42,25 @@ open Attribute Term
 
 structure TranslationM.State where
   /-- Constants the translated result depends on, propagated upwards so the caller can
-  build a dependency graph. Reset at the `translateExpr` entry point. -/
-  depConstants : NameSet := {}
+  build a dependency graph. Reset at the `translateExpr` entry point.
+
+  The universe levels are kept, not just the name. A dependency is turned back into an
+  `Expr` to key the graph and to have its type inferred, and `mkConst nm []` is ill-formed
+  for a universe-polymorphic constant — `inferType` on it fails with "incorrect number of
+  universe levels", naming the constant and nothing about where it came from. `instHAdd`
+  is the one that finds this: `a + b` elaborates to an application mentioning it, so the
+  goal `a + b = a + b` failed to translate at all.
+
+  A `NameMap`, not a `HashMap`: it is ordered, like the `NameSet` this used to be, and the
+  order decides the order symbols are declared to Vampire in. -/
+  depConstants : NameMap (List Level) := {}
   /-- Free variables the translated result depends on. Same purpose. -/
   depFVars : FVarIdSet := {}
   /-- Free variables introduced *by* the translation, from binders. These are bound in
   the result, so they are not dependencies. -/
   localFVars : FVarIdSet := {}
   /-- Memoises `applyTranslators?` along with what it contributed to the dependencies. -/
-  cache : Std.HashMap Expr (Option (Term × NameSet × FVarIdSet)) := {}
+  cache : Std.HashMap Expr (Option (Term × NameMap (List Level) × FVarIdSet)) := {}
   /-- Suffix counter making a scoped binder name unique. -/
   scopedNames : Std.HashMap Name Nat := {}
   /-- Names chosen for free variables, so the same fvar is spelled the same way in every
@@ -89,7 +99,7 @@ def withCache (k : Translator) (e : Expr) : TranslationM (Option Term) := do
   match (← get).cache[e]? with
   | some (some (tm, depConsts, depFVars)) =>
     modify fun st => { st with
-      depConstants := st.depConstants ∪ depConsts
+      depConstants := depConsts.foldl (fun m k v => m.insert k v) st.depConstants
       depFVars := st.depFVars.union depFVars }
     return some tm
   | some none => return none
@@ -99,7 +109,8 @@ def withCache (k : Translator) (e : Expr) : TranslationM (Option Term) := do
     modify fun st => { st with depConstants := .empty, depFVars := .empty }
     let ret? ← k e
     modify fun st => { st with
-      depConstants := st.depConstants ∪ depConstantsBefore
+      depConstants :=
+        depConstantsBefore.foldl (fun m k v => m.insert k v) st.depConstants
       depFVars := st.depFVars.union depFVarsBefore
       cache := st.cache.insert e <| ret?.map ((·, st.depConstants, st.depFVars)) }
     return ret?
@@ -151,8 +162,12 @@ where
         match (← get).uniqueFVarNames[fv]? with
         | some n => return symbolT n
         | none   => return symbolT (← fv.getUserName).toString
-    | const nm _ =>
-      modify fun st => { st with depConstants := st.depConstants.insert nm }
+    | const nm us =>
+      -- The levels go with the name; see `depConstants`. Where the same constant occurs
+      -- at two instantiations the last wins, which costs nothing here: the symbol is
+      -- named after the constant either way, and a universe argument is not part of the
+      -- first-order term.
+      modify fun st => { st with depConstants := st.depConstants.insert nm us }
       return symbolT nm.toString
     | app f e => return appT (← applyTranslators! f) (← applyTranslators! e)
     | lam .. =>
@@ -178,10 +193,25 @@ where
     | mdata _ e => go ts e
     | sort _ =>
       -- `Prop` is handled by a translator; anything else here is a type in term
-      -- position, which is what a polymorphic constant looks like once applied.
+      -- position. Two quite different things look like this and the remedy differs, so
+      -- the message names both rather than guessing.
+      --
+      -- The one that is easy to miss: a goal with no polymorphism of its own still
+      -- reaches here as soon as it uses an operation that goes through a class, because
+      -- what is translated is the *elaborated* term. `a + b` for `a b : Nat` is
+      -- `@HAdd.hAdd Nat Nat Nat instHAdd a b`, and those three `Nat`s are types in
+      -- argument position. `+mono` is what handles it — auto instantiates and then
+      -- abstracts the operation into an uninterpreted symbol — so `a + b = a + b`
+      -- fails here and goes through with `+mono`.
       throwError "vampire: cannot translate{indentD e}\n\
-        Vampire's logic is monomorphic, so a type cannot appear as an argument. \
-        Instantiate the polymorphic constant at the types the goal uses."
+        Vampire's logic is monomorphic, so a type cannot appear as an argument.\n\n\
+        If the goal uses an operation defined through a typeclass — arithmetic, or \
+        anything else spelled with `+`, `*`, `≤` and friends — this is what its \
+        elaborated form looks like, even when the goal itself mentions no type \
+        variable: `a + b` is `@HAdd.hAdd Nat Nat Nat instHAdd a b`. Try `vampire +mono`, \
+        which instantiates and abstracts those away.\n\n\
+        If the goal is genuinely polymorphic, `+mono` is also the answer; failing that, \
+        instantiate the constant at the types the goal uses."
     | e => throwError "vampire: cannot translate{indentD e}"
   translateBody (b : Expr) (x : Expr) : TranslationM Term := do
     modify fun s => { s with localFVars := s.localFVars.insert x.fvarId! }
@@ -192,7 +222,8 @@ where
 end
 
 /-- Translate `e`, returning the term and everything it depends on. -/
-def translateExpr (e : Expr) : TranslationM (Term × NameSet × FVarIdSet) := do
+def translateExpr (e : Expr) :
+    TranslationM (Term × NameMap (List Level) × FVarIdSet) := do
   modify fun st => { st with depConstants := .empty, depFVars := .empty }
   let tm ← applyTranslators! e
   trace[vampire.translate] "{e} ↦ {tm}"
