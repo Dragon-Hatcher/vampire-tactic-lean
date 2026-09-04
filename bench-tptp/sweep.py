@@ -60,7 +60,7 @@ class Job:
     """One problem: its state, and what running it cost."""
 
     __slots__ = ("name", "path", "state", "started", "finished", "cpu", "rss",
-                 "reason", "pid")
+                 "reason", "pid", "timed_out", "phase")
 
     def __init__(self, name, path):
         self.name = name
@@ -72,6 +72,8 @@ class Job:
         self.rss = None            # peak resident set, bytes
         self.reason = ""
         self.pid = None
+        self.timed_out = False     # hit the CPU limit, so worth retrying uncontended
+        self.phase = 1
 
     def wall(self, now):
         if self.started is None:
@@ -86,6 +88,7 @@ class Job:
             "cpu": self.cpu,
             "rss": self.rss,
             "reason": self.reason,
+            "phase": self.phase,
         }
 
 
@@ -122,9 +125,15 @@ def live_rss(pid):
 class Sweep:
     """The pool, the results, and the state the page reads."""
 
-    def __init__(self, scratch, tests, jobs, cpu_limit, redo):
+    def __init__(self, scratch, tests, jobs, cpu_limit, redo, triage_limit=None):
         self.scratch = scratch
-        self.cpu_limit = cpu_limit
+        # In two-phase mode the sweep starts at the triage limit and finishes at the
+        # full one; `cpu_limit` is whichever is in force now, which is what `run_one`
+        # and the page read.
+        self.triage_limit = triage_limit
+        self.serial_limit = cpu_limit if triage_limit else None
+        self.cpu_limit = triage_limit or cpu_limit
+        self.phase = 1
         self.jobs = jobs
         self.lock = threading.Lock()
         self.started_at = time.time()
@@ -151,6 +160,8 @@ class Sweep:
                 job.state = done["state"]
                 job.cpu, job.rss = done.get("cpu"), done.get("rss")
                 job.reason = done.get("reason", "")
+                job.timed_out = done.get("timed_out", False)
+                job.phase = done.get("phase", 1)
                 job.started, job.finished = 0, done.get("wall") or 0
             else:
                 self.queue.append(job)
@@ -219,17 +230,21 @@ class Sweep:
 
         passed = code == 0 and "sorryAx" not in out
         reason = ""
+        timed_out = False
         if not passed:
             reason = self.explain(out, code, cpu)
+            timed_out = reason.startswith("cpu limit")
 
         with self.lock:
             job.state = "passed" if passed else "failed"
             job.finished = time.time()
             job.cpu, job.rss, job.reason, job.pid = cpu, rss, reason, None
+            job.timed_out, job.phase = timed_out, self.phase
             with self.record.open("a") as f:
                 f.write(json.dumps({
                     "name": job.name, "state": job.state, "cpu": cpu, "rss": rss,
                     "wall": job.finished - job.started, "reason": reason,
+                    "timed_out": timed_out, "phase": self.phase,
                 }) + "\n")
 
     def explain(self, out, code, cpu):
@@ -273,14 +288,46 @@ class Sweep:
                     job.finished = time.time()
                     job.reason = f"harness: {e}"
 
+    def run_pool(self, n):
+        threads = [threading.Thread(target=self.worker, daemon=True) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
     def start(self):
+        """Run the sweep, in one phase or two.
+
+        Two is the useful shape for this benchmark, because the distribution is very
+        uneven: most problems replay in a few seconds and a handful take minutes. Phase
+        one runs everything in parallel under a short limit, which clears the bulk
+        quickly and costs nothing but a timeout on the tail; phase two reruns just that
+        tail one at a time under the full limit.
+
+        The point is not only speed. A parallel run inflates its own CPU figures — the
+        threads Lean elaborates on spin waiting for cores — so the problems whose timings
+        actually matter are exactly the ones that should not be measured under
+        contention. This way they are not: they are measured alone.
+
+        Only a timeout is retried. A problem that failed for any other reason failed for
+        a reason more time will not fix.
+        """
         def drive():
-            threads = [threading.Thread(target=self.worker, daemon=True)
-                       for _ in range(self.jobs)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            self.run_pool(self.jobs)
+            retry = [j for j in self.all if j.state == "failed" and j.timed_out]
+            if self.serial_limit and retry:
+                with self.lock:
+                    self.phase = 2
+                    self.jobs = 1
+                    self.cpu_limit = self.serial_limit
+                    for j in retry:
+                        j.state, j.started, j.finished = "queued", None, None
+                        j.cpu = j.rss = None
+                        j.reason, j.timed_out = "", False
+                    self.pending = list(retry)
+                print(f"\nphase 2: {len(retry)} problem(s) over the {self.triage_limit}s "
+                      f"triage limit, rerunning one at a time at {self.serial_limit}s")
+                self.run_pool(1)
             self.done_event.set()
 
         threading.Thread(target=drive, daemon=True).start()
@@ -330,6 +377,7 @@ class Sweep:
             "running_rss": rss,
             "parallel": self.jobs,
             "cpu_limit": self.cpu_limit,
+            "phase": self.phase,
             "load": load,
             "cores": os.cpu_count(),
             "done": self.done_event.is_set(),
@@ -448,7 +496,8 @@ function render(d) {
   rssEl.textContent = gb(d.running_rss) || "–";
   rssEl.className = d.running_rss > 10e9 ? "warn" : "";
   document.getElementById("sub").textContent =
-    `${d.jobs.length} problems · ${d.parallel} at a time · ${d.cpu_limit}s cpu limit`;
+    `${d.jobs.length} problems · phase ${d.phase} · ${d.parallel} at a time · ` +
+    `${d.cpu_limit}s cpu limit`;
 
   const n = d.jobs.length || 1;
   document.getElementById("b-pass").style.cssText =
@@ -527,6 +576,12 @@ def main():
                          "a large replay can hold 7GB)")
     ap.add_argument("--cpu-limit", type=int, default=150,
                     help="per-test CPU seconds, as `one.sh` (default 150)")
+    ap.add_argument("--triage", type=int, metavar="S",
+                    help="two-phase: run everything in parallel under an S-second limit "
+                         "first, then rerun whatever hit it one at a time under "
+                         "--cpu-limit. Most problems replay in a few seconds, so this "
+                         "clears the bulk fast and leaves the slow tail — the only "
+                         "timings that matter — measured without contention")
     ap.add_argument("--port", "-p", type=int, default=8080)
     ap.add_argument("--redo", action="store_true",
                     help="rerun tests already recorded in results.jsonl")
@@ -538,7 +593,8 @@ def main():
         sys.exit("lake is not on PATH")
 
     args.scratch.mkdir(parents=True, exist_ok=True)
-    sweep = Sweep(args.scratch, args.tests, args.jobs, args.cpu_limit, args.redo)
+    sweep = Sweep(args.scratch, args.tests, args.jobs, args.cpu_limit, args.redo,
+                  args.triage)
     if not sweep.all:
         sys.exit(f"no .lean files in {args.tests}")
 
@@ -547,9 +603,12 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     skipped = len(sweep.all) - len(sweep.queue)
+    plan = (f"{args.jobs} at a time at {args.triage}s, then the slow ones "
+            f"one at a time at {args.cpu_limit}s"
+            if args.triage else
+            f"{args.jobs} at a time, {args.cpu_limit}s cpu limit")
     print(f"{len(sweep.all)} problems, {len(sweep.queue)} to run"
-          f"{f' ({skipped} already recorded)' if skipped else ''}, "
-          f"{args.jobs} at a time, {args.cpu_limit}s cpu limit")
+          f"{f' ({skipped} already recorded)' if skipped else ''}, {plan}")
     print(f"watch: http://{os.uname().nodename}:{args.port}/  "
           f"(or http://<this host>:{args.port}/)")
 
