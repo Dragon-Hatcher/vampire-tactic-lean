@@ -17,10 +17,45 @@ Working notes for picking the work back up. See `README.md` for what the library
 
 ## Build
 
-    cmake --build ../vampire/build --target vampire_lib   # 43MB static archive
+    cmake -S ../vampire -B ../vampire/build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    cmake --build ../vampire/build --target vampire_lib   # the static archive
+    cmake --build ../vampire/build --target vampire       # bench-tptp/gen.sh wants this
     lake build                                            # tactic + tests
 
 Lean 4.33.0 everywhere. `lake build` runs the tests as `#eval`s and fails on regression.
+
+macOS is the platform this is developed and benchmarked on. A Linux build gets as far
+as a working FFI — `Test/Ffi.lean` passes, including the reset cycles — and then aborts
+when a proof is actually run, with `terminate called after throwing an instance of
+'Kernel::MainLoop::RefutationFoundException'`: Vampire signals success by throwing that
+and something is not catching it. Ruled out so far: the archive and the shim are in one
+shared object, so it is not an exception crossing a `.so` boundary, and CMake's flags
+for Vampire match `vampireCompileArgs` on everything that could move a class layout.
+The two things a Linux build does need, both established, are below.
+
+`CMAKE_POSITION_INDEPENDENT_CODE` is required on Linux and free on macOS. The tactic
+runs in the elaborator, so `precompileModules := true`, so Lean links the archive into a
+*shared object* — and every object in a `.so` has to be position-independent. CMake
+builds a static library non-PIC by default, and the link then fails a few hundred times
+over with
+
+    ld.lld: error: relocation R_X86_64_PC32 cannot be used against symbol
+      'std::cout'; recompile with -fPIC
+
+which names the C++ runtime rather than Vampire and reads like a toolchain problem. It
+is not: it is our archive. macOS never sees it, because Mach-O is position-independent
+throughout.
+
+The second is the C++ standard library. Lake compiles the shim with the *system* `c++`,
+so on Linux the objects are libstdc++'s (`std::__cxx11::` symbols); but Lean's own clang
+links its bundled **libc++** by default, and the two have incompatible `std::string`
+layouts — which matters, because `vampire_build.cpp` passes `std::string` straight into
+Vampire. The link therefore needs `-stdlib=libstdc++` to stop clang reaching for libc++,
+`-lstdc++` to link the right one, and a `-L` naming the directory `g++
+-print-file-name=libstdc++.so` reports, because Lean's `ld.lld` does not search GCC's
+library directory. `lakefile.lean` names only the first two; the third is host-specific
+and is why the Linux build is not wired up here yet.
 
 ## What works
 

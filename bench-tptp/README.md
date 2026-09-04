@@ -46,6 +46,27 @@ tactic failure. `one.sh` gives the *tactic* 150 real seconds; a test that hits t
 shows as a FAIL with no reason (harness timeout, not a thrown error) — check by hand
 before concluding it's a bug, since some of these are just slow, not broken (see below).
 
+### Watching a sweep
+
+`sweep.py` runs the same tests with the same verdict rule and serves a live page while
+it does, which is worth having once a sweep is hours long and `xargs` has told you
+nothing since it started:
+
+    ./sweep.py $SP/res $SP/bench --jobs 4 --port 8080
+    # then open http://<that host>:8080/
+
+It shows each problem's state, wall time, **CPU time** and **peak RSS**, plus the totals.
+The last two are the ones that decide whether a run is worth believing. CPU time is what
+`ulimit -t` bounds, and it is the only figure comparable between a run alone and a run
+under load — `Q_BIO006p1` takes 80s by itself and missed the cap at 176s of wall under
+`-P 4`. Peak RSS matters because a large replay reaches several GB and two of those at
+once will put a 16GB machine into swap, after which every timing is measuring paging.
+Start at `--jobs 4` and watch the "sweep rss" tile rather than assuming a core count is
+the limit.
+
+Results append to `<scratch>/results.jsonl` as they land, and a rerun skips what is
+already recorded there unless `--redo` is passed, so an interrupted sweep resumes.
+
 `extract.py` (`extractN.py`'s general form) takes every `.lean` file in its input
 directory, pulls the preamble `variable` blocks and the type between `theorem fullProof
 :` and `:= by`, and writes `<prefix><safe-name>.lean` with that statement proved by
