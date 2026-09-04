@@ -13,10 +13,17 @@ page can distinguish queued from running, show a live clock on each job, and rep
 two numbers that actually decide whether a run is trustworthy —
 
 * **CPU time**, which is what `ulimit -t` bounds and what the pass/fail verdict is
-  really about. Wall time is not comparable between a run alone and a run under load.
+  really about.
 * **Peak RSS**, because the replay of a large refutation reached 7.4GB, and two of those
   at once on a 16GB machine puts the box into swap and every timing after that is a
   measurement of paging.
+* **Load average**, because neither of the first two is contention-proof. CPU time looks
+  like it should be — it is not wall time — but Lean elaborates on several threads and
+  time they spend spinning is charged to the process, so a busy machine inflates it.
+  Measured: a sweep run beside a game put `SYN472+1` at 43s of CPU against 12s idle, and
+  pushed two problems that pass comfortably over a 150s cap. A sweep starting on a
+  loaded machine says so, and the page keeps load in view for the same reason: a run
+  taken next to other work is measuring the machine, not the tactic.
 
 The verdict rule is `one.sh`'s, so results are comparable: a test passes when `lake
 lean` exits 0 and the output does not mention `sorryAx` — a tactic can log an error and
@@ -160,6 +167,10 @@ class Sweep:
             # RLIMIT_CPU counts user+system time and is inherited, so the limit lands
             # on `lean` as well as on `lake`. This is `one.sh`'s `ulimit -t`.
             resource.setrlimit(resource.RLIMIT_CPU, (limit, limit))
+            # Own session, so the whole job can be killed as a group. Killing the sweep
+            # otherwise leaves `lake` and `lean` running, and they go on burning cores
+            # while the next measurement is taken against them.
+            os.setsid()
 
         with self.lock:
             job.state = "running"
@@ -276,6 +287,16 @@ class Sweep:
 
     # -- what the page reads ------------------------------------------------------
 
+    def kill_running(self):
+        """Kill every job still running, as a process group."""
+        with self.lock:
+            pids = [j.pid for j in self.all if j.pid]
+        for pid in pids:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     def snapshot(self):
         now = time.time()
         with self.lock:
@@ -292,6 +313,15 @@ class Sweep:
             rate = len(finished) / elapsed if elapsed > 0 and finished else 0
             remaining = counts["queued"] + counts["running"]
             eta = remaining / rate if rate > 0 else None
+        # Load average against core count. A sweep sharing the machine with anything
+        # substantial is not measuring the tactic: CPU time is not the contention-proof
+        # figure it looks like, because Lean elaborates on several threads and their
+        # spinning is charged to the process. Measured here — a sweep run beside a game
+        # put `SYN472+1` at 43s of CPU against 12s on an idle machine.
+        try:
+            load = os.getloadavg()[0]
+        except OSError:
+            load = None
         return {
             "jobs": jobs,
             "counts": counts,
@@ -300,6 +330,8 @@ class Sweep:
             "running_rss": rss,
             "parallel": self.jobs,
             "cpu_limit": self.cpu_limit,
+            "load": load,
+            "cores": os.cpu_count(),
             "done": self.done_event.is_set(),
         }
 
@@ -361,6 +393,7 @@ PAGE = """<!doctype html>
     <div class="tile"><b id="elapsed">–</b><span>elapsed</span></div>
     <div class="tile"><b id="eta">–</b><span>eta</span></div>
     <div class="tile"><b id="rss">–</b><span>sweep rss</span></div>
+    <div class="tile"><b id="load">–</b><span>load / cores</span></div>
   </div>
   <div class="bar"><i id="b-pass"></i><i id="b-fail"></i><i id="b-run"></i></div>
   <div class="filters">
@@ -406,6 +439,11 @@ function render(d) {
     document.getElementById("c-" + k).textContent = d.counts[k];
   document.getElementById("elapsed").textContent = dur(d.elapsed);
   document.getElementById("eta").textContent = d.done ? "done" : (d.eta ? dur(d.eta) : "–");
+  const loadEl = document.getElementById("load");
+  loadEl.textContent = d.load === null ? "–" : `${d.load.toFixed(1)} / ${d.cores}`;
+  // Above half the cores, something other than the sweep is running and the CPU
+  // figures stop being comparable with an idle-machine run.
+  loadEl.className = d.load > 0.5 * d.cores + d.parallel ? "warn" : "";
   const rssEl = document.getElementById("rss");
   rssEl.textContent = gb(d.running_rss) || "–";
   rssEl.className = d.running_rss > 10e9 ? "warn" : "";
@@ -472,6 +510,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Line-buffered, so the startup warning and the per-failure lines appear as they
+    # happen even when this is redirected to a file or run under nohup. Block buffering
+    # is the default there, and it swallowed the load warning the first time.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("scratch", type=Path, help="where logs and results go")
@@ -507,11 +553,22 @@ def main():
     print(f"watch: http://{os.uname().nodename}:{args.port}/  "
           f"(or http://<this host>:{args.port}/)")
 
+    # A sweep that shares the machine measures the machine, not the tactic.
+    try:
+        load, cores = os.getloadavg()[0], (os.cpu_count() or 1)
+        if load > 0.5 * cores:
+            print(f"\n  WARNING: load average is {load:.1f} on {cores} cores before the "
+                  f"sweep has started.\n  Something else is using this machine; the "
+                  f"timings will not be comparable.\n")
+    except OSError:
+        pass
+
     sweep.start()
     try:
         while not sweep.done_event.wait(timeout=1):
             pass
     except KeyboardInterrupt:
+        sweep.kill_running()
         print("\ninterrupted; results so far are in", sweep.record)
         return
 
