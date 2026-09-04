@@ -220,14 +220,28 @@ per-line ones.
 ### `bench-tptp/`
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
-statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
-**137/137**. What used to fail, and what each one turned out to be, is in
-`bench-tptp/README.md`; scripts to regenerate and rerun it are there too.
+statement, replace its proof with `vampire [*]`, check for `sorryAx`). With the original
+57 that is **194/194**, in 8.3 minutes. What used to fail, and what each one turned out
+to be, is in `bench-tptp/README.md`; scripts to regenerate and rerun it are there too.
 
-The last two — `PRD001+1` and `SYN472+1` — were cost rather than correctness, and are
-what the section above is about. Note that a run under `xargs -P 4` is not the same
-measurement as a run alone: `Q_BIO006p1` takes 80s on its own and misses `one.sh`'s 150s
-cap at 176s under `-P 4`, on the same build.
+`bench-tptp/sweep.py` runs it and serves a live page. Run it in two phases:
+
+    ./sweep.py $SP/res $SP/tests --jobs 6 --triage 15 --cpu-limit 300
+
+The median problem replays in 3.6s of CPU and the 90th percentile in 7.0s, so phase one
+takes everything six at a time under a 15s cap; twelve problems exceed it and phase two
+reruns those one at a time. That is faster than a flat parallel run and, more to the
+point, correct — **a timing taken beside other work measures the machine.** CPU time
+looks like it should be immune, since it is not wall time, but Lean elaborates on
+several threads and time they spend spinning for a core is charged to the process. The
+same 194 problems, run at `--jobs 3` on a machine that also had a game on it, reported
+192/194 with `PRD001+1` and `BIO006+1` over a 150s cap; measured alone they are 79s and
+77s, and `SYN472+1` was 43s there against 13s here. `sweep.py` warns if the load average
+is high before it starts, and keeps load on the page.
+
+Peak RSS is the other figure to watch, and the reason `--jobs` is not the core count:
+`PRD001+1` holds 5.5GB on its own, and a few of those at once will put a 16GB machine
+into swap, after which every timing is measuring paging.
 
 ## Things that will bite
 

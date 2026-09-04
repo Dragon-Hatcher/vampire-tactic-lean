@@ -76,13 +76,35 @@ the pair into one file and only tests one of them.
 
 ## Results as of the last full run (194 problems: 57 original + 137 newly generated)
 
-Original 57: **57/57.** New 137: **137/137.** The newly-generated count moves between
-runs — Vampire is nondeterministic under a wall-clock limit, so which problems it
-refutes within `gen.sh`'s budget, and therefore which get a test at all, is not fixed.
+**194/194**, in 8.3 minutes on an 8-core M-series MacBook Air. The newly-generated count
+moves between runs — Vampire is nondeterministic under a wall-clock limit, so which
+problems it refutes within `gen.sh`'s budget, and therefore which get a test at all, is
+not fixed.
 
-Nothing on this page is still failing. What follows is the record of what was, and of
-what each one turned out to be, because the wrong diagnosis was recorded more than once
-and the corrections are the useful part.
+    ./sweep.py $SP/res $SP/tests --jobs 6 --triage 15 --cpu-limit 300
+
+The distribution is why that command has the shape it does. Of 194 problems the median
+replays in **3.6s** of CPU and the 90th percentile in **7.0s**; twelve take longer, and
+two of those take a minute and a quarter. So phase one runs everything six at a time
+under a 15s cap, which clears 182 problems in 12.7 minutes of CPU, and phase two reruns
+the twelve that hit the cap one at a time — 5.1 minutes, and the only figures anyone
+quotes:
+
+    Q_PRD001p1   79s   5.5GB      Q_PRO014p3   15s   2.4GB
+    Q_BIO006p1   77s   4.3GB      Q_SYN472p1   13s   2.7GB
+    P_ALG165p1   21s   3.1GB      Q_CSR115p6   12s   2.7GB
+    Q_MGT035p2   18s   2.4GB      Q_SYN036p1   12s   2.7GB
+    P_ALG190p1   18s   2.7GB      Q_MGT035m2   12s   2.3GB
+    P_ALG160p1   17s   2.7GB      P_ALG128p1   12s   2.6GB
+
+Running the slow tail alone is not a nicety. The same 194 problems run flat out at
+`--jobs 3` on a machine that also had a game on it reported 192/194, with `PRD001+1` and
+`BIO006+1` over a 150s cap — and both of them are 79s and 77s here. `SYN472+1` came out
+at 43s there against 13s here. CPU time looks like it ought to be immune to that, since
+it is not wall time, but Lean elaborates on several threads and time they spend spinning
+for a core is charged to the process. **A timing taken beside other work is a
+measurement of the machine.** `sweep.py` prints a warning if the load average is already
+high when it starts, and keeps load on the page for the same reason.
 
 `Q_MED007p1` used to be on this list, as "clausification, binder order": after
 `vampire_finish_clausify` split and AC-normalised, the matching clause was
@@ -147,8 +169,8 @@ compensating for the extra existential rather than removing it, which is why it 
 fix COM003.
 
 `Q_PRD001p1` and `Q_SYN472p1` used to be the last two, as "harness timeout": neither was
-a logic failure, both simply cost more than `one.sh`'s 150s of CPU. Both now pass, at 88s
-and 14s, and none of what closed them was in the tactic scripts. `docs/STATUS.md`'s
+a logic failure, both simply cost more than `one.sh`'s 150s of CPU. Both pass now, at 79s
+and 13s, and none of what closed them was in the tactic scripts. `docs/STATUS.md`'s
 "Where a replay's time goes" has the measurements; in short:
 
 - Checking the assembled term with `Meta.check` was 167s of `PRD001+1`'s 240s replay,
@@ -161,7 +183,3 @@ and 14s, and none of what closed them was in the tactic scripts. `docs/STATUS.md
   on a conjunction a hundred wide rewrites the whole formula once per binder — and
   `cnfify` then puts them straight back. Hoisting out of the disjunctions alone is what
   the clauses need, and is what is tried first.
-
-A run under `xargs -P 4` is not the same measurement as a run alone: `Q_BIO006p1` takes
-80s on its own and missed the cap at 176s under `-P 4` on the same build. Check a
-timeout by hand before recording it as one.
