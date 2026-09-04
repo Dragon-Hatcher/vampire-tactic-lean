@@ -1,6 +1,7 @@
 import Lean
 import VampLean
 import Vampire.Bridge
+import Vampire.Prenex
 import Vampire.Proof
 import Vampire.Support
 
@@ -952,18 +953,38 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       if (s.rewrites[k - 1]?).getD true then
         tacs := tacs.push (← `(tactic| try rw [$(hyp k):ident]))
     tacs := tacs.push (← `(tactic| try simp only [imp_iff_not_or] at $h0:ident))
-    tacs := tacs.push (← `(tactic| prenexify))
-    tacs := tacs.push (← `(tactic| prenexify at $h0:ident))
     let introIds := s.introSplits.map (fun (p : Nat × Nat) => splitVar p.1 p.2)
-    tacs := tacs ++ (← intros introIds)
     let args := s.parentArgs.map (fun (p : Nat × Nat) => (⟨splitVar p.1 p.2⟩ : Term))
-    tacs := tacs.push (← `(tactic| have $newForm:ident := $h0 $args*))
-    tacs := tacs.push (← `(tactic|
-      simp (config := { failIfUnchanged := false }) only [not_and_or, not_not, eq_comm]
-        at $newForm:ident))
-    tacs := tacs.push (← `(tactic|
-      simp (config := { failIfUnchanged := false }) only [eq_comm]))
-    tacs := tacs.push (← `(tactic| ac_nf at $newForm:ident ⊢ <;> grind only [cases Or]))
+    -- The goal-side prenexing is where an AVATAR replay spends its time. The `rw`s above
+    -- have just replaced each split name in the conclusion by the component it stands
+    -- for, so the goal is a disjunction of quantified components and every one of their
+    -- binders has to come to the front for the `intro` below to name them and for `h0`
+    -- to be applied at them. On `PRD001+1` that is a 97-binder prefix over an 85-way
+    -- disjunction, and `prenexify` took 31s of a 38s replay on that one step — not in
+    -- the rewriting but in the congruence proof simp builds from the root to each
+    -- rewrite site, which after the first binder runs through the whole prefix and
+    -- carries the formula at every level. Restricting the rule set does not touch it:
+    -- `orPrenex`, the `∨` rules alone, costs the same.
+    --
+    -- `vampire_or_prenex` reaches the same normal form as a term — one lemma application
+    -- per binder under as many lambdas as are already hoisted — and it is 31s against
+    -- 0.1s. It is weaker than `prenexify` and can order the prefix differently, so
+    -- `prenexify` stays behind it over the whole rest of the script: which prenexing ran
+    -- is only discoverable from whether what follows can use the result.
+    let tail (goalPrenex : TSyntax `tactic) : TermElabM (TSyntax ``tacticSeq) := do
+      let mut rest := #[goalPrenex, ← `(tactic| prenexify at $h0:ident)]
+      rest := rest ++ (← intros introIds)
+      rest := rest.push (← `(tactic| have $newForm:ident := $h0 $args*))
+      rest := rest.push (← `(tactic|
+        simp (config := { failIfUnchanged := false }) only [not_and_or, not_not, eq_comm]
+          at $newForm:ident))
+      rest := rest.push (← `(tactic|
+        simp (config := { failIfUnchanged := false }) only [eq_comm]))
+      rest := rest.push (← `(tactic| ac_nf at $newForm:ident ⊢ <;> grind only [cases Or]))
+      `(tacticSeq| $rest*)
+    tacs := tacs.push (← `(tactic| first
+      | $(← tail (← `(tactic| vampire_or_prenex)))
+      | $(← tail (← `(tactic| prenexify)))))
     return tacs
   | .predicateDefinition =>
     -- `intro v…`, then the equation holds by `Iff.rfl` because the symbol *is* the

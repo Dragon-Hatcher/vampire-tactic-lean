@@ -1,4 +1,5 @@
 import Vampire.Ffi
+import Vampire.Prenex
 import Vampire.Preprocess
 import Vampire.Proof
 import Vampire.Reconstruct
