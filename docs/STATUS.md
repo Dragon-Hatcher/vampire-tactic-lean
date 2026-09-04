@@ -522,6 +522,75 @@ nothing: two leaves definitionally equal for a reason it cannot see would otherw
 being found. **`SYN472+1` 5.9s to 1.3s**, `SWC153+1` 2.1s to 0.7s, `PUZ010-1` 2.1s to
 0.8s.
 
+### Which timeout, and which phase
+
+"The tactic is slow" and "the tactic gave up" both used to point at one number. `Ffi.run`
+was timed as a whole and the failure message read
+
+    vampire: no refutation found (time limit) — Refutation not found, non-redundant
+    clauses discarded
+
+which names the reason and then contradicts it: `terminationReason` says the budget ran
+out and `explainRefutationNotFound` describes the *strategy*, and the two are answering
+different questions. The saturated case was worse — `(satisfiable)` beside "incomplete
+strategy", which are not obviously compatible claims. Neither said what to do about it.
+
+**What the timeout actually bounds is the saturation loop**, because that is where the
+check is. A run does four other things and none of them is bounded by it:
+
+| phase | bounded by |
+| --- | --- |
+| translating the goal, in Lean | `maxHeartbeats`; Lean reports it, unattributed |
+| building the problem inside Vampire | nothing |
+| `Shell::Preprocess` — clausification and the normal forms | **nothing** |
+| the saturation loop | `vampire.timeout` |
+| exporting the refutation | nothing |
+
+So the shim now calls upstream's own sequence in two halves — the seed, `Preprocess`,
+then `runVampireSaturation`, with the resource-limit catches `runVampire` wraps around
+both kept around the first since the second has its own — and times all four. Over the
+whole benchmark:
+
+    prover      26.9s
+      build      0.0s
+      clausify   0.0s
+      search    25.3s
+      export     1.2s
+
+Two things follow from that, and they are worth having separately from the fix.
+
+- **"Prover" really did mean "search".** 25.3s of the 26.9s, so the earlier figure was
+  not hiding anything. Export looks large per problem where the search is trivial —
+  `SYN472+1` is 125ms of export against 16ms of search, `BIO006+1` 110ms against 6ms —
+  because it scales with the size of the *proof* and not with the difficulty of finding
+  it. In total it is 1.2s.
+- **The unbounded clausification is a theoretical gap, not an observed one.** 0.0s over
+  195 problems: Vampire's definition introduction keeps it from blowing up even on a
+  fully-parenthesised 24-way `↔` chain, which is the shape that ought to. It stays a gap
+  because it cannot be *interrupted* — upstream relies on the thread that `_Exit`s — so
+  a goal whose clausification runs away still runs away. It is now visible after the
+  fact rather than bounded, and the failure message says so where the budget went there.
+
+`whyNoRefutation` says which of the three happened and what to do:
+
+    vampire: no refutation found: the search ran out of budget after 2s — raise
+    `set_option vampire.timeout`
+      the prover's own account: Refutation not found, non-redundant clauses discarded
+
+    vampire: no refutation found: the prover finished the search space without finding
+    one, so no larger `vampire.timeout` will help: the goal does not follow from what it
+    was given. Name more hypotheses, or use `vampire [*]`
+      the prover's own account: Refutation not found, incomplete strategy
+
+Vampire's own text is kept and labelled as its own account rather than presented as the
+reason, which is the only honest thing to do with two statements that disagree.
+
+And one attribution the schedule was losing. A probe can find a refutation whose replay
+fails; the loop then escalates, and if the wider search finds nothing the user was told
+"no refutation found" — when in fact a proof *was* found and this port could not use it,
+which is a different problem with a different answer. `searchWith` keeps the first such
+failure and appends it.
+
 ### Where that leaves it
 
 Measured over `bench-tptp/`'s 195 problems, one at a time, before and after on the same

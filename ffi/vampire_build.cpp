@@ -35,9 +35,11 @@
 #include "Kernel/SortHelper.hpp"
 #include "Kernel/Term.hpp"
 #include "Kernel/Unit.hpp"
+#include "Lib/Random.hpp"
 #include "Saturation/ProvingHelper.hpp"
 #include "Saturation/SaturationAlgorithm.hpp"
 #include "Shell/Options.hpp"
+#include "Shell/Preprocess.hpp"
 #include "Shell/Statistics.hpp"
 
 using namespace Lib;
@@ -92,6 +94,21 @@ thread_local bool t_refuted = false;
 /// The caller needs it to tell a search that ran out of budget -- worth retrying with
 /// more -- from one that saturated, which no budget would change.
 thread_local uint32_t t_termination = 0;
+/// Milliseconds spent building the problem, clausifying it, and searching.
+///
+/// Reported separately because only the last of the three is bounded by the caller's
+/// time limit -- `SaturationAlgorithm::runImpl` is where the check is -- so "the run
+/// used its whole budget" and "the search used its whole budget" are different
+/// statements, and a run that spends its budget in `Preprocess` has no way to say so
+/// otherwise.
+thread_local uint32_t t_buildMs = 0;
+thread_local uint32_t t_clausifyMs = 0;
+thread_local uint32_t t_searchMs = 0;
+/// And reading the refutation back out, which is neither bounded nor negligible: it
+/// scales with the size of the proof rather than with the difficulty of finding it, and
+/// on `ALG165-1`'s 2578 steps it is 104ms of a 182ms call. Without it the phases do not
+/// add up to the call, which is the first thing anyone checks them against.
+thread_local uint32_t t_exportMs = 0;
 
 /// Vampire's rendering of each unit, captured while it is built.
 ///
@@ -329,6 +346,10 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
   t_message.clear();
   t_refuted = false;
   t_termination = 0;
+  t_buildMs = 0;
+  t_clausifyMs = 0;
+  t_searchMs = 0;
+  t_exportMs = 0;
   try {
     std::vector<std::string> ns;
     for (size_t i = 0; i < lean_array_size(names); i++)
@@ -345,6 +366,7 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
     Lib::resetGlobalState();
     Lib::Timer::startClock();
     build(ns, cs);
+    t_buildMs = static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds());
     t_unitStrings = g_unitStrings;
 
     // The options the Lean code generator is written against. `proof_extra lean` is
@@ -365,7 +387,42 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
     // seconds and searched for thirty.
     Saturation::SaturationAlgorithm::s_embeddedSoftTimeLimit = deciseconds;
 
-    Saturation::ProvingHelper::runVampire(*g_built, *env.options);
+    // `ProvingHelper::runVampire`, in two halves, so the caller can be told which one
+    // its budget went to. The halves are not equivalent: the soft limit above is
+    // checked in the saturation loop and nowhere else, so preprocessing is unbounded,
+    // and a problem whose clausification runs away looks from the outside exactly like
+    // a slow search. This is upstream's own sequence -- the seed, `Preprocess`, then
+    // `runVampireSaturation` -- with the resource-limit catches `runVampire` wraps
+    // around both kept around the first, since the second has its own.
+    if (env.options->randomSeed() != 0)
+      Lib::Random::setSeed(env.options->randomSeed());
+    else
+      Lib::Random::resetSeed();
+
+    bool preprocessed = true;
+    try {
+      Shell::Preprocess prepro(*env.options);
+      prepro.preprocess(*g_built);
+    } catch (const std::bad_alloc &) {
+      env.statistics->terminationReason = TerminationReason::MEMORY_LIMIT;
+      env.statistics->refutation = nullptr;
+      preprocessed = false;
+    } catch (TimeLimitExceededException &) {
+      env.statistics->terminationReason = TerminationReason::TIME_LIMIT;
+      env.statistics->refutation = nullptr;
+      preprocessed = false;
+    } catch (ActivationLimitExceededException &) {
+      env.statistics->terminationReason = TerminationReason::ACTIVATION_LIMIT;
+      env.statistics->refutation = nullptr;
+      preprocessed = false;
+    }
+    uint32_t afterClausify = static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds());
+    t_clausifyMs = afterClausify - t_buildMs;
+
+    if (preprocessed)
+      Saturation::ProvingHelper::runVampireSaturation(*g_built, *env.options);
+    t_searchMs =
+      static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds()) - afterClausify;
     t_termination = static_cast<uint32_t>(env.statistics->terminationReason);
 
     if (env.statistics->refutation == nullptr) {
@@ -376,8 +433,11 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
       return 1;
     }
     t_refuted = true;
+    uint32_t afterSearch = static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds());
     t_outline = vampire_ffi::proofOutline();
     uint32_t status = vampire_ffi::exportRefutation(t_proofCode, t_proofNames, t_message);
+    t_exportMs =
+      static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds()) - afterSearch;
     return status == 0 ? 0 : 4;
   } catch (BuildError &e) {
     t_message = e.what;
@@ -414,6 +474,31 @@ lean_obj_res lean_vampire_message(lean_obj_arg) {
 uint32_t lean_vampire_termination(lean_obj_arg) {
   vampire_ffi::EntryGuard guard;
   return t_termination;
+}
+
+/** Milliseconds the last run spent building the problem. */
+uint32_t lean_vampire_build_ms(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return t_buildMs;
+}
+
+/** Milliseconds the last run spent in `Preprocess` -- clausification included. */
+uint32_t lean_vampire_clausify_ms(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return t_clausifyMs;
+}
+
+/** Milliseconds the last run spent in the saturation loop, which is the only one of
+ * the four the time limit bounds. */
+uint32_t lean_vampire_search_ms(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return t_searchMs;
+}
+
+/** Milliseconds the last run spent exporting the refutation it found. */
+uint32_t lean_vampire_export_ms(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  return t_exportMs;
 }
 
 /** How many units the last run's problem had. */

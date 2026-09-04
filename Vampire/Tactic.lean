@@ -215,6 +215,48 @@ def problemAsVampireSeesIt : MetaM MessageData := do
   return MessageData.joinSep lines.toList Format.line
 
 /--
+What to tell the user about a search that produced no refutation.
+
+Three things have to be kept apart, and the reason alone does not keep them apart:
+
+- **The search ran out of budget.** Raising `vampire.timeout` is the thing to do, and
+  saying so is the whole point of the message. Vampire's own explanation is appended but
+  not presented as the reason, because it describes the *strategy* — a search cut off by
+  the limit still reports "non-redundant clauses discarded", which reads like a statement
+  about the problem.
+- **The search finished the space.** No budget changes that: the goal does not follow
+  from what the prover was given, so the thing to do is give it more.
+- **The budget went somewhere the budget does not bound.** The soft limit is checked in
+  the saturation loop only, so a run can spend its whole allowance in `Preprocess` and
+  report a search that never really happened. The phase split is the only way to see it,
+  which is why it is in the message rather than only in the trace.
+-/
+private def whyNoRefutation (limit : UInt32) (reason : Ffi.Termination)
+    (ps : Ffi.Phases) (explanation : String) : MessageData :=
+  let where_ :=
+    if ps.clausify > ps.search && ps.clausify > 100 * limit / 2 then
+      m!"\n  Most of it went to clausification ({ps.clausify}ms against \
+        {ps.search}ms of search), which `vampire.timeout` does not bound — it is \
+        checked in the saturation loop only. A goal whose clausification is the \
+        expensive part needs a smaller problem, not a larger budget."
+    else m!""
+  let advice :=
+    match reason with
+    | .satisfiable =>
+      m!"the prover finished the search space without finding one, so no larger \
+        `vampire.timeout` will help: the goal does not follow from what it was given. \
+        Name more hypotheses, or use `vampire [*]`"
+    | .timeLimit | .memoryLimit | .activationLimit | .instructionLimit =>
+      m!"the search ran out of budget after {(limit / 10 : UInt32)}s — raise \
+        `set_option vampire.timeout`{where_}"
+    | .refutationNotFound =>
+      m!"the search exhausted what it had not discarded, under a strategy that \
+        discards clauses to fit the budget — raise `set_option vampire.timeout` and it \
+        will discard less{where_}"
+    | _ => m!"the prover stopped for a reason this side does not know ({reason})"
+  m!"no refutation found: {advice}\n  the prover's own account: {explanation}"
+
+/--
 Translate the goal, then search for a refutation and make something of it — once per
 limit in `searchSchedule`, until one of them works.
 
@@ -242,18 +284,25 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
   -- Why the schedule ran out, to report if it does. The last entry is the whole budget,
   -- so this is the wide search's own reason and not a probe's.
   let mut why : MessageData := m!"the search was not run"
+  -- A probe whose proof would not replay, kept separately. Otherwise the next limit's
+  -- "no refutation found" overwrites it and the user is told the prover found nothing,
+  -- when in fact it found a proof this port could not use — which is a different
+  -- problem with a different answer.
+  let mut unreplayable : Option MessageData := none
   for h : k in [0:schedule.size] do
     let limit := schedule[k]
     let isLast := k + 1 == schedule.size
     let t1 ← IO.monoMsNow
     let r ← Ffi.run built.names built.code limit
     let reason ← Ffi.termination
-    trace[vampire.timing] "prover took {(← IO.monoMsNow) - t1}ms at {limit}ds ({reason})"
+    let ps ← Ffi.phases
+    trace[vampire.timing] "prover took {(← IO.monoMsNow) - t1}ms at {limit}ds \
+      ({reason}): {ps}"
     trace[vampire.prover] "{← Ffi.proverOutput}"
     match r with
     | .failed what => throwError "vampire: {what}"
     | .notRefuted =>
-      why := m!"no refutation found ({reason}) — {← Ffi.message}"
+      why := whyNoRefutation limit reason ps (← Ffi.message)
       -- A saturated space is not a budget problem, and no later limit changes it.
       unless reason.mightYieldToMore do break
     | .refuted =>
@@ -263,10 +312,14 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
         return (built, .ok (← use built))
       catch e =>
         saved.restore
-        why := e.toMessageData
+        if unreplayable.isNone then unreplayable := some e.toMessageData
         trace[vampire.replay] "the refutation found at {limit}ds was not usable, \
           escalating:{indentD e.toMessageData}"
-  return (built, .error why)
+  match unreplayable with
+  | none => return (built, .error why)
+  | some first =>
+    return (built, .error m!"{why}\n  A refutation *was* found under a tighter limit, \
+      and could not be replayed:{indentD first}")
 
 /-- Translate the goal, then search for a refutation, asking nothing of it. -/
 def run (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds : UInt32) :

@@ -42,8 +42,29 @@ and under the whole budget only if it has to be, because Vampire's default satur
 algorithm reads the limit as a *search parameter*. `set_option vampire.escalate false`
 makes it one attempt at the whole budget.
 
+**What the timeout bounds, and what it does not.** It bounds the saturation loop, which
+is where the check is. It does not bound anything else a run does, and a slow goal can
+be any of them, so `trace.vampire.timing` reports each separately — `built in 0ms,
+clausified in 12ms, searched in 5ms, exported in 100ms`, beside its own `translated in`
+line for the Lean side:
+
+| phase | bounded by |
+| --- | --- |
+| translating the goal, in Lean | `maxHeartbeats`, and reported by Lean, not by this |
+| building the problem inside Vampire | nothing; proportional to the problem |
+| clausification and the other preprocessing | **nothing** |
+| the saturation loop | `vampire.timeout` |
+| exporting the refutation | nothing; proportional to the *proof*, not the problem |
+
+A search that runs out says so and says to raise the budget; one that finishes the space
+says that no budget will help and the goal does not follow from what it was given; and
+where the budget went to clausification instead the message says that too, since the
+timeout would not have stopped it. Only clausification is a real gap: it cannot be
+interrupted, so a goal whose clausification runs away still runs away — it is now
+visible after the fact rather than bounded.
+
 When a goal is slow rather than wrong, `set_option trace.vampire.timing true` reports
-translation, search and replay, and one line per replayed step;
+translation, the prover's four phases and the replay, and one line per replayed step;
 `trace.vampire.timing.tactic` adds one per line of each step's script. Both print when
 the declaration finishes, so a run that never finishes prints nothing — `vampire?`,
 which stops before the replay, is the quick way to tell the prover apart from the

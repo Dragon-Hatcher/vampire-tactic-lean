@@ -171,6 +171,18 @@ private opaque messageRaw : BaseIO String
 @[extern "lean_vampire_termination"]
 private opaque terminationRaw : BaseIO UInt32
 
+@[extern "lean_vampire_build_ms"]
+private opaque buildMsRaw : BaseIO UInt32
+
+@[extern "lean_vampire_clausify_ms"]
+private opaque clausifyMsRaw : BaseIO UInt32
+
+@[extern "lean_vampire_search_ms"]
+private opaque searchMsRaw : BaseIO UInt32
+
+@[extern "lean_vampire_export_ms"]
+private opaque exportMsRaw : BaseIO UInt32
+
 @[extern "lean_vampire_problem_size"]
 private opaque problemSizeRaw : BaseIO UInt32
 
@@ -223,6 +235,36 @@ def message : BaseIO String := messageRaw
 /-- Why the last run stopped. -/
 def termination : BaseIO Termination := do
   return Termination.ofCode (← terminationRaw)
+
+/-- Where a run's time went, in milliseconds. -/
+structure Phases where
+  /-- Turning the instruction stream into Vampire's own units. -/
+  build : UInt32
+  /-- `Shell::Preprocess`: normal forms, definition introduction, clausification. -/
+  clausify : UInt32
+  /-- The saturation loop. -/
+  search : UInt32
+  /-- Reading the refutation back out. Scales with the size of the proof rather than
+  with the difficulty of finding it, so it is the phase that grows when a problem gets
+  easier to solve and harder to replay. -/
+  export_ : UInt32
+  deriving Repr, Inhabited
+
+instance : ToString Phases where
+  toString p := s!"built in {p.build}ms, clausified in {p.clausify}ms, \
+    searched in {p.search}ms, exported in {p.export_}ms"
+
+/--
+Where the last run's time went.
+
+Worth separating because only the last of the three is bounded. The soft time limit is
+checked in `SaturationAlgorithm::runImpl` and nowhere else, so `vampire.timeout` bounds
+the *search* — a problem whose clausification runs away is not stopped by it and, from
+the outside, looks exactly like a slow search.
+-/
+def phases : BaseIO Phases := do
+  return { build := ← buildMsRaw, clausify := ← clausifyMsRaw,
+           search := ← searchMsRaw, export_ := ← exportMsRaw }
 
 /-- How many units the last run's problem had. -/
 def problemSize : BaseIO UInt32 := problemSizeRaw
