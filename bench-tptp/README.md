@@ -67,6 +67,19 @@ the limit.
 Results append to `<scratch>/results.jsonl` as they land, and a rerun skips what is
 already recorded there unless `--redo` is passed, so an interrupted sweep resumes.
 
+### Measuring rather than checking
+
+`onefile.py` is the other instrument: it concatenates the extracted tests into one file,
+a `section` each, and elaborates them in one process.
+
+    ./onefile.py $SP/bench $SP/all.lean --run           # + Lean's profiler
+    ./onefile.py $SP/bench $SP/all.lean --run --trace   # + the tactic's own phases
+
+Use it for timings and the sweep above for pass/fail: one file pays start-up once, which
+is the point, but it also means a problem that hangs stops everything after it and an
+error in one `section` can leave later ones unelaborated. Its own docstring says what
+each number does and does not include.
+
 `extract.py` (`extractN.py`'s general form) takes every `.lean` file in its input
 directory, pulls the preamble `variable` blocks and the type between `theorem fullProof
 :` and `:= by`, and writes `<prefix><safe-name>.lean` with that statement proved by
@@ -148,6 +161,49 @@ probe spends before timing out. `Q_SYN036p1` reads as 11.1s to 12.9s in the tabl
 not a regression — measured alone it is 10.4s, and it is the one problem in the set whose
 cost is the size of the proof term rather than anything the tactic does to it: 1.7s in
 `mkLetFVars` and most of the rest in the kernel.
+
+### The same 195 in one file
+
+`onefile.py` puts every extracted test in one `.lean` file, one `section` each, and
+elaborates it in one process with `Elab.async false`. That is the measurement to quote
+for the tactic, because the per-file run spends more time getting ready than working:
+start-up is 1.70s a file against a median problem of about a quarter of a second, so a
+ratio taken from the per-file total is diluted about fourfold.
+
+Before and after the same two rounds of work, same file, same machine:
+
+| | before | after |
+| --- | ---: | ---: |
+| whole file, CPU | 221.7s | **109.4s (-51%)** |
+| translating the goal | 0.5s | 0.5s |
+| the prover | 56.7s | 25.5s |
+| the replay | 130.7s | 48.3s |
+| of which step scripts | 67.2s | 31.8s |
+| of which `mkLetFVars` | 3.8s | 4.9s |
+| the kernel, on the replayed term | 18.9s | 11.8s |
+| elaborating the statements | 9.4s | 9.6s |
+| pass | 195/195 | 195/195 |
+
+Two things this instrument shows that the per-file run could not.
+
+**The kernel.** `type checking` is 11.8s, and it happens after the tactic returns, so no
+trace inside the tactic can see it — it was the largest single unaccounted block. It
+fell by 38% without being aimed at, because the replay now builds smaller proof terms:
+propagation is an application per literal where `grind only [cases Or]` was a case split.
+
+**Half of Lean's profiler is missing here, and which half is the point.** Its categories
+do not nest — the `simp` and `grind` a step script runs get categories of their own — and
+`profiler.threshold` drops anything under a millisecond. A replay is thousands of tactic
+invocations at about half a millisecond each, so they vanish individually and their sum
+is the difference between the 39.8s the profiler attributes to
+`tactic execution of Vampire.vampire` and the 74.3s the tactic's own traces account for.
+That is the same floor `docs/STATUS.md` keeps arriving at, seen from the outside.
+
+The figures the tactic measures itself come from `--trace`, which turns on
+`trace.vampire.timing`; it costs about 6% of the file (114.2s against 108.5s) for the
+40500 messages. Peak RSS is *not* comparable between the two instruments — one process
+accumulates every problem's environment and holds 4.7GB against 2.0GB for the worst
+single file — so quote memory from the per-file run.
 
 Whichever way it is run, **a timing taken beside other work is a measurement of the
 machine.** The same problems run flat out at `--jobs 3` on a machine that also had a

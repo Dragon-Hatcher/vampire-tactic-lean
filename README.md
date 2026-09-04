@@ -257,6 +257,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     ffi/vampire_build.cpp           builds a translated problem, runs it
     ffi/vampire_proof.cpp           exports the refutation as structured data
     bench-tptp/                     the wider TPTP benchmark and its scripts
+    bench-tptp/onefile.py           all of it in one file, to time without the start-up
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
     docs/comparison.md              the same problems under `duper` and `smt`
     docs/STATUS.md                  working notes
@@ -274,11 +275,16 @@ run, which is what makes them a test of this port rather than of the generated f
 | `bench-tptp/`, that set plus 139 more | 196 | **196** |
 
 `bench-tptp/README.md` has the timing distribution, everything that used to fail and
-what each one turned out to be, and the scripts to reproduce the run. Run one at a time
-the whole set is 464.6s of CPU, of which 344.6s is `lake lean` start-up and the
-statements' own elaboration — a floor measured by replacing `vampire [*]` with `sorry` —
-so the tactic's own work is 120.0s. The median problem is 1.95s of CPU and is start-up,
-the 90th percentile 3.3s and the slowest 12.9s, and no problem holds more than 2.0GB. Whichever way it is run, run the numbers you quote alone:
+what each one turned out to be, and the scripts to reproduce the run.
+
+Run one problem to a file, the whole set is 464.6s of CPU — but 344.6s of that is
+`lake lean` start-up and the statements' own elaboration, a floor measured by replacing
+`vampire [*]` with `sorry`, so most of it is not about the tactic. `bench-tptp/onefile.py`
+puts all 195 in one file and one process instead: **109.4s of CPU**, against 221.7s
+before this round of work. That is the number to read for the tactic; the per-file run is
+the one to read for memory (no problem holds more than 2.0GB) and for pass/fail, since a
+hang there takes one problem down rather than the file. Per file the median problem is
+1.95s of CPU and is start-up, the 90th percentile 3.3s and the slowest 12.9s. Whichever way it is run, run the numbers you quote alone:
 a parallel run inflates CPU as well as wall time, because Lean elaborates on several
 threads and time they spend spinning for a core is charged to the process.
 `bench-tptp/sweep.py` runs the set and serves a live page while it does.

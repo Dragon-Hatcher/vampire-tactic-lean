@@ -593,47 +593,73 @@ failure and appends it.
 
 ### Where that leaves it
 
-Measured over `bench-tptp/`'s 195 problems, one at a time, before and after on the same
-machine. `lake lean` start-up and the statement's own elaboration are a floor every
-problem pays whatever the tactic does — 344.6s of it, measured by replacing `vampire [*]`
-with `sorry` — so the tactic's own work is quoted with that taken out.
+Two measurements, because the obvious one is mostly not about the tactic.
+
+`bench-tptp/one.sh` runs each problem as its own `lake lean`, and start-up is 1.70s a
+file against a median problem of about a quarter of a second of work — 344.6s of the
+536.1s baseline total, measured by replacing `vampire [*]` with `sorry` in all 195
+files. Any ratio quoted from that total is diluted about fourfold.
+
+`bench-tptp/onefile.py` puts all 195 in one file, a `section` each, and elaborates them
+in one process under `Elab.async false`. Before and after on the same machine:
 
 | | before | after |
 | --- | ---: | ---: |
-| total CPU | 536.1s | 464.6s |
-| the tactic's own work | 191.5s | **120.0s (-37%)** |
-| prover | 64.1s | 27.0s |
-| replay | 89.8s | 53.6s |
-| of which step scripts | 58.9s | 29.3s |
-| of which `mkLetFVars` | 5.2s | 5.2s |
-| stating the steps (the `type` column) | 2.8s | 0.44s |
-| 90th percentile | 4.45s | 3.29s |
-| slowest problem | 15.8s | 12.9s |
-| peak RSS | 2.09GB | 2.03GB |
+| **one file, CPU** | **221.7s** | **109.4s (-51%)** |
+| translating the goal | 0.5s | 0.5s |
+| the prover | 56.7s | 25.5s |
+| the replay | 130.7s | 48.3s |
+| of which step scripts | 67.2s | 31.8s |
+| of which `mkLetFVars` | 3.8s | 4.9s |
+| the kernel, on the replayed term | 18.9s | 11.8s |
+| elaborating the statements | 9.4s | 9.6s |
+| 195 separate files, CPU | 536.1s | 464.6s |
+| the same, less the 344.6s floor | 191.5s | 120.0s (-37%) |
+| 90th percentile, per file | 4.45s | 3.29s |
+| slowest problem, per file | 15.8s | 12.9s |
+| peak RSS, per file | 2.09GB | 2.03GB |
 | pass | 195/195 | 195/195 |
 
+The two disagree about the size of the win — -51% against -37% — and the one-file figure
+is the right one for the tactic. Both instruments measure the same work; the per-file run
+adds 195 copies of a fixed cost to both sides of the ratio. It is still the one to quote
+for *memory*, since one process accumulates every problem's environment and holds 4.7GB
+against 2.0GB for the worst single file, and for pass/fail, since a hang there takes one
+problem down instead of the file.
+
 Nothing got slower except `BOO028-1`, by the 2.1s its probe spends before timing out.
-`SYN036+1` reads as a regression in the run and is not one: measured alone it is 10.4s
-against 11.1s, and the run that says 12.9s was measuring the machine.
+`SYN036+1` reads as a regression in the per-file run and is not one: measured alone it is
+10.4s against 11.1s, and the run that says 12.9s was measuring the machine.
 
-What is left, and where the next one would come from. The prover's 27.0s is mostly
-failed probes and two or three genuinely hard searches; a portfolio would answer that
-and Vampire's portfolio mode forks, which an embedded run cannot. Of the replay's 53.6s,
-29.3s is step scripts, and the largest single rule is now `avatar split clause` at 6.7s
-over 3705 steps — 1.8ms each, spread over the six or seven tactic invocations its script
-makes rather than concentrated in any one of them. A further 5.2s is `mkLetFVars` and
-the ~19s left is the buckets outside the step trace, of which `clausifyParent` on
-`BIO006+1` is 1.4s in a single `cnfify`.
+**The kernel was the largest thing nothing could see.** `type checking` happens after
+the tactic returns, so no trace inside the tactic reaches it, and it is 11.8s — down 38%
+from 18.9s without being aimed at, because propagation builds an application per literal
+where `grind only [cases Or]` built a case split. Smaller proof terms were a side effect
+of the replay work and are worth about as much as the replay work itself.
 
-And about 40s of the tactic's work is not in any of these numbers, because it happens
-after the replay returns: the kernel typechecking the term. `SYN036+1` is the problem
-where that dominates — 1.7s to abstract 52 definitions over the proof and most of the
-rest inside the kernel — and it is the one measurement that says the *size* of the term,
-rather than the cost of building it, is the next thing to look at.
+**And Lean's own profiler cannot see the floor, which is how we know it is the floor.**
+Its categories do not nest — a step script's `simp` and `grind` get their own — and
+`profiler.threshold` drops anything under a millisecond, which is what a replay is
+thousands of. The gap between the 39.8s it attributes to `tactic execution of
+Vampire.vampire` and the 74.3s the tactic's own traces account for *is* the
+sub-millisecond invocations, measured from the outside for once.
 
-Beyond that the answer is the same as it was two rounds ago and has only got more so:
-the remaining cost is thousands of tactic invocations at a floor of about half a
-millisecond, which is a question about driving the replay through tactic syntax at all.
+What is left, and where the next one would come from. The prover's 25.5s is mostly
+failed probes and two or three genuinely hard searches; a portfolio would answer that,
+and Vampire's portfolio mode forks, which an embedded run cannot. Of the replay's 48.3s,
+31.8s is step scripts, and the largest single rule is now `avatar split clause` — 1.8ms
+a step over 3705 steps, spread across the six or seven tactic invocations its script
+makes rather than concentrated in any one of them. `clausifyParent` on `BIO006+1` is
+1.4s in a single `cnfify`, and after that no bucket is large.
+
+Then the kernel's 11.8s, which is a question about the *size* of the proof term rather
+than the cost of building it, and where `SYN036+1` — 1.7s in `mkLetFVars` and most of
+the rest in the kernel — is the problem to work from.
+
+Beyond that the answer is the same as it was two rounds ago and the profiler has now
+put a number on it: the remaining cost is thousands of tactic invocations at a floor of
+about half a millisecond, which is a question about driving the replay through tactic
+syntax at all.
 
 ### `bench-tptp/`
 
