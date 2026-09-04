@@ -212,6 +212,7 @@ initialize Lean.registerTraceClass `vampire.translate.query
 initialize Lean.registerTraceClass `vampire.preprocess
 initialize Lean.registerTraceClass `vampire.replay
 initialize Lean.registerTraceClass `vampire.timing
+initialize Lean.registerTraceClass `vampire.timing.tactic
 initialize Lean.registerTraceClass `vampire.prover
 
 end Vampire

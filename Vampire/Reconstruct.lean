@@ -93,6 +93,18 @@ A step needing one of these is reported by name and unit number rather than gues
 
 set_option autoImplicit false
 
+/-- Re-check the whole assembled proof term before handing it back.
+
+Off by default. Every application the assembly makes is checked as it is made, so this
+establishes nothing new; it costs a full `Meta.check` of a term the kernel is about to
+check anyway, which on a large refutation is most of the replay. Turn it on when a
+kernel error does come out of a replayed proof and the question is which part of the
+assembly, rather than which application, is wrong. -/
+register_option vampire.checkReplay : Bool := {
+  defValue := false
+  descr := "re-check the assembled replay term with `Meta.check` before returning it"
+}
+
 namespace Vampire
 
 open Lean Elab Term Meta
@@ -391,11 +403,21 @@ def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData)
   -- free to *log* the error and carry on, which throws nothing, leaves the goal
   -- admitted, and marks the whole declaration — so `#print axioms` reports `sorryAx`
   -- for a theorem whose replayed proof is in fact complete.
+  -- `vampire.timing.tactic` times each line. A step script is a handful of them and
+  -- they are not equally expensive — the clausification scripts are where a replay's
+  -- time goes — so which line of which script cost what is the first thing wanted, and
+  -- a whole-step figure leaves it to guesswork.
+  let timed ← isTracingEnabledFor `vampire.timing.tactic
   let run : TermElabM (List MVarId) := withoutErrToSorry <| Tactic.run mv.mvarId! <|
     Tactic.withoutRecover do
       for t in tacs do
         if (← Tactic.getGoals).isEmpty then break
-        Tactic.evalTactic t
+        if timed then
+          let t0 ← IO.monoMsNow
+          Tactic.evalTactic t
+          trace[vampire.timing.tactic] "{(← IO.monoMsNow) - t0}ms: {t.raw}"
+        else
+          Tactic.evalTactic t
   let remaining ←
     try run
     catch e =>
@@ -495,6 +517,53 @@ def transformHyp (h : Expr) (tacs : Ident → TermElabM (Array (TSyntax `tactic)
     what
   return mkApp fn h
 
+/--
+Transform a hypothesis and take the transformed hypothesis's proof from the same run.
+
+`transformHyp` runs its block twice — once against a throwaway goal to see what the
+block leaves behind, then again to build a term of that type — because the tactics it is
+given reason about the goal, and a goal that is a metavariable makes that nonsense. A
+block that only rewrites `at h` does not reason about the goal, and for one of those the
+target can be left open: `intro`, the block, then `exact h`, which assigns the target to
+whatever the block produced. One pass gives both the type and the proof.
+
+That matters where the block is expensive. Clausifying `SYN472+1`'s conjecture is
+`prenexify` then `cnfify` over a seven-hundred-atom formula — measured at 96s and 21s —
+and the difference between running it once and running it twice is two minutes.
+-/
+def transformOnce (h : Expr) (tacs : Ident → TermElabM (Array (TSyntax `tactic)))
+    (what : MessageData) : TermElabM (Expr × Expr) := do
+  let hId := mkIdent `vh
+  let ty ← inferType h
+  let (lctx, insts) := (← getLCtx, ← getLocalInstances)
+  -- The target: what the block leaves the hypothesis as, which is not known yet.
+  let out ← mkFreshExprMVarAt lctx insts (.sort .zero) .natural
+  let fn ← mkFreshExprMVarAt lctx insts (← mkArrow ty out) .syntheticOpaque
+  let remaining ←
+    try
+      withoutErrToSorry <| Tactic.run fn.mvarId! <| Tactic.withoutRecover do
+        Tactic.evalTactic (← `(tactic| intro $hId:ident))
+        let timed ← isTracingEnabledFor `vampire.timing.tactic
+        for t in ← tacs hId do
+          if (← Tactic.getGoals).isEmpty then break
+          if timed then
+            let t0 ← IO.monoMsNow
+            Tactic.evalTactic t
+            trace[vampire.timing.tactic] "{(← IO.monoMsNow) - t0}ms: {t.raw}"
+          else
+            Tactic.evalTactic t
+        unless (← Tactic.getGoals).isEmpty do
+          Tactic.evalTactic (← `(tactic| exact $hId))
+    catch e =>
+      throwError "vampire: {what} could not be replayed\
+        {indentD (← e.toMessageData.toString)}"
+  unless remaining.isEmpty do
+    throwError "vampire: {what} left {remaining.length} goal(s) unproved"
+  let newTy ← instantiateMVars out
+  if newTy.hasExprMVar then
+    throwError "vampire: {what} did not say what it transformed the hypothesis into"
+  return (newTy, mkApp (← instantiateMVars fn) h)
+
 /-- `intro a b c`, or nothing when there is nothing to introduce. -/
 def intros (ids : Array Ident) : TermElabM (Array (TSyntax `tactic)) := do
   if ids.isEmpty then return #[]
@@ -564,6 +633,41 @@ private partial def argSortsIn (syms : Symbols) : FTerm → Std.HashMap Nat Nat 
       | some a => acc := argSortsIn syms a acc
       | none => pure ()
     return acc
+
+/--
+`LeanChecker::outputReorderIfNeeded`, as the tactics that permute a clausified goal's
+`∀` prefix into the prenex order.
+
+`prenexify` hoists the parent's universal quantifiers in an order set by the shape of
+the formula, which need not be the ascending order the conclusion states its own binders
+in. When they differ, the clause the transformation produces and the goal are one
+permutation of their `∀` prefix apart — alpha-equivalent, but not something `assumption`
+can see past. The generated file states the permutation as an `Iff` and `rw`s the goal's
+prefix into the prenex order; the same reordering is done here by introducing the
+binders in the order the goal has them and reverting them, one at a time, in the order
+the prenexed clause wants — which leaves exactly the permuted goal, and needs no
+higher-order rewrite to be found.
+
+`s.splits.isEmpty` is the invariant this relies on rather than a case to handle: the
+goal is introduced binder by binder, so a split hypothesis in front of the `∀` prefix
+would be bound under a variable's name. Clausification runs in preprocessing, before
+AVATAR ever names a component, so a clausified conclusion holds under no split — and if
+that ever stops being true the reorder is skipped rather than applied to the wrong
+thing.
+-/
+def clausifyReorder (s : Step) : TermElabM (Array (TSyntax `tactic)) := do
+  unless s.splits.isEmpty && s.prenexOrder.size == s.vars.size
+      && s.prenexOrder != s.prenexOrder.qsort (· < ·) do
+    return #[]
+  let ascIds := s.vars.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+  let mut tacs ← intros ascIds
+  -- Each `revert` puts one binder back at the *front*, so reverting in reverse prenex
+  -- order rebuilds the prefix in prenex order. One at a time: `revert` given several
+  -- names orders them by their position in the context, which is the order being
+  -- permuted away from.
+  for v in s.prenexOrder.reverse do
+    tacs := tacs.push (← `(tactic| revert $(mkIdent (varName v)):ident))
+  return tacs
 
 /-- The tactic script for a derived step, ported from `LeanChecker`.
 
@@ -713,37 +817,7 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
                    | symm_match using $h
                    | $byPermutation)]
   | .clausify =>
-    -- `LeanChecker::outputReorderIfNeeded`.
-    --
-    -- `prenexify` hoists the parent's universal quantifiers in an order set by the
-    -- shape of the formula, which need not be the ascending order the conclusion
-    -- states its own binders in. When they differ, the clause the transformation
-    -- produces and the goal are one permutation of their `∀` prefix apart —
-    -- alpha-equivalent, but not something `assumption` can see past. The generated
-    -- file states the permutation as an `Iff` and `rw`s the goal's prefix into the
-    -- prenex order; the same reordering is done here by introducing the binders in the
-    -- order the goal has them and reverting them, one at a time, in the order the
-    -- prenexed clause wants — which leaves exactly the permuted goal, and needs no
-    -- higher-order rewrite to be found.
-    -- `s.splits.isEmpty` is the invariant this relies on rather than a case to handle:
-    -- the goal is introduced binder by binder, so a split hypothesis in front of the
-    -- `∀` prefix would be bound under a variable's name. Clausification runs in
-    -- preprocessing, before AVATAR ever names a component, so a clausified conclusion
-    -- holds under no split — and if that ever stops being true the reorder is skipped
-    -- rather than applied to the wrong thing.
-    let reorder : Array (TSyntax `tactic) ←
-      if s.splits.isEmpty && s.prenexOrder.size == s.vars.size
-         && s.prenexOrder != s.prenexOrder.qsort (· < ·) then do
-        let ascIds := s.vars.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
-        let mut tacs ← intros ascIds
-        -- Each `revert` puts one binder back at the *front*, so reverting in reverse
-        -- prenex order rebuilds the prefix in prenex order. One at a time: `revert`
-        -- given several names orders them by their position in the context, which is
-        -- the order being permuted away from.
-        for v in s.prenexOrder.reverse do
-          tacs := tacs.push (← `(tactic| revert $(mkIdent (varName v)):ident))
-        pure tacs
-      else pure #[]
+    let reorder ← clausifyReorder s
     if s.cnfCount <= 1 then
       return #[← `(tactic| intro $h:ident), ← `(tactic| try simp only)] ++ reorder ++
               #[← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
@@ -879,6 +953,30 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
   | .unsupported =>
     throwError "vampire: the rule '{s.ruleName}' (step {s.number}) is not ported yet"
 
+/-- The leaves of a nested conjunction, each with the projection that pulls it out of
+`h`. Built from the type rather than by asking for it: `mkAppM` would `inferType` the
+growing projection chain once per leaf, and here `h` is the CNF of a whole conjecture. -/
+private partial def andLeaves (h : Expr) (ty : Expr) : MetaM (Array (Expr × Expr)) := do
+  if ty.isAppOfArity ``And 2 then
+    let a := ty.appFn!.appArg!
+    let b := ty.appArg!
+    return (← andLeaves (mkApp3 (.const ``And.left []) a b h) a) ++
+           (← andLeaves (mkApp3 (.const ``And.right []) a b h) b)
+  return #[(ty, h)]
+
+/-- The first of `leaves` whose statement is the one wanted.
+
+Keyed on the statement first: the clause a step asks for is usually the leaf verbatim,
+and a refutation asks once per clause, so a linear `isDefEq` scan is quadratic in a
+split that `SYN472+1` makes 196 wide. The scan stays behind the lookup for the clauses
+that are equal without being identical. -/
+private def findLeaf (want : Expr) (index : Std.HashMap Expr Expr)
+    (clauses : Array (Expr × Expr)) : MetaM (Option Expr) := do
+  if let some pf := index[want]? then return some pf
+  for (ty, pf) in clauses do
+    if ← isDefEq ty want then return some pf
+  return none
+
 /--
 The Lean hypothesis, as the statement Vampire recorded for the input unit it became.
 
@@ -924,6 +1022,39 @@ def bridgeInput (i : Interp) (syms : Symbols) (s : Step) (src : Input) : TermEla
     proveBy want
       #[← `(tactic| first | rfl | (intros; rfl) | (intros; simp only [$dStx:term]))]
       m!"the defining equation of the symbol at input step {s.number}"
+
+/--
+Apply a step lemma to the proofs of its premises, checking each application as it is
+made.
+
+`mkAppN` does not typecheck, so the assembled proof is only a proof if every one of
+these applications happens to be well-typed. Checking the finished term with
+`Meta.check` does establish that, and that is what this used to rely on — but it
+re-walks the whole shared DAG with the elaborator's `inferType`, and on a refutation of
+any size it dominates everything else: measured on `PRD001+1`, 167s of a 240s replay
+against 72s for all 1415 step scripts together.
+
+The spine is where the risk actually is, and checking it there is cheap. Every proof the
+replay passes around is ascribed to its statement by `proveBy`, so `inferType` on an
+argument reads that ascription instead of walking the proof underneath it, and a
+mismatch is reported against the premise that carries it rather than against the user's
+theorem.
+-/
+def applyChecked (fn : Expr) (args : Array Expr) (what : MessageData)
+    (premiseNumber : Nat → MessageData) : MetaM Expr := do
+  let mut ty ← instantiateMVars (← inferType fn)
+  for h : k in [0:args.size] do
+    let arg := args[k]
+    unless ty.isForall do ty ← whnf ty
+    let .forallE _ dom body _ := ty
+      | throwError "vampire: {what} is given {args.size} premises, but its statement \
+          takes only {k}:{indentD ty}"
+    let aty ← inferType arg
+    unless ← isDefEq aty dom do
+      throwError "vampire: {what} expects its premise {premiseNumber k} to \
+        be{indentD dom}\nbut what proves it is{indentD aty}"
+    ty := if body.hasLooseBVars then body.instantiate1 arg else body
+  return mkAppN fn args
 
 /--
 The lemma for one derived step: `premise₁ → … → premiseₙ → conclusion`, proved by its
@@ -1074,7 +1205,9 @@ def avatarRefutation (i : Interp) (s : Step) (premises : Array Expr) : TermElabM
         | throwError "vampire: a clause in the SAT derivation at step {s.number} is \
             neither derived nor a hypothesis"
       args := args.push a
-    let e := mkAppN lemma args
+    let e ← applyChecked lemma args
+      m!"a step of the SAT refutation at {s.number}"
+      (fun k => m!"{k + 1}")
     have? := have?.insert (key step.concl) e
     last := some e
   let some e := last | throwError "vampire: empty SAT derivation"
@@ -1092,6 +1225,18 @@ partial def withSkolems (ws : List (Nat × Expr)) (skolems : Std.HashMap Nat Exp
     withLetDecl (Name.mkSimple s!"sK{f}") (← inferType w) w fun x =>
       withSkolems rest (skolems.insert f x) (bound.push x) k
 
+/-- A parent's CNF, as one clausification shared by every clause it produced.
+
+`index` is `clauses` keyed on the statement, for the usual case where the clause a step
+asks for is a leaf verbatim; `full` records whether the prenexing that produced it was
+`prenexify`'s own or the cheaper one `clausifyParent` tries first. -/
+structure Clausified where
+  statement : Expr
+  proof : Expr
+  index : Std.HashMap Expr Expr
+  clauses : Array (Expr × Expr)
+  full : Bool
+
 /-- What the replay carries from one step to the next. -/
 structure State where
   interp : Interp
@@ -1103,6 +1248,10 @@ structure State where
   definedFns : Std.HashMap Nat Expr := {}
   /-- The symbols the proof has bound so far, to be abstracted at the end. -/
   bound : Array Expr := #[]
+  /-- The CNF of each parent that has been clausified, by the parent's unit number. A
+  parent that clausifies into several clauses is one transformation shared by all of
+  them; see the `.clausify` case below. -/
+  clausified : Std.HashMap Nat Clausified := {}
   last : Option Expr := none
 
 /--
@@ -1190,34 +1339,40 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
         replayFrom r { st with
           skolems, interp, bound
           proofs := st.proofs.insert s.number e, last := some e } (k + 1)
-    | _ =>
-      let mut premises : Array Step := #[]
-      for n in s.premises do
-        let some p := st.byNumber[n]?
-          | throwError "vampire: step {s.number} names premise {n}, which is not in \
-              the exported proof"
-        if p.handler == .skipped then continue
-        premises := premises.push p
-      -- `avatarRefutationByResolution` sorts the parents by unit number, and they were
-      -- exported in that order; every other rule takes them as the inference lists them.
-      let order :=
-        if s.handler == .avatarRefutation then s.premises.qsort (· < ·) else s.premises
-      let mut args : Array Expr := #[]
-      for n in order do
-        if ((st.byNumber[n]?).map (·.handler)) == some .skipped then continue
-        let some a := st.proofs[n]?
-          | throwError "vampire: premise {n} of step {s.number} is unproved"
-        args := args.push a
-      let e ←
-        if s.handler == .avatarRefutation then
-          avatarRefutation st.interp s args
-        else
-          -- Folding a definition in is exactly a step of definitional unfolding, so it
-          -- is the one derived rule that needs to see through the `let`.
-          let opaqueLets := s.handler != .definitionFoldingPred
-          pure (mkAppN (← stepLemma st.interp r.symbols s premises opaqueLets) args)
+    -- A clausification whose parent produced several clauses. The generated file does
+    -- the parent's transformation once, in the enclosing block, and destructures it for
+    -- all of them; a step lemma here redid it per clause, and that is not a constant
+    -- factor. `SYN472+1`'s conjecture clausifies 196 ways and the refutation uses 145 of
+    -- them, at two minutes a clause. Do it once and pick.
+    | .clausify =>
+      if s.cnfCount <= 1 then generic st s else
+      let some parentNum := s.premises[0]?
+        | throwError "vampire: clausification {s.number} has no parent"
+      let some parent := st.proofs[parentNum]?
+        | throwError "vampire: the parent of clausification {s.number} is unproved"
+      let mut st := st
+      let mut cnf ←
+        match st.clausified[parentNum]? with
+        | some c => pure c
+        | none =>
+          let c ← clausifyParent parent s.number (full := false)
+          st := { st with clausified := st.clausified.insert parentNum c }
+          pure c
+      let want ← stepType st.interp r.symbols s
+      let reorder ← clausifyReorder s
+      let mut e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := !cnf.full)
+      if e?.isNone then
+        -- The cheap prenexing did not reach this clause. Prenex the parent the way
+        -- `prenexify` does, for this parent and every later clause of it.
+        cnf ← clausifyParent parent s.number (full := true)
+        st := { st with clausified := st.clausified.insert parentNum cnf }
+        e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := false)
+      let some e := e?
+        | throwError "vampire: step {s.number} (cnf transformation) is not one of the \
+            clauses its parent produced"
       replayFrom r { st with
         proofs := st.proofs.insert s.number e, last := some e } (k + 1)
+    | _ => generic st s
   else
     let some e := st.last | throwError "vampire: the exported refutation is empty"
     -- Close every `let` the definitions opened.
@@ -1225,16 +1380,135 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
     let e ← mkLetFVars st.bound e
     let tChk ← IO.monoMsNow
     trace[vampire.timing] "abstracted {st.bound.size} definitions in {tChk - tAbs}ms"
-    -- The steps are assembled by application, which `mkAppN` does not typecheck.
-    -- Without this a mismatch surfaces as a kernel error against the user's own
-    -- theorem, with no indication of which step is wrong.
-    try
-      check e
-      trace[vampire.timing] "checked the assembled term in {(← IO.monoMsNow) - tChk}ms"
-    catch err =>
-      throwError "vampire: the replayed proof does not typecheck\
-        {indentD (← err.toMessageData.toString)}"
+    -- Every application the assembly makes was checked as it was made, by
+    -- `applyChecked`, and everything else here is built by a tactic or by `mkAppM`,
+    -- which check what they build. Re-checking the finished term establishes nothing
+    -- those did not, and it is not cheap: `Meta.check` walks the whole shared DAG with
+    -- the elaborator's `inferType`, which on `PRD001+1` was 167s against 72s for the
+    -- 1415 step scripts it was checking. The kernel checks the term again anyway when
+    -- the declaration is added; what the eager check bought was attribution, and
+    -- `applyChecked` attributes better and by step number.
+    --
+    -- `set_option vampire.checkReplay true` puts it back, for when a kernel error does
+    -- come out of a replayed proof and the question is which part of the assembly —
+    -- rather than which application — is wrong.
+    if (← getOptions).getBool `vampire.checkReplay false then
+      try
+        check e
+        trace[vampire.timing] "checked the assembled term in {(← IO.monoMsNow) - tChk}ms"
+      catch err =>
+        throwError "vampire: the replayed proof does not typecheck\
+          {indentD (← err.toMessageData.toString)}"
     return e
+where
+  /--
+  Clausify a parent once: transform it into CNF and take that conjunction apart.
+
+  `full` chooses how far the prenexing goes. `prenexify` hoists every `∀` to the front
+  of the *whole* formula, past the conjunctions as well as the disjunctions, and
+  `cnfify`'s `cnf_prenex3` then pushes them back into each conjunct. On a conjecture
+  that is one conjunction a hundred wide, hoisting past `∧` rewrites the whole formula
+  once per binder — 96s of `SYN472+1`'s 154s, to undo it again immediately.
+
+  What the clauses actually need is a `∀` at the top of each *disjunction*, which the
+  `or` rules do on their own and which `cnfify` finishes; that is the cheap form, and it
+  is what is tried first. It is a weaker normal form, not a different one — where it
+  leaves a binder somewhere `cnfify` cannot use, the clause simply will not be among the
+  leaves, and the caller asks again with `full := true`, which is exactly what the
+  reference does.
+  -/
+  clausifyParent (parent : Expr) (num : Nat) (full : Bool) : TermElabM Clausified := do
+    let (statement, proof) ← Tac.transformOnce parent
+      (fun v => do
+        let cfg ← `(Lean.Parser.Tactic.optConfig| (config := { maxSteps := 10000000 }))
+        let prenex ←
+          if full then `(tactic| prenexify at $v:ident)
+          else
+            -- `prenexify`'s own shape, restricted to the two `or` rules: `repeat (first
+            -- | simp only [left] | simp only [right])`, but with the pair as one
+            -- alternative, so that the retry which discovers the left rule has nothing
+            -- left to do is not a whole further traversal of the formula in every round.
+            let left ← `(tactic| simp $cfg:optConfig only [or_forall_prenex_left] at $v:ident)
+            let right ← `(tactic| simp $cfg:optConfig only [or_forall_prenex] at $v:ident)
+            `(tactic| repeat (first
+                | $(← `(tacticSeq| $left:tactic
+                                   $right:tactic))
+                | $(← `(tacticSeq| $left:tactic))
+                | $(← `(tacticSeq| $right:tactic))))
+        return #[prenex, ← `(tactic| cnfify at $v:ident)])
+      m!"clausifying the parent of step {num}"
+    let clauses ← andLeaves proof statement
+    let index := clauses.foldl (init := ({} : Std.HashMap Expr Expr))
+      fun m (ty, pf) => if m.contains ty then m else m.insert ty pf
+    return { statement, proof, index, clauses, full }
+
+  /--
+  The proof of one clause, out of a clausified parent.
+
+  `mayFail` says whether there is a stronger prenexing still to try: under it a clause
+  that cannot be found is reported as `none` rather than as an error, so the caller can
+  ask again.
+  -/
+  clauseFrom (cnf : Clausified) (want : Expr) (reorder : Array (TSyntax `tactic))
+      (num parentNum : Nat) (mayFail : Bool) : TermElabM (Option Expr) := do
+    -- Usually the clause is one of the leaves as the split left it, and then there is
+    -- nothing to prove: the projection out of the CNF *is* the proof. It is ascribed so
+    -- that a later step reading this one with `inferType` gets the statement Vampire
+    -- recorded rather than the leaf's own rendering of it.
+    if reorder.isEmpty then
+      if let some pf ← findLeaf want cnf.index cnf.clauses then
+        return some (← mkExpectedTypeHint pf want)
+    -- Otherwise the binder prefix wants permuting, or the clause wants the AC
+    -- normalisation to be recognised. `vampire_finish_clausify` does what it always
+    -- did, over the shared CNF rather than one it makes for itself.
+    let hc := mkIdent (Name.mkSimple "hc")
+    let build : TermElabM Expr := do
+      let lemma ← proveBy (← mkArrow cnf.statement want)
+        (#[← `(tactic| intro $hc:ident)] ++ reorder ++
+          #[← `(tactic| vampire_finish_clausify)])
+        m!"step {num} (cnf transformation)" (restrict := true)
+      applyChecked lemma #[cnf.proof] m!"step {num} (cnf transformation)"
+        (fun _ => m!"{parentNum}")
+    if mayFail then
+      try return some (← build) catch _ => return none
+    else
+      return some (← build)
+
+  /-- Every rule that is one lemma applied to the proofs of its premises. -/
+  generic (st : State) (s : Step) : TermElabM Expr := do
+    let mut premises : Array Step := #[]
+    for n in s.premises do
+      let some p := st.byNumber[n]?
+        | throwError "vampire: step {s.number} names premise {n}, which is not in \
+            the exported proof"
+      if p.handler == .skipped then continue
+      premises := premises.push p
+    -- `avatarRefutationByResolution` sorts the parents by unit number, and they were
+    -- exported in that order; every other rule takes them as the inference lists them.
+    let order :=
+      if s.handler == .avatarRefutation then s.premises.qsort (· < ·) else s.premises
+    let mut args : Array Expr := #[]
+    -- The unit number behind each argument, so a mismatch can name the premise the
+    -- proof came from rather than its position in the application.
+    let mut argOf : Array Nat := #[]
+    for n in order do
+      if ((st.byNumber[n]?).map (·.handler)) == some .skipped then continue
+      let some a := st.proofs[n]?
+        | throwError "vampire: premise {n} of step {s.number} is unproved"
+      args := args.push a
+      argOf := argOf.push n
+    let e ←
+      if s.handler == .avatarRefutation then
+        avatarRefutation st.interp s args
+      else
+        -- Folding a definition in is exactly a step of definitional unfolding, so it
+        -- is the one derived rule that needs to see through the `let`.
+        let opaqueLets := s.handler != .definitionFoldingPred
+        let lemma ← stepLemma st.interp r.symbols s premises opaqueLets
+        applyChecked lemma args m!"step {s.number} ({s.ruleName})"
+          (fun k => m!"{(argOf[k]?).map toString |>.getD s!"at position {k}"}")
+    replayFrom r { st with
+      proofs := st.proofs.insert s.number e, last := some e } (k + 1)
 
 /-- Replay a refutation as a Lean proof of `False`. -/
 def replay (i : Interp) (r : Refutation) : TermElabM Expr :=

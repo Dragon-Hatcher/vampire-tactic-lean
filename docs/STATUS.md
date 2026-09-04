@@ -133,14 +133,66 @@ where the ordering bug was.
 **Currently 57/57** on this benchmark. `SWC153`, the last holdout, was the input-step
 bridge; `Vampire/Bridge.lean` closed it.
 
+### Where a replay's time goes
+
+The two problems that used to miss `bench-tptp`'s 150s cap were both cost, not
+correctness, and neither cost was in the tactic scripts. Recorded because each was
+invisible from the outside and obvious once measured — `set_option
+trace.vampire.timing` gives the per-step figures and `trace.vampire.timing.tactic` the
+per-line ones.
+
+1. **Checking the assembled term was most of the replay.** The steps are chained by
+   `mkAppN`, which does not typecheck, so the finished proof used to be handed to
+   `Meta.check`. On `PRD001+1` that was 167s of a 240s replay, against 72s for all 1415
+   step scripts together — the elaborator's `inferType` walking a shared DAG the kernel
+   is about to walk again anyway. What the check bought was attribution, and the
+   applications are the only place `mkAppN` can go wrong: `applyChecked` checks each one
+   as it is made, in constant time per argument because `proveBy` ascribes every proof
+   to its statement, and names the premise rather than the theorem. `set_option
+   vampire.checkReplay true` puts the whole-term check back.
+
+2. **A multi-clause clausification has to be shared.** `LeanChecker::clausify`
+   destructures the parent once, in the enclosing block, for every clause it produced.
+   Replaying it as one step lemma per clause redoes `prenexify` and `cnfify` over the
+   parent per clause, which is quadratic in a number that is not small: `SYN472+1`'s
+   conjecture clausifies 196 ways, the refutation uses 145 of them, and the pair of
+   transformations over that seven-hundred-atom formula measured 117s. The replay now
+   does it once per parent and each clause is a projection out of the result — see the
+   `.clausify` case in `Vampire/Reconstruct.lean`.
+
+3. **`prenexify` hoists past `∧`, and `cnfify` immediately undoes it.** Its four rules
+   pull every `∀` to the front of the *whole* formula. On a conjunction a hundred wide
+   that rewrites the whole formula once per binder — 96s of `SYN472+1`'s 117s — and
+   `cnfify`'s `cnf_prenex3` then pushes them all back into the individual conjuncts.
+   What the clauses need is a `∀` at the top of each *disjunction*, which the two `or`
+   rules give on their own. `clausifyParent` tries that first and falls back to
+   `prenexify` proper for a parent whose clauses it does not reach: 117s to 2s here,
+   with nothing lost where the weaker form is not enough.
+
+4. **`transformHyp` runs its block twice** — once against a throwaway goal to learn what
+   the block leaves behind, then again to build a term of it. That is necessary when the
+   tactics read the goal, and `exists_prenex` does. A block that only rewrites `at h`
+   does not, and for those `transformOnce` leaves the target open and lets `exact h`
+   assign it, which halves the cost of the one transformation that matters.
+
+5. **`repeat (first | A | B)` pays a failing traversal per round.** Each simp call runs
+   to its own fixpoint, so what the loop does is A\*, B\*, A\*, B\*, … — but `first`
+   retries A at the top of every iteration, and the retry that discovers A has nothing
+   left to do is a whole further pass over the formula. Making the pair one alternative
+   removes it from every round but the last. Worth about 3% here, which is to say: it is
+   the shape to fix *after* the ones above, not instead of them.
+
 ### `bench-tptp/`
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
 statement, replace its proof with `vampire [*]`, check for `sorryAx`), pass rate
-**137/139**. Every failure and what's understood about it is in `bench-tptp/README.md`.
-Scripts to regenerate and rerun it are there too. The clausification binder-order
-failure that used to be on that list is fixed: it wanted `outputReorderIfNeeded`, which
-the port was missing, not the `grind` fallback it had been attributed to.
+**137/137**. What used to fail, and what each one turned out to be, is in
+`bench-tptp/README.md`; scripts to regenerate and rerun it are there too.
+
+The last two — `PRD001+1` and `SYN472+1` — were cost rather than correctness, and are
+what the section above is about. Note that a run under `xargs -P 4` is not the same
+measurement as a run alone: `Q_BIO006p1` takes 80s on its own and misses `one.sh`'s 150s
+cap at 176s under `-P 4`, on the same build.
 
 ## Things that will bite
 
@@ -199,6 +251,19 @@ Recorded because each cost real time to find.
    running anything. Two hours went into a backtrace of that crash rather than the real
    one. Validate any hand-built `lean` invocation on a goal you know passes before
    believing what it says about one that fails.
+13. **Nothing a run prints reaches you until the file finishes.** Traces and log
+   messages are attached to the command's snapshot and reported when the frontend folds
+   the tree, so a `lake lean` on a goal that takes twenty minutes says nothing for
+   twenty minutes and then says everything — including, if you kill it, nothing at all.
+   `IO.eprintln` does not help either: lake buffers the child's stderr. To watch a run
+   that may not finish, write to a file and flush it, or stop the tactic earlier —
+   `vampire?` does translation and search and no replay, which is how the two-minute
+   question "is this the prover or the replay?" got a seven-second answer.
+14. **`sample` truncates a deep stack.** The replay nests one frame per `let` it binds
+   and one per step it chains, and past a few thousand frames the profile shows the
+   *top* of the stack with no path back to the caller — every branch looks like it
+   starts inside `simp`. Read what the leaves are doing, and get the attribution from
+   `trace.vampire.timing.tactic` instead.
 
 ## Fork changes, in order
 

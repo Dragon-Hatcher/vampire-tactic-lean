@@ -38,6 +38,15 @@ transfer, produced at the far end of it.
 
 `set_option vampire.timeout n` gives the prover `n` seconds to search (default 10).
 
+When a goal is slow rather than wrong, `set_option trace.vampire.timing true` reports
+translation, search and replay, and one line per replayed step;
+`trace.vampire.timing.tactic` adds one per line of each step's script. Both print when
+the declaration finishes, so a run that never finishes prints nothing — `vampire?`,
+which stops before the replay, is the quick way to tell the prover apart from the
+replay. `set_option vampire.checkReplay true` re-checks the assembled proof term with
+`Meta.check` before the kernel sees it; the applications it is made of are checked as
+they are made, so this is a debugging aid rather than a safeguard.
+
 ## Design
 
 - **No lean-smt dependency, but lean-smt's design.** The goal-translation pipeline is a

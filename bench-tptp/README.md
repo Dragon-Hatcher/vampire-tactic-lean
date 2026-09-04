@@ -53,11 +53,15 @@ directory, pulls the preamble `variable` blocks and the type between `theorem fu
 by spelling `+`/`-` as `p`/`m` before sanitizing — collapsing both to `_` silently merges
 the pair into one file and only tests one of them.
 
-## Results as of the last full run (196 problems: 57 original + 139 newly generated)
+## Results as of the last full run (194 problems: 57 original + 137 newly generated)
 
-Original 57: **57/57.** New 139: **137/139.** The newly-generated count moves between
+Original 57: **57/57.** New 137: **137/137.** The newly-generated count moves between
 runs — Vampire is nondeterministic under a wall-clock limit, so which problems it
 refutes within `gen.sh`'s budget, and therefore which get a test at all, is not fixed.
+
+Nothing on this page is still failing. What follows is the record of what was, and of
+what each one turned out to be, because the wrong diagnosis was recorded more than once
+and the corrections are the useful part.
 
 `Q_MED007p1` used to be on this list, as "clausification, binder order": after
 `vampire_finish_clausify` split and AC-normalised, the matching clause was
@@ -121,20 +125,22 @@ above picked the first. The arity-matching fix it describes made PRO011 pass by
 compensating for the extra existential rather than removing it, which is why it did not
 fix COM003.
 
-Every remaining failure, and what's understood about each:
+`Q_PRD001p1` and `Q_SYN472p1` used to be the last two, as "harness timeout": neither was
+a logic failure, both simply cost more than `one.sh`'s 150s of CPU. Both now pass, at 88s
+and 14s, and none of what closed them was in the tactic scripts. `docs/STATUS.md`'s
+"Where a replay's time goes" has the measurements; in short:
 
-- **`Q_PRD001p1`, `Q_SYN472p1` — harness timeout.** The only two left, and neither is a
-  logic failure: `one.sh` caps the tactic at 150s of CPU. `Q_PRD001p1` passes in 112s run
-  on its own and only fails under `xargs -P 4`, so it is genuinely borderline rather than
-  broken. `Q_SYN472p1` misses either way, at 153s alone.
+- Checking the assembled term with `Meta.check` was 167s of `PRD001+1`'s 240s replay,
+  against 72s for all 1415 of its step scripts. The applications are the only part
+  `mkAppN` can get wrong and they are now checked as they are made.
+- A clausification whose parent produces several clauses has to be done once and shared,
+  the way the generated file shares its destructuring. `SYN472+1`'s conjecture clausifies
+  196 ways and its refutation uses 145 of them, at two minutes a clause.
+- `prenexify` hoists every `∀` past the conjunctions as well as the disjunctions, which
+  on a conjunction a hundred wide rewrites the whole formula once per binder — and
+  `cnfify` then puts them straight back. Hoisting out of the disjunctions alone is what
+  the clauses need, and is what is tried first.
 
-  These were three, and `Q_SYN036p1` came off the list when `restrictedContext` stopped
-  using an unmemoised free-variable traversal — see below. What is left is spread rather
-  than concentrated. For `Q_SYN036p1`, now 15s, the 8.7s of replay divides as: 3.25s in
-  step tactics (26 clausifications at about 120ms each), 2.5s abstracting 52 definitions
-  with `mkLetFVars`, 1.45s in the final `check`, 1.3s in two skolemisations, and 42ms in
-  everything else — input bridging, AVATAR definitions and the SAT refutation together.
-  No single hot spot; four real costs. The reference checks its own proof of the same
-  problem in 2.5s, but that is a different and smaller derivation (114 theorems against
-  our 181 steps) read from a file rather than built in the elaborator, so it is a bound
-  to aim at rather than a like-for-like gap.
+A run under `xargs -P 4` is not the same measurement as a run alone: `Q_BIO006p1` takes
+80s on its own and missed the cap at 176s under `-P 4` on the same build. Check a
+timeout by hand before recording it as one.
