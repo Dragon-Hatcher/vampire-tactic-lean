@@ -106,6 +106,12 @@ for a core is charged to the process. **A timing taken beside other work is a
 measurement of the machine.** `sweep.py` prints a warning if the load average is already
 high when it starts, and keeps load on the page for the same reason.
 
+### Against other tactics
+
+`retarget.py` rewrites these same statements to be proved by `duper` or `smt` instead,
+and `sweep.py --package` elaborates them in that tool's lake package. Results and the
+caveats they need are in `../docs/comparison.md`.
+
 `Q_MED007p1` used to be on this list, as "clausification, binder order": after
 `vampire_finish_clausify` split and AC-normalised, the matching clause was
 alpha-equivalent to the goal but bound its variables in a different *position*

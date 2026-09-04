@@ -243,6 +243,22 @@ Peak RSS is the other figure to watch, and the reason `--jobs` is not the core c
 `PRD001+1` holds 5.5GB on its own, and a few of those at once will put a 16GB machine
 into swap, after which every timing is measuring paging.
 
+### Against duper and lean-smt
+
+`docs/comparison.md` runs the same 194 statements through
+[duper](https://github.com/leanprover-community/duper) and
+[lean-smt](https://github.com/ufmg-smite/lean-smt), by retargeting the tactic line and
+nothing else. Within 15s of CPU at six jobs: `vampire` 182, lean-smt 155, duper 133, and
+on the 117 all three solve the median CPU is 3.0s, 7.3s and 5.1s.
+
+Two things in that document matter more than the numbers. The problem set is Vampire's
+own — `gen.sh` generates each test by running Vampire until it finds a proof — so it
+measures how the three fare on Vampire's problems and not their general strength. And
+the first lean-smt run was wrong by 40 problems because its preprocessing wants
+`Nonempty ι`, does not find it in the shape these files provide, and then *logs* the
+failure and admits the goal: the same hazard recorded below for our own replay, hit by
+somebody else's tactic and caught only by `#print axioms`.
+
 ## Things that will bite
 
 Recorded because each cost real time to find.

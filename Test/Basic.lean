@@ -114,3 +114,6 @@ theorem coset_commutation_implies_normal
 
     : ∀ g h, H h → H (mul (mul g h) (inv g)) := by
   vampire [*]
+
+theorem aksjnxaksjn (a b : Nat) : a + b = a + b := by
+  vampire [*]

@@ -162,6 +162,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     ffi/vampire_proof.cpp           exports the refutation as structured data
     bench-tptp/                     the wider TPTP benchmark and its scripts
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
+    docs/comparison.md              the same problems under `duper` and `smt`
     docs/STATUS.md                  working notes
 
 ## Benchmarks
@@ -174,11 +175,17 @@ run, which is what makes them a test of this port rather than of the generated f
 | | problems | pass |
 | --- | ---: | ---: |
 | the paper's set (`../bodingbauer-etall/bench/work`) | 57 | **57** |
-| `bench-tptp/`, that set plus 139 more | 196 | **191** |
+| `bench-tptp/`, that set plus 137 more | 194 | **194** |
 
-The five that do not pass are two skolemisations whose parent bundles an unrelated
-existential and three that exceed the harness's 150s cap; `bench-tptp/README.md` has
-each one and what is understood about it, and the scripts to reproduce the run.
+`bench-tptp/README.md` has the timing distribution, everything that used to fail and
+what each one turned out to be, and the scripts to reproduce the run. The median problem
+replays in 3.6s of CPU and the slowest in 79s, so `bench-tptp/sweep.py` runs it in two
+phases — everything in parallel under a short cap, then the slow tail one at a time — and
+serves a live page while it does. Run the tail alone or the numbers are not comparable:
+a parallel run inflates CPU as well as wall time.
+
+`docs/comparison.md` puts the same 194 statements through `duper` and `smt`, by
+retargeting the tactic line and nothing else.
 
 ## Building against Vampire
 
