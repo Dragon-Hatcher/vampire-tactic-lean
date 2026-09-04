@@ -217,31 +217,94 @@ per-line ones.
    removes it from every round but the last. Worth about 3% here, which is to say: it is
    the shape to fix *after* the ones above, not instead of them.
 
+### Assigning a metavariable is not free, and a rewrite is not a reshuffle
+
+The two problems that were the slow tail after all of the above — `PRD001+1` at 79s and
+`BIO006+1` at 77s of CPU — are now 7s and 11s. Neither was doing anything unnecessary at
+the level of *which* steps ran; both were paying, in two different ways, for a proof term
+that is built by unification or by rewriting when it could be built by construction.
+
+`sample <pid>` is what found the first and the shape of the second. The dominant leaf was
+`Lean.Meta.CheckAssignmentQuick.checkImpl.visit` and its visited-set — over half the
+samples. That is the check Lean runs when it *assigns a metavariable*: it walks the whole
+assigned value looking for anything out of scope. It is charged once per implicit
+argument, and here every implicit argument is a formula with several hundred atoms in it.
+
+1. **`mkAppM` over a large formula is quadratic.** `Vampire/Bridge.lean`'s `conjLeaves`
+   took a conjunction apart with `mkAppM ``And.left #[h]`, leaving `{a b : Prop}` to
+   unification: two metavariable assignments per projection, one projection per leaf,
+   each assignment walking a conjunct. It also asked `inferType` at every node for a type
+   the node above already knew. Threading the type and filling the implicit arguments in —
+   which is what `Reconstruct.lean`'s `andLeaves` already did, and for this reason —
+   took `BIO006+1`'s 142 `pure predicate removal` steps from **25.5s to 1.1s**. The same
+   applies to every `mkAppM`/`mkAppOptM` on the bridge's common path.
+
+2. **simp pays a congruence proof to every rewrite site.** `flattening` is `simp only
+   [and_assoc, or_assoc, Classical.not_not] at h`: reassociation. One `BIO006+1` step
+   measured **23.9s** on its own. Reassociation, junction order, and dropping conjuncts
+   are exactly what the bridge does by construction, so `.flatten` and the one-clause
+   `.clausify` now try `vampire_bridge` first — 23.9s to 12ms there, and `PRD001+1`'s 210
+   one-clause clausifications from **24.1s to 0.8s**. The bridge grew two rules for this:
+   `¬¬A` against `A`, and hoisting a `∀` out of a disjunction in both directions.
+
+3. **Hoisting quantifiers is one equivalence; prove it once.** What was left of
+   `PRD001+1` was a single step: the AVATAR split of the negated conjecture, whose `rw`s
+   leave the goal a disjunction of 85 quantified components and whose `prenexify` then
+   has to bring 97 binders to the front. **31s, in one step, at 5.5GB.** The cost is not
+   the rewriting, it is that after the first binder every later site is under it, so each
+   congruence proof runs through the prefix built so far and carries the formula at every
+   level.
+
+   Two things did *not* fix it, both worth recording. Restricting the rule set does
+   nothing — the `∨` rules alone cost the same, which is what `orPrenex` measures. And
+   applying the hoisting lemmas directly, under as many lambdas as are already hoisted,
+   only got it to 19s: one application moves one binder past *one* `∨` node, so the whole
+   prefix needs `O(k²)` of them, and each abstracts the proof accumulated so far.
+
+   `Vampire/Prenex.lean` proves the equivalence flatly instead. If the conclusion fails
+   then every disjunct fails, so each has witnesses at which its body fails; the premise
+   at those witnesses is a disjunction every disjunct of which is refuted. One
+   `byContradiction`, one witness per binder, one `Or.elim` per disjunct — linear.
+   **31s to 1.5s**, and the replay it is part of from 74s to 7s.
+
+`prenexify` and the reference's scripts stay behind all of this as `first` alternatives,
+so a shape the cheap path does not reach is slow rather than broken. That matters more
+than usual here: the term-level prenexer is weaker than `prenexify` and can order the
+prefix differently, and nothing notices which prenexing ran until the rest of the script
+tries to use the result.
+
 ### `bench-tptp/`
 
 A second, wider benchmark: more TPTP problems, same method (extract a `fullProof`
 statement, replace its proof with `vampire [*]`, check for `sorryAx`). With the original
-57 that is **194/194**, in 8.3 minutes. What used to fail, and what each one turned out
-to be, is in `bench-tptp/README.md`; scripts to regenerate and rerun it are there too.
+57 that is **196/196**, in 10.7 minutes of CPU run one at a time; the median problem is
+2.2s, the 90th percentile 5.8s and the slowest 19.6s, at 2.2GB. What used to fail, and
+what each one turned out to be, is in `bench-tptp/README.md`; scripts to regenerate and
+rerun it are there too.
 
-`bench-tptp/sweep.py` runs it and serves a live page. Run it in two phases:
+`bench-tptp/sweep.py` runs it and serves a live page. It also has a `--triage` mode that
+runs everything in parallel under a short cap and then reruns the tail one at a time:
 
     ./sweep.py $SP/res $SP/tests --jobs 6 --triage 15 --cpu-limit 300
 
-The median problem replays in 3.6s of CPU and the 90th percentile in 7.0s, so phase one
-takes everything six at a time under a 15s cap; twelve problems exceed it and phase two
-reruns those one at a time. That is faster than a flat parallel run and, more to the
-point, correct — **a timing taken beside other work measures the machine.** CPU time
-looks like it should be immune, since it is not wall time, but Lean elaborates on
-several threads and time they spend spinning for a core is charged to the process. The
-same 194 problems, run at `--jobs 3` on a machine that also had a game on it, reported
-192/194 with `PRD001+1` and `BIO006+1` over a 150s cap; measured alone they are 79s and
-77s, and `SYN472+1` was 43s there against 13s here. `sweep.py` warns if the load average
-is high before it starts, and keeps load on the page.
+That was worth the complication when the tail was `PRD001+1` at 79s and 5.5GB. It is not
+any more — the slowest problem is 19.6s at 2.2GB and the whole set runs serially in 10.7
+minutes — so a single pass is the simpler thing to quote.
 
-Peak RSS is the other figure to watch, and the reason `--jobs` is not the core count:
-`PRD001+1` holds 5.5GB on its own, and a few of those at once will put a 16GB machine
-into swap, after which every timing is measuring paging.
+**A timing taken beside other work measures the machine**, and this is what the numbers
+have to be run alone for. CPU time looks like it should be immune, since it is not wall
+time, but Lean elaborates on several threads and time they spend spinning for a core is
+charged to the process. In the `--jobs 3` run of these same 196 problems several
+two-second problems came out at eighteen; on an earlier machine that also had a game on
+it, `SYN472+1` was 43s against 13s measured alone, and two problems missed a 150s cap
+that take 79s and 77s. `sweep.py` warns if the load average is high before it starts, and
+keeps load on the page.
+
+Peak RSS was the other figure to watch, and the reason `--jobs` was not the core count:
+`PRD001+1` used to hold 5.5GB on its own, and a few of those at once will put a 16GB
+machine into swap, after which every timing is measuring paging. The ceiling is 2.2GB
+now — the same work that took the time was building the proof term that took the memory —
+so `--jobs` can be chosen for cores again.
 
 ### Against duper and lean-smt
 

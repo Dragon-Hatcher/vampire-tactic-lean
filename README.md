@@ -78,6 +78,15 @@ they are made, so this is a debugging aid rather than a safeguard.
   wrote it, and Vampire's recorded formula at the other, in the shape the exporter
   renders it. `Vampire/Bridge.lean` walks the two together and builds the proof from the
   correspondence rather than handing the difference to a search procedure.
+- **A reshuffle is not a rewrite.** Several of the generated scripts reconcile two
+  spellings of one formula by rewriting: `flattening` reassociates with `simp only
+  [and_assoc, or_assoc]`, a one-clause clausification prenexes and AC-normalises until
+  `assumption` can see the two are the same. Rewriting pays for a congruence proof from
+  the root of the formula to each site, and on a clause with several hundred atoms in it
+  that is where a replay's time goes. The bridge gets first refusal on those steps and
+  `Vampire/Prenex.lean` does the quantifier hoisting as a term; the reference's script
+  stays behind each of them, so nothing that used to be provable stops being. Measured
+  on the two slowest problems in `bench-tptp/`, this is 79s to 7s and 77s to 11s.
 
 ## What translates
 
@@ -154,6 +163,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     Vampire/Ffi.lean                typed bindings to the embedded prover
     Vampire/Proof.lean              the refutation, read back as structured data
     Vampire/Bridge.lean             reconciling two renderings of the same formula
+    Vampire/Prenex.lean             hoisting a goal's quantifiers out of its disjunctions
     Vampire/Support.lean            tactics the replay needs and the generated file does not
     Vampire/Reconstruct.lean        the port of Vampire's Lean code generator
     Vampire/Tactic.lean             `vampire` and `vampire?`
@@ -175,14 +185,15 @@ run, which is what makes them a test of this port rather than of the generated f
 | | problems | pass |
 | --- | ---: | ---: |
 | the paper's set (`../bodingbauer-etall/bench/work`) | 57 | **57** |
-| `bench-tptp/`, that set plus 137 more | 194 | **194** |
+| `bench-tptp/`, that set plus 139 more | 196 | **196** |
 
 `bench-tptp/README.md` has the timing distribution, everything that used to fail and
 what each one turned out to be, and the scripts to reproduce the run. The median problem
-replays in 3.6s of CPU and the slowest in 79s, so `bench-tptp/sweep.py` runs it in two
-phases — everything in parallel under a short cap, then the slow tail one at a time — and
-serves a live page while it does. Run the tail alone or the numbers are not comparable:
-a parallel run inflates CPU as well as wall time.
+replays in 2.2s of CPU, the 90th percentile in 5.8s and the slowest in 20s, and no
+problem holds more than 2.2GB. Whichever way it is run, run the numbers you quote alone:
+a parallel run inflates CPU as well as wall time, because Lean elaborates on several
+threads and time they spend spinning for a core is charged to the process.
+`bench-tptp/sweep.py` runs the set and serves a live page while it does.
 
 `docs/comparison.md` puts the same 194 statements through `duper` and `smt`, by
 retargeting the tactic line and nothing else.

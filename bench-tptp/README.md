@@ -74,37 +74,43 @@ directory, pulls the preamble `variable` blocks and the type between `theorem fu
 by spelling `+`/`-` as `p`/`m` before sanitizing — collapsing both to `_` silently merges
 the pair into one file and only tests one of them.
 
-## Results as of the last full run (194 problems: 57 original + 137 newly generated)
+## Results as of the last full run (196 problems: 57 original + 139 newly generated)
 
-**194/194**, in 8.3 minutes on an 8-core M-series MacBook Air. The newly-generated count
-moves between runs — Vampire is nondeterministic under a wall-clock limit, so which
-problems it refutes within `gen.sh`'s budget, and therefore which get a test at all, is
-not fixed.
+**196/196**, in 10.7 minutes of CPU on an 8-core M-series MacBook Air, run one at a
+time. The newly-generated count moves between runs — Vampire is nondeterministic under a
+wall-clock limit, so which problems it refutes within `gen.sh`'s budget, and therefore
+which get a test at all, is not fixed.
 
-    ./sweep.py $SP/res $SP/tests --jobs 6 --triage 15 --cpu-limit 300
+The distribution, measured serially:
 
-The distribution is why that command has the shape it does. Of 194 problems the median
-replays in **3.6s** of CPU and the 90th percentile in **7.0s**; twelve take longer, and
-two of those take a minute and a quarter. So phase one runs everything six at a time
-under a 15s cap, which clears 182 problems in 12.7 minutes of CPU, and phase two reruns
-the twelve that hit the cap one at a time — 5.1 minutes, and the only figures anyone
-quotes:
+    median   2.2s CPU   1.3GB
+    p90      5.8s CPU   1.5GB
+    max     19.6s CPU   2.2GB
 
-    Q_PRD001p1   79s   5.5GB      Q_PRO014p3   15s   2.4GB
-    Q_BIO006p1   77s   4.3GB      Q_SYN472p1   13s   2.7GB
-    P_ALG165p1   21s   3.1GB      Q_CSR115p6   12s   2.7GB
-    Q_MGT035p2   18s   2.4GB      Q_SYN036p1   12s   2.7GB
-    P_ALG190p1   18s   2.7GB      Q_MGT035m2   12s   2.3GB
-    P_ALG160p1   17s   2.7GB      P_ALG128p1   12s   2.6GB
+and the eight problems over ten seconds, which are the only figures worth quoting:
 
-Running the slow tail alone is not a nicety. The same 194 problems run flat out at
-`--jobs 3` on a machine that also had a game on it reported 192/194, with `PRD001+1` and
-`BIO006+1` over a 150s cap — and both of them are 79s and 77s here. `SYN472+1` came out
-at 43s there against 13s here. CPU time looks like it ought to be immune to that, since
-it is not wall time, but Lean elaborates on several threads and time they spend spinning
-for a core is charged to the process. **A timing taken beside other work is a
-measurement of the machine.** `sweep.py` prints a warning if the load average is already
-high when it starts, and keeps load on the page for the same reason.
+    P_ALG165p1   19.6s   2.2GB      Q_SYN036p1   12.1s   1.9GB
+    Q_MGT035p2   18.6s   1.6GB      Q_SYN472p1   12.1s   1.9GB
+    P_ALG190p1   16.2s   2.2GB      Q_MGT035m2   11.2s   1.5GB
+    P_ALG160p1   15.9s   2.1GB
+    Q_BIO006p1   12.5s   2.0GB
+
+This used to have a much longer tail. `Q_PRD001p1` was 79s at 5.5GB and `Q_BIO006p1` 77s
+at 4.3GB, which is why `sweep.py` grew a `--triage` mode that runs everything in parallel
+under a short cap and then reruns the tail one at a time; both are now 7s and 12s, and no
+problem holds more than 2.2GB, so the whole set fits in one pass and the memory ceiling no
+longer decides `--jobs`. `../docs/STATUS.md`'s "Assigning a metavariable is not free, and
+a rewrite is not a reshuffle" has the measurements.
+
+Whichever way it is run, **a timing taken beside other work is a measurement of the
+machine.** The same problems run flat out at `--jobs 3` on a machine that also had a
+game on it once reported 192/194, with two problems over a 150s cap that were 79s and 77s
+measured alone. CPU time looks like it ought to be immune to that, since it is not wall
+time, but Lean elaborates on several threads and time they spend spinning for a core is
+charged to the process. `sweep.py` prints a warning if the load average is already high
+when it starts, and keeps load on the page for the same reason. Even in this run's own
+numbers the effect is plain: at `--jobs 3` several two-second problems came out at
+eighteen.
 
 ### Against other tactics
 
