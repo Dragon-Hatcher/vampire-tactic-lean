@@ -569,6 +569,45 @@ def intros (ids : Array Ident) : TermElabM (Array (TSyntax `tactic)) := do
   if ids.isEmpty then return #[]
   return #[← `(tactic| intro $ids*)]
 
+/--
+`prenexify at h`, restricted to its two `∨` rules.
+
+VampLean's `prenexify` is
+
+    repeat (first | simp only [or_forall_prenex_left, and_forall_prenex_left]
+                  | simp only [and_forall_prenex, or_forall_prenex])
+
+which hoists every `∀` to the front of the *whole* formula, past the conjunctions as
+well as the disjunctions. Two things about that are expensive and neither is what a
+clause needs.
+
+Hoisting past `∧` rewrites the whole formula once per binder, and what comes out of it
+is a prefix in front of a conjunction — which whatever runs next has to undo, either
+because `cnfify`'s `cnf_prenex3` pushes the binders back into the conjuncts or because
+the goal is a single clause and the conjunction was never there to begin with. What a
+clause wants is a `∀` at the top of each *disjunction*, and the two `or` rules give that
+on their own.
+
+And each `simp` runs to its own fixpoint, so `repeat (first | A | B)` does A\*, B\*,
+A\*, … while paying a failing traversal per round rediscovering that A has nothing left
+to do. Making the pair one alternative removes that from every round but the last.
+
+This is a weaker normal form, not a different one, so the caller keeps `prenexify`
+behind it: where the weak form leaves a binder somewhere the rest of the script cannot
+use, the script is run again over the full one. `maxSteps` is raised for the same reason
+`prenexify`'s own calls raise it — the default budget does not survive a formula of this
+size.
+-/
+def orPrenex (v : Ident) : TermElabM (TSyntax `tactic) := do
+  let cfg ← `(optConfig| (config := { maxSteps := 10000000 }))
+  let left ← `(tactic| simp $cfg:optConfig only [or_forall_prenex_left] at $v:ident)
+  let right ← `(tactic| simp $cfg:optConfig only [or_forall_prenex] at $v:ident)
+  `(tactic| repeat (first
+      | $(← `(tacticSeq| $left:tactic
+                         $right:tactic))
+      | $(← `(tacticSeq| $left:tactic))
+      | $(← `(tacticSeq| $right:tactic))))
+
 /-- `have iN := hN t₁ t₂ …` — `LeanChecker::instantiatePremiseVars`. -/
 def instantiate (target : Ident) (head : Term) (args : Array Term) :
     TermElabM (TSyntax `tactic) := do
@@ -784,8 +823,16 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| ennf_transformation at $h:ident <;> first | exact $h | grind)]
   | .flatten =>
+    -- Flattening *is* reassociation — `and_assoc`, `or_assoc` and `Classical.not_not` —
+    -- and reassociation is what the bridge does by construction, so it gets first
+    -- refusal here for the same reason it does on a one-clause clausification. What
+    -- `flattening` costs is the congruence proof simp builds to each rewrite site: one
+    -- `BIO006+1` step, over a formula with several hundred atoms in it, measured 23.9s
+    -- on its own, and the bridge does it in three.
     return #[← `(tactic| intro $h:ident),
-             ← `(tactic| flattening at $h:ident <;> first | exact $h | grind)]
+             ← `(tactic| first
+                   | vampire_bridge $h
+                   | (flattening at $h:ident <;> first | exact $h | grind))]
   | .nnf =>
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| nnf_transformation at $h:ident <;> first | exact $h | grind)]
@@ -819,9 +866,21 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
   | .clausify =>
     let reorder ← clausifyReorder s
     if s.cnfCount <= 1 then
-      return #[← `(tactic| intro $h:ident), ← `(tactic| try simp only)] ++ reorder ++
-              #[← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
-                      try (first | assumption | trivial))]
+      -- The bridge first, the reference's script behind it. What a one-clause
+      -- clausification has to prove is its parent prenexed and AC-normalised, and the
+      -- reference does that by rewriting: `prenexify` hoists the parent's `∀` prefix and
+      -- `ac_nf0` reassociates both sides until `assumption` can see they are the same
+      -- formula. `Vampire/Bridge.lean` walks the two formulas together instead, and
+      -- reassociation, junction order and hoisting a binder out of a disjunction are all
+      -- things it does by construction. Measured on `PRD001+1`, over its 210 one-clause
+      -- clausifications: 24.1s of rewriting against 0.8s of walking.
+      let reference := #[← `(tactic| try simp only)] ++ reorder ++
+        #[← `(tactic| prenexify at $h:ident <;> ac_nf0 <;> ac_nf0 at $h:ident <;>
+                try (first | assumption | trivial))]
+      return #[← `(tactic| intro $h:ident),
+               ← `(tactic| first
+                     | vampire_bridge $h
+                     | $(← `(tacticSeq| $reference*)))]
     -- The parent clausifies into several clauses, of which this step is one. The
     -- generated file shares one destructuring across all of them by putting it in the
     -- enclosing block, sized to Vampire's clause count; here the shape is only known
@@ -1420,21 +1479,8 @@ where
   clausifyParent (parent : Expr) (num : Nat) (full : Bool) : TermElabM Clausified := do
     let (statement, proof) ← Tac.transformOnce parent
       (fun v => do
-        let cfg ← `(Lean.Parser.Tactic.optConfig| (config := { maxSteps := 10000000 }))
         let prenex ←
-          if full then `(tactic| prenexify at $v:ident)
-          else
-            -- `prenexify`'s own shape, restricted to the two `or` rules: `repeat (first
-            -- | simp only [left] | simp only [right])`, but with the pair as one
-            -- alternative, so that the retry which discovers the left rule has nothing
-            -- left to do is not a whole further traversal of the formula in every round.
-            let left ← `(tactic| simp $cfg:optConfig only [or_forall_prenex_left] at $v:ident)
-            let right ← `(tactic| simp $cfg:optConfig only [or_forall_prenex] at $v:ident)
-            `(tactic| repeat (first
-                | $(← `(tacticSeq| $left:tactic
-                                   $right:tactic))
-                | $(← `(tacticSeq| $left:tactic))
-                | $(← `(tacticSeq| $right:tactic))))
+          if full then `(tactic| prenexify at $v:ident) else Tac.orPrenex v
         return #[prenex, ← `(tactic| cnfify at $v:ident)])
       m!"clausifying the parent of step {num}"
     let clauses ← andLeaves proof statement
