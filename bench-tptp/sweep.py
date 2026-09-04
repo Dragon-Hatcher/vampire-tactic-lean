@@ -52,8 +52,10 @@ from pathlib import Path
 # `ru_maxrss` is bytes on macOS and kilobytes on Linux.
 RSS_UNIT = 1 if platform.system() == "Darwin" else 1024
 
-# The repository root, so the sweep can `lake lean` from the package directory.
-PKG = Path(__file__).resolve().parent.parent
+# The package to run `lake lean` in. This one by default; `--package` points it at
+# another, which is what comparing against a different tactic needs — the test files are
+# the same statements with a different tactic, elaborated against that tool's own deps.
+DEFAULT_PKG = Path(__file__).resolve().parent.parent
 
 
 class Job:
@@ -125,7 +127,9 @@ def live_rss(pid):
 class Sweep:
     """The pool, the results, and the state the page reads."""
 
-    def __init__(self, scratch, tests, jobs, cpu_limit, redo, triage_limit=None):
+    def __init__(self, scratch, tests, jobs, cpu_limit, redo, triage_limit=None,
+                 pkg=DEFAULT_PKG):
+        self.pkg = pkg
         self.scratch = scratch
         # In two-phase mode the sweep starts at the triage limit and finishes at the
         # full one; `cpu_limit` is whichever is in force now, which is what `run_one`
@@ -189,7 +193,7 @@ class Sweep:
 
         proc = subprocess.Popen(
             ["lake", "lean", str(job.path)],
-            cwd=PKG, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=self.pkg, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             preexec_fn=bound, text=True, errors="replace")
         with self.lock:
             job.pid = proc.pid
@@ -582,9 +586,14 @@ def main():
                          "--cpu-limit. Most problems replay in a few seconds, so this "
                          "clears the bulk fast and leaves the slow tail — the only "
                          "timings that matter — measured without contention")
+    ap.add_argument("--package", type=Path, default=DEFAULT_PKG,
+                    help="lake package to elaborate in (default: this one)")
     ap.add_argument("--port", "-p", type=int, default=8080)
     ap.add_argument("--redo", action="store_true",
                     help="rerun tests already recorded in results.jsonl")
+    ap.add_argument("--exit-when-done", action="store_true",
+                    help="stop serving and exit once the sweep finishes, instead of "
+                         "leaving the page up. For scripting one sweep after another")
     args = ap.parse_args()
 
     if not args.tests.is_dir():
@@ -593,8 +602,11 @@ def main():
         sys.exit("lake is not on PATH")
 
     args.scratch.mkdir(parents=True, exist_ok=True)
+    if not (args.package / "lakefile.lean").exists() \
+            and not (args.package / "lakefile.toml").exists():
+        sys.exit(f"no lakefile in {args.package}")
     sweep = Sweep(args.scratch, args.tests, args.jobs, args.cpu_limit, args.redo,
-                  args.triage)
+                  args.triage, args.package)
     if not sweep.all:
         sys.exit(f"no .lean files in {args.tests}")
 
@@ -637,6 +649,8 @@ def main():
     for j in s["jobs"]:
         if j["state"] == "failed":
             print(f"  FAIL {j['name']:<24} {j['reason']}")
+    if args.exit_when_done:
+        return
     print(f"\npage still serving on :{args.port}; ctrl-c to stop")
     try:
         while True:
