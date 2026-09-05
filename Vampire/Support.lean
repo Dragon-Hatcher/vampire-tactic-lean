@@ -1,5 +1,14 @@
 import Lean
 import VampLean
+-- `open VampLean`, and it is load-bearing. The replay scripts below are built inside
+-- quotations, and quotation identifiers resolve in *this* file's scope, so the lemmas
+-- they name -- `not_imp_not`, `not_and_or`, `imp_iff_not_or`, `not_not` and the rest --
+-- have to be in scope here. VampLean used to declare them at the root, which is how
+-- they resolved before it was namespaced; none of them is in Lean core, so without this
+-- a script that names one dies at replay time with `Unknown identifier` and the tactic
+-- reports the step as unreplayable. That is invisible at compile time, because a
+-- quotation is only syntax until it runs.
+open VampLean
 
 /-!
 # Tactics the replay needs that the generated file does not

@@ -29,10 +29,13 @@ Vampire/Translate/Build.lean has no counterpart: lean-smt renders its terms as S
 text for a solver process, whereas this compiles them into an embedded Vampire's own
 data structures.
 
-Vampire/Preprocess/Mono.lean carries lean-smt's own additions to the `Auto` namespace
+Vampire/Preprocess/Mono.lean carries lean-smt's own variants of auto's lemma collection
 along with the port, because monomorphisation is driven by calling into lean-auto and
-lean-smt's variants of auto's lemma collection are what make that call. lean-auto is
-used under the Apache License 2.0:
+those variants are what make the call. lean-smt declares them in lean-auto's `Auto`
+namespace; here they are in `Vampire.Preprocess.Mono` instead, under the same
+identifiers, so that a file can import this tactic and `smt` at once — two ports of one
+file cannot both add the same names to a third library's namespace. lean-auto is used
+under the Apache License 2.0:
 
     lean-auto — https://github.com/leanprover-community/lean-auto
     Copyright (c) 2023 Yicheng Qian and contributors.

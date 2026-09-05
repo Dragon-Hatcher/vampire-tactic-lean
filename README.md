@@ -99,7 +99,11 @@ they are made, so this is a debugging aid rather than a safeguard.
 - **No lean-smt dependency, but lean-smt's design.** The goal-translation pipeline is a
   port: the translator registry, the dependency graph that orders declarations, and the
   preprocessing steps are all lean-smt's, with the changes recorded per file and in
-  `NOTICE`. What differs is the target.
+  `NOTICE`. What differs is the target. It is a port and not a fork, so a file can
+  import both: `Vampire/Preprocess/Mono.lean` keeps lean-smt's identifiers but declares
+  them in `Vampire.Preprocess.Mono` rather than in lean-auto's `Auto`, since two ports
+  of one file adding the same names to a third library's namespace collide at the
+  *import*.
 - **Talk to Vampire over an FFI, not a file.** lean-smt renders its terms as SMT-LIB
   text for a solver process. Here they are compiled into an embedded Vampire's own
   `Signature`, `Term`, `Literal` and `Formula`, so the symbol correspondence is held in
@@ -427,6 +431,49 @@ Build it before `lake build`:
 
 `Vampire` is compiled with `precompileModules := true` so the FFI symbols are available
 to the interpreter, which is where tactics run.
+
+### On Linux
+
+Two things differ, and both are consequences of `precompileModules` rather than of
+anything about the prover.
+
+**Configure the fork with `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`.** The archive is
+linked into a shared object, which on Linux its objects have to be position-independent
+for; the Apple toolchain compiles PIC by default and so never asks.
+
+    cmake -S ../vampire -B ../vampire/build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    cmake --build ../vampire/build --target vampire_lib
+
+**The C++ runtime has to be named by path, and statically.** `leanc` is Lean's bundled
+clang, defaulting to libc++, and `libleanshared.so` exports LLVM's unwinder; a GCC-built
+shim asking for libstdc++ the ordinary way gets neither the library it asked for nor the
+unwinder that library was built against. `cxxStdlib` in `lakefile.lean` is the whole
+story, including what each half looks like when it goes wrong — worth reading before
+changing those flags, because both failure modes surface somewhere else entirely.
+
+## Layout the build expects
+
+    vampire-tactic/
+      vampire -> vampire-tactic-vampire   the fork, under the name the lakefile uses
+      vampire-tactic-lean/                this
+      bodingbauer-etall/vamplean/         git clone https://github.com/vprover/vamplean
+
+`../vampire` and `../bodingbauer-etall/vamplean` are how the lakefile names its two
+local dependencies, so a checkout under any other name needs a symlink. VampLean is
+[vprover/vamplean](https://github.com/vprover/vamplean); take it at or after
+`f05df40` ("Remove Mathlib dependency"), which is the build this replay targets.
+
+That commit is also why the VampLean checkout here carries one local change: dropping
+Mathlib meant re-proving about a dozen lemmas Mathlib also has, at the root and under
+the same names — `Xor'`, `xor_def`, `not_and_or`, `imp_iff_not_or`, `forall_true_iff` —
+and identical declarations collide as readily as contradictory ones, at the *import*.
+Until it is namespaced, no file can have both VampLean and Mathlib, which means no goal
+stated in Mathlib's terms can be put to this tactic. The checkout is wrapped in a
+`VampLean` namespace, and `Reconstruct.lean` qualifies the three names it needs from it
+— `VampLean.Xor'`, `VampLean.or_forall_prenex`, `VampLean.or_forall_prenex_left`. The
+other lemma names its generated scripts mention (`imp_iff_not_or`, `not_and_or`,
+`not_imp_not`) are core's, are stated identically in VampLean, and are left unqualified.
 
 ## Build
 

@@ -26,7 +26,17 @@ does not call them is safe. This is why the shim can link the archive directly.
 - `signature` — `Kernel::Signature*`
 - `sharing` — `Indexing::TermSharing*` (the term hash-cons table)
 - `statistics` — `Shell::Statistics*`
-- `proofExtra` — `ProofExtra`, the per-inference metadata map
+- `proofExtra` — `ProofExtra`, the per-inference metadata map. Two things about it were
+  wrong for an embedded run and are fixed in the fork. `Clause::destroy` dropped a
+  clause's extra only under `proofExtra=full`, while two sites insert under
+  `full || lean`, so in the mode this tactic uses the map kept entries keyed by freed
+  `Clause *`; the allocator reuses those addresses, `ProofExtra::insert`'s `ALWAYS` is
+  `__builtin_unreachable()` once `VDEBUG` is off, and a later insert therefore ran off
+  the end of its basic block — a SIGSEGV in `DHMap::expand` with nothing in the
+  backtrace pointing at the clause that was freed. And `ProofExtra::clear`, which
+  `env.reset()` calls, used `DHMap::reset`: O(1) by timestamp, which for a map of
+  `unique_ptr` leaves every value owned and every key pointing into the signature that
+  is about to be deleted.
 - `_problem` — `Kernel::Problem*`
 - `colorUsed`, `reconstruction`, `maxSineLevel`, `predicateSineLevels`, `_higherOrder`
 

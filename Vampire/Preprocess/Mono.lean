@@ -40,15 +40,35 @@ the monomorphised *goal*, so the collection is repeated and `runMono` called in 
 the solver. The `'`-suffixed names are lean-smt's, kept so the two can be diffed.
 -/
 
-namespace Auto
+/-
+These are lean-smt's declarations, and for a while they were in lean-smt's namespace too
+-- `Auto`, which is neither library's. Two ports of the same file then declare the same
+names in the same namespace, and the second import loses:
 
+    import Vampire.Preprocess.Mono failed, environment already contains
+    'Auto.InputHints'.lemmas' from Smt.Preprocess.Mono
+
+which is at the import, so no file could have both this tactic and `smt` at all. They
+live here now instead. The identifiers are unchanged, including the `'` suffixes that
+are lean-smt's own, so the two files still diff cleanly; only the namespace differs, and
+`open Auto` below keeps every genuine `Auto.*` name resolving as before.
+-/
+namespace Vampire.Preprocess.Mono
+
+-- `Auto.Prep` as well as `Auto`: inside `namespace Auto` the `Prep.elabDefEq'` below got
+-- `Auto.Prep.addRecAsLemma` from the enclosing namespace, and opening only `Auto` leaves
+-- it unresolved.
+open Auto Auto.Prep
 open Lean Elab Embedding.Lam
 
+/-- Not dot notation at the call sites, as it would be inside `Auto`: generalised field
+notation on an `Auto.DTr` looks for `Auto.DTr.contains` and nothing else, so this has to
+be applied by name. -/
 def DTr.contains (self : DTr) (other : DTr) : Bool :=
   if self == other then true
   else match self with
     | .leaf _ => false
-    | .node _ dtrs => dtrs.attach.any fun ⟨dtr, _⟩ => dtr.contains other
+    | .node _ dtrs => dtrs.attach.any fun ⟨dtr, _⟩ => DTr.contains dtr other
 
 structure InputHints' where
   lemmas   : Array Lemma := #[]
@@ -173,11 +193,12 @@ def mono' (declName? : Option Name) (mv : MVarId) (hints : InputHints')
       absurd.assign proof
       return (mv, fvs, dtrs)
 
-end Auto
+end Vampire.Preprocess.Mono
 
 namespace Vampire.Preprocess
 
 open Lean Auto
+open Vampire.Preprocess.Mono
 
 /-- The hints, as auto's `Lemma`s, with a map back from each one's derivation tag to the
 proof it came from — which is what lets a hypothesis be traced to the hint that produced
@@ -213,11 +234,11 @@ running those alongside would do the work twice. What comes back is a `False` go
 a monomorphic context. -/
 def mono (mv : MVarId) (hs : Array Expr) : MetaM Result := do
   let (invMap, hints, unfoldInfos, defeqNames) ← hintsToAutoHints hs
-  let (mv, fvs, dtrs) ← Auto.mono' `vampire mv hints unfoldInfos defeqNames
+  let (mv, fvs, dtrs) ← Mono.mono' `vampire mv hints unfoldInfos defeqNames
   let map := fvs.foldl (init := {}) fun map (fv, e) =>
     map.insert (.fvar fv) #[e]
   let map := dtrs.foldl (init := map) fun map (fv, dtr) =>
-    let usedHints := invMap.filter (fun k _ => dtr.contains k)
+    let usedHints := invMap.filter (fun k _ => Mono.DTr.contains dtr k)
     map.insert (.fvar fv) usedHints.valuesArray
   let hs ← mv.withContext (return (← getPropHyps).map Expr.fvar)
   trace[vampire.preprocess] "monomorphised goal: {mv}"

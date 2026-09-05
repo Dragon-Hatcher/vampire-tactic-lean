@@ -18,19 +18,84 @@ def vampireCompileArgs : Array String := #[
   "-I" ++ (vampireDir / "cadical" / "src").toString
 ]
 
-/-- The C++ standard library to link against: libc++ under Apple's toolchain, libstdc++
+/--
+The C++ standard library to link against: libc++ under Apple's toolchain, libstdc++
 under GCC everywhere else. Vampire is C++ and the shim calls into it, so one of the two
-has to be named explicitly — `leanc` links C. -/
-def cxxStdlib : String :=
-  if System.Platform.isOSX then "-lc++" else "-lstdc++"
+has to be named explicitly — `leanc` links C.
+
+Under GCC that means the *static* archives, by absolute path, and none of the three parts
+of that is a stylistic choice.
+
+**Why not `-lstdc++`.** `leanc` is Lean's bundled clang, whose default is
+`-stdlib=libc++`, and the clang driver rewrites `-lstdc++` into `-lc++` accordingly: the
+flag that asks for libstdc++ is silently turned into a request for the other library.
+Nothing complains, because the target here is a shared object and a shared object is
+allowed undefined symbols — so the link succeeds, leaves every libstdc++ symbol the shim
+and Vampire need unresolved, and records a `DT_NEEDED` on a `libc++.so.1` that a GCC
+system does not have. The failure surfaces when Lean loads the precompiled library, one
+step later and looking like something else:
+
+    error: Vampire/Tactic.lean:1:0: error loading library, libc++.so.1: \
+      cannot open shared object file: No such file or directory
+
+`-stdlib=libstdc++` stops the rewrite but does not help: `leanc` passes `--sysroot` into
+the Lean toolchain, so the system library directories are not searched and `-lstdc++`
+then fails outright. An absolute path is an input file rather than a library name, so it
+is neither rewritten nor searched for. Passing paths also avoids adding a system `-L`
+ahead of Lean's own, which would let a system `libgmp.a` or `libssl.a` be picked up in
+place of the toolchain's.
+
+**Why static, and not `libstdc++.so.6`.** Because `libleanshared.so` exports
+`_Unwind_RaiseException` and the rest of LLVM's unwinder, the one libc++ pairs with,
+and it is already in the global scope when Lean loads this library. A dynamic
+`libstdc++.so.6` comes in *behind* it as a dependency of this library, so libstdc++'s own
+call to `_Unwind_RaiseException` — the one `__cxa_throw` makes — binds to LLVM's unwinder
+rather than to the libgcc one it was built against. The two are then mixed inside a single
+unwind, `__gxx_personality_v0` from libstdc++ running under LLVM's phase 2, and the
+handler is never installed. What that looks like is not a linking problem:
+
+    terminate called after throwing an instance of 'Kernel::MainLoop::RefutationFoundException'
+
+That is Vampire announcing a refutation it found — `RefutationFoundException` is how it
+carries one out of the saturation loop — going uncaught past the `catch` in
+`MainLoop::run` that is sitting right there in the stack. Every goal fails this way, at
+the moment of success.
+
+Linking `libstdc++.a` with `libgcc_eh.a` puts both halves inside this library, where they
+find each other: libgcc's `_Unwind_*` are hidden-visibility symbols, so they end up
+`LOCAL` here, cannot be interposed by what Lean exports, and do not leak outward to
+interpose anything else in turn. `libgcc.a` follows them for the compiler support
+routines the other two need.
+
+The paths come from the compiler that builds the shim (`-print-file-name`, resolved at
+configuration time), so they are that compiler's own runtime rather than a guess at where
+the distribution puts it, and they match the objects: the shim and `libvampire_lib.a` are
+both built by that same `c++`.
+-/
+def cxxStdlib : Array String :=
+  if System.Platform.isOSX then #["-lc++"] else
+  run_io do
+    let locate (lib : String) : IO (Option String) := do
+      let out ← IO.Process.output { cmd := "c++", args := #["-print-file-name=" ++ lib] }
+      let path := out.stdout.trim
+      -- `-print-file-name` echoes the bare name back when it cannot place the file.
+      if out.exitCode == 0 && path != lib && (← System.FilePath.pathExists path) then
+        return some path
+      else
+        return none
+    -- Order is the link order: libstdc++ needs the unwinder, which needs libgcc.
+    match ← locate "libstdc++.a", ← locate "libgcc_eh.a", ← locate "libgcc.a" with
+    | some cxx, some eh, some gcc => return #[cxx, eh, gcc]
+    -- Fall back to the plain flag rather than failing the configuration: a toolchain
+    -- this does not understand still gets the diagnosable link rather than none at all.
+    | _, _, _ => return #["-lstdc++"]
 
 package vampire where
   -- Link the embedded prover. `vampire_lib` is a static archive of the same objects
   -- the `vampire` executable is built from; see the fork's CMakeLists.
   moreLinkArgs := #[
-    "-L" ++ vampireBuildDir.toString, "-lvampire_lib",
-    cxxStdlib
-  ]
+    "-L" ++ vampireBuildDir.toString, "-lvampire_lib"
+  ] ++ cxxStdlib
 
 require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
 
