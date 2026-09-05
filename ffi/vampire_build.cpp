@@ -21,7 +21,9 @@
 #include <string>
 #include <vector>
 
+#include "CASC/Schedules.hpp"
 #include "Lib/Environment.hpp"
+#include "Lib/Int.hpp"
 #include "Lib/List.hpp"
 #include "Lib/Reset.hpp"
 #include "Lib/Timer.hpp"
@@ -40,6 +42,7 @@
 #include "Saturation/SaturationAlgorithm.hpp"
 #include "Shell/Options.hpp"
 #include "Shell/Preprocess.hpp"
+#include "Shell/Property.hpp"
 #include "Shell/Statistics.hpp"
 
 using namespace Lib;
@@ -109,6 +112,10 @@ thread_local uint32_t t_searchMs = 0;
 /// on `ALG165-1`'s 2578 steps it is 104ms of a 182ms call. Without it the phases do not
 /// add up to the call, which is the first thing anyone checks them against.
 thread_local uint32_t t_exportMs = 0;
+/// The portfolio schedule for the last problem `lean_vampire_schedule` was asked about:
+/// one encoded strategy per entry, and the deciseconds the schedule intends it to have.
+thread_local std::vector<std::string> t_scheduleCodes;
+thread_local std::vector<uint32_t> t_scheduleTimes;
 
 /// Vampire's rendering of each unit, captured while it is built.
 ///
@@ -133,7 +140,7 @@ static void build(const std::vector<std::string> &names,
   std::vector<TermList> sorts;      // sort slot -> Vampire sort
   std::vector<unsigned> funs;       // function slot -> functor
   std::vector<unsigned> preds;      // predicate slot -> predicate number
-  DHMap<unsigned, TermList> varSorts;
+  DHMap<unsigned, TermList, FnvHash, IdentityHash> varSorts;
   std::vector<Value> stack;
   UnitList *units = nullptr;
   g_unitStrings.clear();
@@ -316,6 +323,173 @@ static void build(const std::vector<std::string> &names,
   env.setMainProblem(g_built);
 }
 
+// --- strategies ---------------------------------------------------------------------
+//
+// A strategy is one line of one of Vampire's schedules, in the encoded form
+// `Options::readFromEncodedOptions` reads:
+//
+//   dis+1010_3_tgt=full:drc=off:…:ss=axioms_0
+//   └┬┘└─┬┘ │ └───────────┬──────────────┘ │
+//    │   │  awr        options          time limit, deciseconds
+//    │  selection
+//   saturation algorithm
+//
+// The trailing limit is what makes the string parseable at all: an option value may
+// itself contain an underscore (`gtg=exists_sym`), so the *last* one is the only
+// separator that can be found reliably, which is why every schedule line carries one.
+
+/// Split an encoded strategy into the part before its options, the options themselves,
+/// and the trailing time limit. Returns false if it is not in that shape.
+///
+/// The boundaries are the ones `readFromEncodedOptions` uses: the first two underscores
+/// end the selection and the age-weight ratio, and the last one begins the time limit.
+static bool splitStrategy(const std::string &code, std::string &head,
+                          std::string &options, std::string &tail)
+{
+  size_t last = code.find_last_of('_');
+  if (last == std::string::npos) return false;
+  size_t first = code.find('_');
+  if (first == last) return false;
+  size_t second = code.find('_', first + 1);
+  if (second == std::string::npos || second >= last) return false;
+  head = code.substr(0, second + 1);
+  options = code.substr(second + 1, last - second - 1);
+  tail = code.substr(last);
+  return true;
+}
+
+/// Drop `name=value` from a strategy's options.
+///
+/// Used for the two options that budget a slice in *instructions* rather than in time.
+/// They are why the 2025 schedules end in `_0`: a slice is meant to run until it has
+/// executed so many million instructions, which needs `perf` and so exists only under
+/// Linux — `Lib/Portability.hpp` does not even register the options elsewhere. An
+/// embedded run is bounded by its caller's clock either way, so removing them makes a
+/// strategy mean the same thing on both platforms instead of being rejected on one.
+static std::string dropOption(const std::string &code, const std::string &name)
+{
+  std::string head, options, tail;
+  if (!splitStrategy(code, head, options, tail)) return code;
+  std::string kept;
+  size_t at = 0;
+  while (at <= options.size()) {
+    size_t colon = options.find(':', at);
+    std::string one = options.substr(at, colon == std::string::npos
+                                           ? std::string::npos : colon - at);
+    size_t eq = one.find('=');
+    if (!(eq != std::string::npos && one.substr(0, eq) == name)) {
+      if (!kept.empty()) kept += ':';
+      kept += one;
+    }
+    if (colon == std::string::npos) break;
+    at = colon + 1;
+  }
+  return head + kept + tail;
+}
+
+/// The deciseconds a schedule intends a strategy to have.
+///
+/// `PortfolioMode::getSliceTime`, for the one case an embedded run meets: the trailing
+/// limit of a 2025 schedule line is `0`, and the slice budgets itself with `i=` instead
+/// — mega-instructions, which this cannot enforce, so they are converted at the same
+/// nominal 200 MIPS the portfolio uses when it finds itself without `perf`. A strategy
+/// with neither is unlimited, which here means "whatever budget is left".
+static uint32_t sliceDeciseconds(const std::string &code)
+{
+  size_t last = code.find_last_of('_');
+  unsigned declared = 0;
+  if (last != std::string::npos &&
+      Int::stringToUnsignedInt(code.substr(last + 1), declared) && declared > 0)
+    return declared;
+
+  size_t at = code.find(":i=");
+  if (at == std::string::npos) at = code.find("_i=");
+  if (at == std::string::npos) return 0;
+  at += 3;
+  size_t end = code.find_first_of(":_", at);
+  unsigned instructions = 0;
+  if (!Int::stringToUnsignedInt(code.substr(at, end - at), instructions)) return 0;
+  return 1 + instructions / 200;
+}
+
+/// A strategy as this side will run it: no instruction budgets, and a time limit in
+/// the trailing position so that `readFromEncodedOptions` can find the boundary.
+static std::string sanitiseStrategy(const std::string &code)
+{
+  std::string out = dropOption(dropOption(code, "i"), "sil");
+  // A strategy written out by hand — the ones quoted in `docs/portfolio.md`, say — has
+  // no trailing limit. Give it the one that means "no limit of its own"; the caller's
+  // budget is what bounds it.
+  size_t last = out.find_last_of('_');
+  unsigned ignored;
+  if (last == std::string::npos ||
+      !Int::stringToUnsignedInt(out.substr(last + 1), ignored))
+    out += "_0";
+  return out;
+}
+
+/// Set the options a run is made under: the strategy's, if there is one, and then the
+/// ones this port needs whatever the strategy says.
+///
+/// Order matters. `proof_extra lean` is what makes preprocessing record the information
+/// the replay needs — how many clauses a formula clausified into, which literal a
+/// subsumption selected — and a strategy that set `proof` would otherwise take it away.
+/// The time limit goes last for the same reason: the strategy's own is a share of a
+/// portfolio's wall clock, and what bounds this run is the caller's budget.
+///
+/// Which is also why the strategy is checked for consistency *before* those are set and
+/// not after. `checkGlobalOptionConstraints` is a check on the whole option set, and the
+/// whole option set here is one no invocation of the executable would produce: `proof
+/// leancheck` requires `output_mode lean`, because in a binary the two go together, and
+/// this reads the refutation out of `env.statistics` rather than off a stream. Checking
+/// after would reject every strategy for a constraint about printing.
+///
+/// Throws `Exception` if the strategy is not one this build can run — `sas=z3` where
+/// Vampire was built without Z3, or an option combination the check rejects. That is a
+/// reason to try the next strategy, not to fail the goal, so the caller reports it as
+/// its own status.
+/// Whether a strategy looks for a model rather than a refutation.
+///
+/// `--schedule casc` has nine of them, `fmb…`, and they are no use here twice over: a
+/// finite model builder answers "satisfiable" or nothing, so it can never hand back a
+/// refutation to replay, and `FiniteModelBuilder::init` dereferences a null pointer when
+/// it is run inside this shim rather than the executable. Skipped rather than fixed,
+/// because there is nothing to gain by fixing it — the slice it would occupy is better
+/// spent on a strategy that could produce a proof.
+static bool buildsModels(const std::string &strategy)
+{
+  return strategy.compare(0, 3, "fmb") == 0;
+}
+
+static void configure(const std::string &strategy, uint32_t deciseconds)
+{
+  if (!strategy.empty()) {
+    if (buildsModels(strategy))
+      throw Lib::UserErrorException(std::string(
+        "it builds finite models, so it has no refutation to give"));
+    env.options->readFromEncodedOptions(sanitiseStrategy(strategy));
+    // The portfolio normalises the problem once in the parent and each worker inherits
+    // it; nothing here does, and a strategy that asked would renumber the units the
+    // replay maps back onto the user's hypotheses.
+    env.options->setNormalize(false);
+    env.options->setForcedOptionValues();
+    env.options->checkGlobalOptionConstraints();
+  }
+  env.options->set("proof", "leancheck");
+  env.options->set("proof_extra", "lean");
+  env.options->set("skolemization", "syntactic");
+  env.options->setTimeLimitInDeciseconds(deciseconds);
+  // And bound the search by it. `setTimeLimitInDeciseconds` alone does not: it is read
+  // by the limited-resource strategy, which uses it to estimate which clauses it can
+  // still reach, but nothing in the loop stops when it is up. The executable is stopped
+  // by the thread `Timer::reinitialise` spawns, which `_Exit`s the process and cannot be
+  // used here, so what bounds an embedded run is the cooperative check in
+  // `SaturationAlgorithm::runImpl` -- and until this line nothing set the limit that
+  // check reads. A run therefore ignored its timeout: `BOO028-1` asked for two seconds
+  // and searched for thirty.
+  Saturation::SaturationAlgorithm::s_embeddedSoftTimeLimit = deciseconds;
+}
+
 } // namespace vampire_ffi
 
 using namespace vampire_ffi;
@@ -328,15 +502,20 @@ extern "C" {
  * `names` indexes symbol names and `code` is the instruction stream from
  * `Vampire/Translate/Build.lean`. Returns 0 if a refutation was found and exported,
  * 1 if the search found none, 2 if a C++ exception escaped, 3 if the instruction
- * stream was malformed, 4 if the refutation could not be exported. The reason is in
- * `lean_vampire_message`.
+ * stream was malformed, 4 if the refutation could not be exported, 5 if `strategy` is
+ * not a strategy this build can run. The reason is in `lean_vampire_message`.
+ *
+ * `strategy` is one encoded line of a Vampire schedule, or empty for the default
+ * strategy. It is a *whole* run's worth of configuration and not a portfolio slice:
+ * the environment is torn down and rebuilt on the way in, so one call is one strategy
+ * and a portfolio is a sequence of calls, made by the caller.
  *
  * One call, not three, because the entry lock makes a call atomic but not a sequence of
  * them: with Lean elaborating declarations in parallel, another thread's build could
  * land between this thread's build and its solve, and Vampire's environment is shared.
  */
 uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
-                          uint32_t deciseconds, lean_obj_arg)
+                          uint32_t deciseconds, b_lean_obj_arg strategy, lean_obj_arg)
 {
   vampire_ffi::EntryGuard guard;
   t_proofCode.clear();
@@ -369,23 +548,18 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
     t_buildMs = static_cast<uint32_t>(Lib::Timer::elapsedMilliseconds());
     t_unitStrings = g_unitStrings;
 
-    // The options the Lean code generator is written against. `proof_extra lean` is
-    // what makes preprocessing record the information the replay needs — how many
-    // clauses a formula clausified into, which literal a subsumption selected — and
-    // without it those come back empty rather than wrong, which is worse.
-    env.options->set("proof", "leancheck");
-    env.options->set("proof_extra", "lean");
-    env.options->set("skolemization", "syntactic");
-    env.options->setTimeLimitInDeciseconds(deciseconds);
-    // And bound the search by it. `setTimeLimitInDeciseconds` alone does not: it is
-    // read by the limited-resource strategy, which uses it to estimate which clauses it
-    // can still reach, but nothing in the loop stops when it is up. The executable is
-    // stopped by the thread `Timer::reinitialise` spawns, which `_Exit`s the process
-    // and cannot be used here, so what bounds an embedded run is the cooperative check
-    // in `SaturationAlgorithm::runImpl` -- and until this line nothing set the limit
-    // that check reads. A run therefore ignored its timeout: `BOO028-1` asked for two
-    // seconds and searched for thirty.
-    Saturation::SaturationAlgorithm::s_embeddedSoftTimeLimit = deciseconds;
+    // The strategy's options, then the ones the Lean code generator is written against.
+    // A strategy this build cannot run is the caller's to skip rather than a failure of
+    // the goal, so it comes back as its own status.
+    try {
+      configure(std::string(lean_string_cstr(strategy)), deciseconds);
+    } catch (Exception &e) {
+      // Named, because a broken option constraint reports itself as a bare sentence
+      // and one line of a schedule looks much like another in a trace.
+      t_message = "this build cannot run '" + std::string(lean_string_cstr(strategy)) +
+                  "':" + (e.msg().empty() ? " no reason given" : e.msg());
+      return 5;
+    }
 
     // `ProvingHelper::runVampire`, in two halves, so the caller can be told which one
     // its budget went to. The halves are not equivalent: the soft limit above is
@@ -449,6 +623,92 @@ uint32_t lean_vampire_run(b_lean_obj_arg names, b_lean_obj_arg code,
     t_message = "unknown C++ exception";
     return 2;
   }
+}
+
+/**
+ * Vampire's own portfolio schedule for this problem.
+ *
+ * The schedule is a function of the problem — `Schedules::getCasc2025Schedule` branches
+ * on its `Property`, so a unit-equality problem gets the UEQ schedule and one with
+ * arithmetic in it the ALASCA one — which is why this takes the problem and not just a
+ * name. It builds it and throws it away again; the caller runs the strategies through
+ * `lean_vampire_run`, one whole call each.
+ *
+ * What it does *not* do is the rest of `PortfolioMode::searchForProof`. Normalisation
+ * would renumber the units the replay maps back onto the user's hypotheses, and
+ * `TheoryFinder` looks for theory axioms in a problem that by construction has none.
+ * The `champions` half of the schedule is dropped for the reason the portfolio itself
+ * drops it below two cores: they are long runs meant to occupy a worker of their own
+ * while the quick schedule covers the same ground in the others, and there is one
+ * worker here.
+ *
+ * Returns 0 on success, 2 if a C++ exception escaped, 3 if the instruction stream was
+ * malformed. The strategies are read back with `lean_vampire_schedule_codes` and their
+ * intended shares of the budget with `lean_vampire_schedule_times`.
+ */
+uint32_t lean_vampire_schedule(b_lean_obj_arg names, b_lean_obj_arg code, lean_obj_arg)
+{
+  vampire_ffi::EntryGuard guard;
+  t_scheduleCodes.clear();
+  t_scheduleTimes.clear();
+  t_message.clear();
+  try {
+    std::vector<std::string> ns;
+    for (size_t i = 0; i < lean_array_size(names); i++)
+      ns.push_back(lean_string_cstr(lean_array_get_core(names, i)));
+    std::vector<uint32_t> cs;
+    for (size_t i = 0; i < lean_array_size(code); i++)
+      cs.push_back(lean_unbox_uint32(lean_array_get_core(code, i)));
+
+    delete g_built;
+    g_built = nullptr;
+
+    Lib::resetGlobalState();
+    Lib::Timer::startClock();
+    build(ns, cs);
+
+    CASC::Schedule quick, champions;
+    CASC::Schedules::getCasc2025Schedule(*g_built->getProperty(), quick, champions);
+    // `Stack` is a stack; the schedule is meant to be run from the bottom up.
+    CASC::Schedule::BottomFirstIterator it(quick);
+    while (it.hasNext()) {
+      std::string one = it.next();
+      // Dropped here as well as refused in `configure`, so that a model builder does
+      // not occupy a slice of a budget that is being spent looking for a proof.
+      if (buildsModels(one)) continue;
+      t_scheduleTimes.push_back(sliceDeciseconds(one));
+      t_scheduleCodes.push_back(sanitiseStrategy(one));
+    }
+    return 0;
+  } catch (BuildError &e) {
+    t_message = e.what;
+    return 3;
+  } catch (Exception &e) {
+    t_message = e.msg();
+    return 2;
+  } catch (...) {
+    t_message = "unknown C++ exception";
+    return 2;
+  }
+}
+
+/** The strategies of the schedule last asked for. */
+lean_obj_res lean_vampire_schedule_codes(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  lean_object *a = lean_alloc_array(t_scheduleCodes.size(), t_scheduleCodes.size());
+  for (size_t i = 0; i < t_scheduleCodes.size(); i++)
+    lean_array_set_core(a, i, lean_mk_string(t_scheduleCodes[i].c_str()));
+  return a;
+}
+
+/** What the schedule intends each of them to get, in deciseconds; 0 for "no limit of
+ * its own", which the caller reads as whatever is left of the budget. */
+lean_obj_res lean_vampire_schedule_times(lean_obj_arg) {
+  vampire_ffi::EntryGuard guard;
+  lean_object *a = lean_alloc_array(t_scheduleTimes.size(), t_scheduleTimes.size());
+  for (size_t i = 0; i < t_scheduleTimes.size(); i++)
+    lean_array_set_core(a, i, lean_box_uint32(t_scheduleTimes[i]));
+  return a;
 }
 
 /** Anything the prover wrote to its own streams, which the shim captured. */

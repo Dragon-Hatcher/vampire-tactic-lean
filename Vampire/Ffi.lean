@@ -43,6 +43,14 @@ instance : ToString Status where
 @[extern "lean_vampire_init"]
 private opaque initRaw : BaseIO UInt32
 
+@[extern "lean_vampire_archive_id"]
+private opaque archiveIdRaw : BaseIO String
+
+/-- Which build of Vampire the shim was compiled and linked against, as a hash of the
+archive. The answer to "is the tactic running the fix I just built?", which is not
+otherwise visible: see `archiveIdFlag` in `lakefile.lean` for why it exists at all. -/
+def archiveId : BaseIO String := archiveIdRaw
+
 @[extern "lean_vampire_signature_functions"]
 private opaque signatureFunctionsRaw : BaseIO UInt32
 
@@ -160,10 +168,19 @@ inductive RunResult where
   | notRefuted
   /-- Something went wrong; the message says what. -/
   | failed (what : String)
+  /-- The strategy is not one this build of Vampire can run — a hard constraint between
+  its options, or one that needs a feature this build was compiled without. A reason to
+  try the next strategy rather than to give up on the goal. -/
+  | badStrategy (what : String)
+  /-- A refutation was found and could not be read back out: it holds a step the
+  exporter has nothing to say about. A fact about *this* refutation, so like a replay
+  failure it is a reason to look for another one. -/
+  | notExported (what : String)
   deriving Repr, DecidableEq, Inhabited
 
 @[extern "lean_vampire_run"]
-private opaque runRaw : (@& Array String) → (@& Array UInt32) → UInt32 → BaseIO UInt32
+private opaque runRaw : (@& Array String) → (@& Array UInt32) → UInt32 → (@& String) →
+  BaseIO UInt32
 
 @[extern "lean_vampire_message"]
 private opaque messageRaw : BaseIO String
@@ -209,15 +226,63 @@ of Vampire's structures.
 
 `deciseconds` bounds the search with a soft time limit, which throws out of the loop
 rather than killing the process.
+
+`strategy` is one encoded line of a Vampire schedule — `Options::readFromEncodedOptions`
+reads it — or the empty string for Vampire's default strategy. A call is a whole run
+under one strategy, because the environment is rebuilt on the way in; a portfolio is
+therefore a sequence of calls and the schedule that orders them lives on this side, in
+`Vampire/Tactic.lean`. What the strategy may *not* change is the proof output the replay
+is written against; those options are set after it.
 -/
-def run (names : Array String) (code : Array UInt32) (deciseconds : UInt32 := 100) :
-    BaseIO RunResult := do
-  match ← runRaw names code deciseconds with
+def run (names : Array String) (code : Array UInt32) (deciseconds : UInt32 := 100)
+    (strategy : String := "") : BaseIO RunResult := do
+  match ← runRaw names code deciseconds strategy with
   | 0 => return .refuted
   | 1 => return .notRefuted
   | 3 => return .failed s!"the problem could not be built: {← messageRaw}"
-  | 4 => return .failed s!"the proof could not be exported: {← messageRaw}"
+  | 4 => return .notExported (← messageRaw)
+  | 5 => return .badStrategy (← messageRaw)
   | _ => return .failed (← messageRaw)
+
+@[extern "lean_vampire_schedule"]
+private opaque scheduleRaw : (@& Array String) → (@& Array UInt32) → BaseIO UInt32
+
+@[extern "lean_vampire_schedule_codes"]
+private opaque scheduleCodesRaw : BaseIO (Array String)
+
+@[extern "lean_vampire_schedule_times"]
+private opaque scheduleTimesRaw : BaseIO (Array UInt32)
+
+/-- One strategy of a portfolio schedule. -/
+structure Slice where
+  /-- The strategy, encoded as Vampire's own schedules write it. -/
+  strategy : String
+  /-- What the schedule intends it to have, in deciseconds; `0` for a strategy with no
+  limit of its own, which means whatever is left of the budget. -/
+  deciseconds : UInt32
+  deriving Repr, Inhabited
+
+/--
+Vampire's own portfolio schedule for this problem.
+
+The schedule is a function of the problem and not just of a name — `--schedule casc`
+branches on the problem's `Property`, so a unit-equality problem gets a different set of
+strategies from a general first-order one — so this takes the compiled problem, builds
+it, and reads the schedule off it.
+
+Only the `quick` half: the `champions` are long runs meant to occupy a worker of their
+own, and there is one worker here. This is `--mode portfolio --schedule casc --cores 1`,
+with the loop over slices on the Lean side so that it can escalate on a *replay* failure
+as well as on a search failure.
+-/
+def schedule (names : Array String) (code : Array UInt32) :
+    BaseIO (Except String (Array Slice)) := do
+  match ← scheduleRaw names code with
+  | 0 =>
+    let codes ← scheduleCodesRaw
+    let times ← scheduleTimesRaw
+    return .ok (Array.zipWith (fun s ds => { strategy := s, deciseconds := ds }) codes times)
+  | _ => return .error (← messageRaw)
 
 @[extern "lean_vampire_prover_output"]
 private opaque proverOutputRaw : BaseIO String
