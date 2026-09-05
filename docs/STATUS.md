@@ -591,6 +591,137 @@ fails; the loop then escalates, and if the wider search finds nothing the user w
 which is a different problem with a different answer. `searchWith` keeps the first such
 failure and appends it.
 
+### Clausifying is not rewriting, and a split name is its component
+
+Four more changes, and a fifth thing learned about measuring them.
+
+**`cnfify` was the largest thing left in a replay.** `LeanChecker::clausify` puts a parent
+into CNF and destructures the conjunction, and this port followed it through VampLean's
+`cnfify` — `simp only [cnf1, cnf2, and_assoc]` and then
+`simp only [cnf_prenex1, cnf_prenex2, cnf_prenex3]`. Over `bench-tptp/` that was 10.4s
+across 843 parents, more than any rule's scripts. A `sample` of one such call is
+`Lean.Meta.Simp.simpLoop` and `simpAppUsingCongr` all the way down: not deciding *what* to
+rewrite, but the congruence proof simp builds from the root of a several-hundred-atom
+formula to each of its several hundred sites.
+
+CNF is three rules and no search, so the clauses of a formula are determined by its shape
+and so are their proofs. `Vampire/Cnf.lean` walks it once and returns each clause with a
+*function* from the formula to that clause — a function and not a proof, because
+distributing over a disjunction is a case analysis and each case needs the whole of its own
+side. Measured over the problems that replay the same proof either way, 5.6s to 1.5s.
+
+Two details were load-bearing. `cnf_prenex1` is `(∀ x, a x ∧ b) ↔ (∀ x, a x) ∧ b`, whose
+`b` has *no binder*: a clause Vampire recorded binds exactly its own variables, so a leaf
+carrying the parent's whole prefix has a different `Bridge.sig` and is not found. Dropping
+a binder means applying the parent at something, which is where that lemma's `[Nonempty α]`
+comes in and where `inhabitant` is asked. And the witnesses have to go through the clause's
+*function* as well as through the application — `f`'s implicit arguments are the
+subformulas it distributed over, and those mention binders the clause dropped, so
+abstracting only the kept ones leaves the rest free. That surfaces as "declaration has free
+variables" a whole refutation later, against the user's theorem.
+
+`andLeaves` went with it. The caller wants the clauses; the conjunction was only ever the
+shape simp had to leave them in, and walking back down it for an `And.left`/`And.right`
+chain per leaf was work to undo work. `clauseFrom`'s fallback does still want a conjunction
+to split, so `Cnf.conjoin` builds one — one node per clause, over types that already exist.
+Forgetting that was the one regression this round produced: `MED007+1` and `SYN036+1` went
+to `sorryAx`, because `vampire_finish_clausify` was handed a formula that was not a
+conjunction at all.
+
+**A split name is its component, definitionally.** `LeanChecker::avatarSplitClause` writes
+`try rw [hk]` per split definition, because in a generated file `sA9` is a section variable
+and `h9 : sA9 ↔ C` the only thing relating the two. Here `replayFrom` binds the split with
+`withLetDecl`, so `sA9` *is* `C`: the substitution is type-preserving on its own and wants
+no motive, no congruence proof and no equation. `Vampire/Avatar.lean` does all of them in
+one `Expr.replace`, guarded by one `isDefEq` on the pair being substituted — a `let`
+unfolding, rather than a decision about the formula it sits in. Those `rw`s were 1.68s over
+2894 calls on the three `ALG` problems.
+
+**An implication chain is a clause, by one application per arrow.** A clause holding under
+splits is stated `sA₁ → … → sAₙ → C`, and `imp_iff_not_or` is how the reference turns that
+into the disjunction the next line wants. The shape is known in advance, so `unimply` walks
+the arrows and composes `impOrMap` instead of traversing the formula — and does nothing at
+all where there are no arrows, which is the common case and was 0.83s of simp finding it
+out. `¬A` *is* `A → False`, which is what makes the last arrow a literal already and
+`not_not` an `ofNotNot` on it rather than a rewrite.
+
+With the chain read as a clause, `avatar contradiction clause` is its parent and its
+conclusion over the same literals in another order, which is what `Vampire/Clause.lean` was
+written for. 0.25s to 0.12s over the paired problems, and the reference's
+`simp only [imp_false, imp_iff_not_or, not_not]` was 0.89s of it on the `ALG` three against
+`exact h` at 0.03s.
+
+**A disjunction under a binder the conclusion has hoisted out.** `transport`'s own
+`hty.isForall` rule instantiates a quantified premise, but it is reached from `inject`,
+which is asking for the whole `∀` to go into *one* disjunct of the conclusion — and after
+clausification the `∀`'s body spans several of them. `Q_HAL004p1` has one such clause and it
+was 1.75s of its 1.8s replay, spent in the `ac_nf0` and `assumption` the reference falls
+back to. With the rule it replays in 74ms.
+
+This one was paid for twice. Tried first, before `inject`, it cost `flattening` 1.34s over
+the benchmark: the reassociating rules carry a quantified disjunct across unchanged and
+`inject` settles those by lookup. The guard is the signature the disjuncts are already
+indexed by, so it is a scan of hashes and not a second search. And when `elimOr` was later
+restructured — into `orCases` applications, so that the chain is not the quadratic
+abstraction `Sat.lean` warns about — the rule was left behind in the entry point rather
+than the recursion, which silently gave `HAL004`'s 1.75s back until the next measurement
+caught it.
+
+**And a classification that cannot change is not recomputed.** `restrictedContext` asked
+`isProp` and `isClass?` — both `whnf` calls — of the whole local context once per step,
+which over 32000 steps is 0.09ms each and 28% of a cheap one. A declaration is immutable,
+and the only ones a replay adds are the `let`s for definitions and skolems, which `isLet`
+settles without asking; so `classifyDroppable` runs once and `State` carries it.
+
+**Two things tried and not kept.** The bridge before `symm_match` in `rectify`: it closes
+the one 785ms step in `BIO004+1`, and over the paired problems it cost 0.23s more than it
+saved, because nearly every rectification is alpha-equivalent — which makes the two
+formulas the *same* `Expr` and `exact h` free — so the steps that reach past it are too few
+to pay for an attempt on all of them. And skipping `whnfR` on `conjLeaves`' structural
+path, which is provably equivalent and provably less work and made no measurable
+difference to anything.
+
+### Measuring this was harder than doing it
+
+Three confounds, each of which gave a wrong answer first. `bench-tptp/paired.py` is the
+instrument that came out of it.
+
+**The search is nondeterministic, so a whole-set total is not a measurement of the
+replay.** Vampire's limit is wall-clock and its default saturation algorithm reads the
+limit as a search parameter, so which refutation comes back varies between runs of
+identical code — and a different refutation is a different replay. Over these 199 problems
+the prover's own time ranged 26.7s to 50.8s across six runs, ±24s on a ~130s total. Worse,
+it changes the *step mix*, so a per-rule bucket can double for reasons that have nothing to
+do with the code: `flattening` read as +1.34s once because one problem's new proof had
+flattening steps its old one did not. That one was real, and it was found by looking at
+which problems owned the bucket; the same reading has been wrong the other way.
+
+`paired.py` compares two logs only on the problems where both runs replayed the same
+number of steps, which is the cheapest witness that the same proof came back.
+
+**But pairing selects a subset, and the subset is not the benchmark.** The problems that
+fail to pair are disproportionately the expensive ones, because a hard search is both slow
+and nondeterministic. Pairing a run against its own repeat pairs 188 problems and 47s of
+replay; pairing it against a different build pairs 162 and 26s. A percentage over the
+second is not the same statistic as a percentage over the first, and reading it as though
+it were is how a -11% became a -29%. `paired.py` now prints what share of each run's
+replay the paired set covers, so the figure cannot be quoted without it.
+
+**And a long sequence of full-load runs drifts.** Late in a session of eight consecutive
+two-minute runs, `Q_PRD001p1` replayed the *same 1384-step proof* in 3646ms that it had
+replayed in 1812ms earlier — twice as slow, same code, same proof. On a 16GB machine
+holding 5GB of accumulated environments that is memory pressure, and it is charged to
+whichever build happens to run last. So before and after are run **interleaved**, B A B A B
+A, and compared pairwise. `bench-tptp/README.md` already said that a timing taken beside
+other work is a measurement of the machine; this is the same lesson where the other work is
+your own earlier measurements.
+
+One thing that fell out of the interleaving and is worth recording on its own: the *before*
+replay varies far more than the after. Three runs of the old code gave 52.8s, 78.0s and
+62.4s; three of the new gave 43.3s, 45.8s and 48.4s. Time spent in `simp` and `grind`
+allocates, and allocation is what makes a run sensitive to the state of the machine, so
+replacing a rewrite with a construction buys predictability as well as speed.
+
 ### Where that leaves it
 
 Two measurements, because the obvious one is mostly not about the tactic.

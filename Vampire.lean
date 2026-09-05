@@ -1,4 +1,6 @@
+import Vampire.Avatar
 import Vampire.Clause
+import Vampire.Cnf
 import Vampire.Ffi
 import Vampire.Prenex
 import Vampire.Preprocess

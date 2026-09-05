@@ -1,7 +1,9 @@
 import Lean
 import VampLean
+import Vampire.Avatar
 import Vampire.Bridge
 import Vampire.Clause
+import Vampire.Cnf
 import Vampire.Prenex
 import Vampire.Proof
 import Vampire.Sat
@@ -351,7 +353,8 @@ gives `grind` the whole expansion to case-split. Stripping the value here restor
 The proof term still mentions the variable, and is still type-correct where the value is
 known, because a proof that works for an opaque `x` works for any particular one.
 -/
-def restrictedContext (seeds : Array Expr) (opaqueLets : Bool) :
+def restrictedContext (seeds : Array Expr) (opaqueLets : Bool)
+    (droppable : Option (Std.HashSet FVarId) := none) :
     MetaM (LocalContext × LocalInstances) := do
   let lctx ← getLCtx
   -- `Expr.collectFVars`, not a hand-rolled traversal. An `Expr` is a DAG with heavy
@@ -398,17 +401,43 @@ def restrictedContext (seeds : Array Expr) (opaqueLets : Bool) :
     -- context", which says nothing about instances at all. Monomorphisation is what
     -- makes it bite: it asserts non-emptiness as a local `Nonempty` hypothesis, where a
     -- hand-written goal more often carries `Inhabited`, which is not a `Prop`.
-    if d.isLet || ((← isProp d.type) && (← isClass? d.type).isNone) then
+    -- `isProp` and `isClass?` are `whnf` calls, and a replay asks this of the whole
+    -- context once per step: 0.09ms a step over the benchmark's 32000 of them, which is
+    -- 28% of a cheap one. The verdict cannot change — a declaration is immutable, and
+    -- the only ones a replay adds are the `let`s for definitions and skolems, which
+    -- `isLet` settles without asking. So it is computed once, by `classify`, and what
+    -- arrives here is a lookup.
+    let drop ←
+      match droppable with
+      | some s => pure (d.isLet || s.contains d.fvarId)
+      | none => pure (d.isLet || ((← isProp d.type) && (← isClass? d.type).isNone))
+    if drop then
       result := result.erase d.fvarId
   return (result, ← getLocalInstances)
+
+/--
+Which of the context's declarations a step's goal does not want, once and for all.
+
+The `let`s are not in it: a replay adds one per definition and per skolem symbol as it
+goes, and `d.isLet` says so without a `whnf`. What this is for is the rest — the
+hypotheses of the negated goal, which are `Prop`s and not classes, and which
+`restrictedContext` would otherwise re-decide on every step.
+-/
+def classifyDroppable : MetaM (Std.HashSet FVarId) := do
+  let mut out : Std.HashSet FVarId := {}
+  for d in ← getLCtx do
+    if d.isLet then continue
+    if (← isProp d.type) && (← isClass? d.type).isNone then out := out.insert d.fvarId
+  return out
 
 /-- Prove `type` by running `tacs`. This is what `theorem … := by …` does in the
 generated file; here the result is a term rather than a declaration. -/
 def proveBy (type : Expr) (tacs : Array (TSyntax `tactic)) (what : MessageData)
-    (restrict : Bool := false) (opaqueLets : Bool := true) : TermElabM Expr := do
+    (restrict : Bool := false) (opaqueLets : Bool := true)
+    (droppable : Option (Std.HashSet FVarId) := none) : TermElabM Expr := do
   let mv ←
     if restrict then
-      let (lctx, insts) ← restrictedContext #[type] opaqueLets
+      let (lctx, insts) ← restrictedContext #[type] opaqueLets (droppable := droppable)
       mkFreshExprMVarAt lctx insts type .syntheticOpaque
     else
       mkFreshExprSyntheticOpaqueMVar type
@@ -891,6 +920,13 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     let holes ← prefixVars.mapM (fun _ => do return (← `(_) : Term))
     let steps := (← intros binders).push (← `(tactic| exact $h $holes*))
     let byPermutation ← `(tacticSeq| $steps*)
+    -- The bridge was tried here, before `symm_match`, because a rectification that
+    -- permutes the binder prefix is `transport`'s own forall rule and one that reorients
+    -- an equation is its `Eq.symm` rule. Measured, it is not worth it: over the
+    -- benchmark's paired problems it took 0.23s more than it saved. Nearly every
+    -- rectification is alpha-equivalent, which makes the two formulas the *same* `Expr`
+    -- and `exact h` free, so the steps that reach past it are too few to pay for an
+    -- attempt on all of them.
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| try simp only [forall_const, exists_const, -iff_self, -eq_self] at $h:ident),
              ← `(tactic| first
@@ -926,9 +962,17 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
   | .unusedPredDefRemoval =>
     return #[← `(tactic| intro $h:ident), ← `(tactic| simp only [$h:ident, imp_self, implies_true])]
   | .avatarContradiction =>
+    -- The parent is the same literals as the conclusion, in the order the SAT solver
+    -- holds them, so this is a one-premise resolution — and the reference's
+    -- `simp only [imp_false, imp_iff_not_or, not_not]` is the arrow chain being read as
+    -- a clause, which `Vampire/Avatar.lean` does by application. That simp was 0.89s
+    -- over 1011 steps on the three `ALG` problems, against `exact h` at 0.03s.
     return #[← `(tactic| intro $h:ident),
-             ← `(tactic| try simp only [imp_false, imp_iff_not_or, not_not] at $h:ident),
-             ← `(tactic| exact $h)]
+             ← `(tactic| first
+                   | exact $h
+                   | vampire_contradiction $h
+                   | (try simp only [imp_false, imp_iff_not_or, not_not] at $h:ident
+                      exact $h))]
   | .definitionUnfolding =>
     -- intros; instantiate the first premise; rewrite once with each defining equation,
     -- in the direction the recorded left-hand side says; grind.
@@ -979,13 +1023,32 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     let mut tacs ← intros ((Array.range premises.size).map hyp)
     -- The premises whose split the parent did not already hold under are rewritten
     -- with; the rest against. `LeanChecker` emits the againsts first.
+    let mut fwd : Array Ident := #[]
+    let mut bwd : Array Ident := #[]
     for k in [1:premises.size] do
-      unless (s.rewrites[k - 1]?).getD true do
-        tacs := tacs.push (← `(tactic| try rw [← $(hyp k):ident]))
-    for k in [1:premises.size] do
-      if (s.rewrites[k - 1]?).getD true then
-        tacs := tacs.push (← `(tactic| try rw [$(hyp k):ident]))
-    tacs := tacs.push (← `(tactic| try simp only [imp_iff_not_or] at $h0:ident))
+      if (s.rewrites[k - 1]?).getD true then fwd := fwd.push (hyp k)
+      else bwd := bwd.push (hyp k)
+    -- A split name is a `let` for its component, so both directions are substitutions
+    -- of one term for a definitionally equal one and neither needs a rewrite. All of
+    -- them in one pass, too: `rw` was called once per definition and each call was a
+    -- traversal of the whole conclusion. Measured on the three `ALG` problems, 2894
+    -- `try rw`s at 1.68s. `Vampire/Avatar.lean` says why the substitution is sound.
+    --
+    -- Reading the parent's implication chain as a clause is the same lesson: the shape
+    -- `simp only [imp_iff_not_or]` is looking for is the shape a clause under splits
+    -- always has, so `vampire_unimply` walks the arrows instead of the formula, and
+    -- does nothing at all where there are none — which is the common case, and was
+    -- 0.83s of simp finding it out.
+    let rewrites ← `(tactic| vampire_split_defs [$fwd,*] [$bwd,*])
+    let mut reference : Array (TSyntax `tactic) := #[]
+    for h in bwd do reference := reference.push (← `(tactic| try rw [← $h:ident]))
+    for h in fwd do reference := reference.push (← `(tactic| try rw [$h:ident]))
+    tacs := tacs.push (← `(tactic| first
+      | $rewrites:tactic
+      | $(← `(tacticSeq| $reference*))))
+    tacs := tacs.push (← `(tactic| first
+      | vampire_unimply $h0:ident
+      | try simp only [imp_iff_not_or] at $h0:ident))
     let introIds := s.introSplits.map (fun (p : Nat × Nat) => splitVar p.1 p.2)
     let args := s.parentArgs.map (fun (p : Nat × Nat) => (⟨splitVar p.1 p.2⟩ : Term))
     -- The goal-side prenexing is where an AVATAR replay spends its time. The `rw`s above
@@ -1212,7 +1275,8 @@ The lemma for one derived step: `premise₁ → … → premiseₙ → conclusio
 script. This is `theorem inf_sN` in the generated file.
 -/
 def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
-    (opaqueLets : Bool := true) : TermElabM Expr := do
+    (opaqueLets : Bool := true) (droppable : Option (Std.HashSet FVarId) := none) :
+    TermElabM Expr := do
   let tTy ← IO.monoMsNow
   let ty ←
     try
@@ -1228,6 +1292,7 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
   let tacs ← script i syms s premises
   let tRun ← IO.monoMsNow
   let e ← proveBy ty tacs m!"step {s.number} ({s.ruleName})" (restrict := true) opaqueLets
+    droppable
   let tEnd ← IO.monoMsNow
   trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
     script {tRun - tTac}ms, run {tEnd - tRun}ms"
@@ -1426,6 +1491,9 @@ structure State where
   definedFns : Std.HashMap Nat Expr := {}
   /-- The symbols the proof has bound so far, to be abstracted at the end. -/
   bound : Array Expr := #[]
+  /-- Which of the goal's own declarations a step's context does not want. Fixed for the
+  whole replay; see `classifyDroppable`. -/
+  droppable : Option (Std.HashSet FVarId) := none
   /-- The CNF of each parent that has been clausified, by the parent's unit number. A
   parent that clausifies into several clauses is one transformation shared by all of
   them; see the `.clausify` case below. -/
@@ -1490,6 +1558,7 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
         -- The step that introduces a definition is the one place its value is needed:
         -- it proves the defining equation.
         let e ← stepLemma st.interp r.symbols s #[] (opaqueLets := false)
+          (droppable := st.droppable)
         replayFrom r { st with
           proofs := st.proofs.insert s.number e
           bound := st.bound.push x
@@ -1547,7 +1616,7 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
       let tPick ← IO.monoMsNow
       let want ← stepType st.interp r.symbols s
       let reorder ← clausifyReorder s
-      let mut e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := !cnf.full)
+      let mut e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := !cnf.full) st.droppable
       if e?.isNone then
         -- The cheap prenexing did not reach this clause. Prenex the parent the way
         -- `prenexify` does, for this parent and every later clause of it.
@@ -1556,7 +1625,7 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
         trace[vampire.timing] "clausified parent {parentNum} (full prenex) in \
           {(← IO.monoMsNow) - tFull}ms"
         st := { st with clausified := st.clausified.insert parentNum cnf }
-        e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := false)
+        e? ← clauseFrom cnf want reorder s.number parentNum (mayFail := false) st.droppable
       trace[vampire.timing] "step {s.number} cnf transformation (shared): run \
         {(← IO.monoMsNow) - tPick}ms"
       let some e := e?
@@ -1610,16 +1679,43 @@ where
   reference does.
   -/
   clausifyParent (parent : Expr) (num : Nat) (full : Bool) : TermElabM Clausified := do
+    -- The prenexing is a rewrite and stays one; the CNF is not, and `Vampire/Cnf.lean`
+    -- builds it. The two used to be one tactic block, which `transformOnce` runs once
+    -- for the type and the proof together — splitting them costs a second run of that
+    -- and saves the whole of `cnfify`, which was 10.4s over the benchmark's 843 parents
+    -- against `Cnf.clauses`, which walks the formula once.
     let (statement, proof) ← Tac.transformOnce parent
       (fun v => do
         let prenex ←
           if full then `(tactic| prenexify at $v:ident) else Tac.orPrenex v
-        return #[prenex, ← `(tactic| cnfify at $v:ident)])
-      m!"clausifying the parent of step {num}"
-    let clauses ← andLeaves proof statement
-    let index := clauses.foldl (init := ({} : Std.HashMap Expr Expr))
-      fun m (ty, pf) => if m.contains ty then m else m.insert ty pf
-    return { statement, proof, index, clauses, sigs := clauses.map (Bridge.sig ·.1), full }
+        return #[prenex])
+      m!"prenexing the parent of step {num}"
+    match ← Cnf.clauses inhabitant statement with
+    | some producers =>
+      -- Each producer is a function from the prenexed parent to one clause of its CNF.
+      -- Nothing is projected out of anything: `andLeaves`' `And.left`/`And.right` chains
+      -- were the shape simp had to leave the clauses in, not a thing the caller wanted.
+      let clauses := producers.map (fun (ty, f) => (ty, mkApp f proof))
+      let index := clauses.foldl (init := ({} : Std.HashMap Expr Expr))
+        fun m (ty, pf) => if m.contains ty then m else m.insert ty pf
+      -- `statement` and `proof` are the CNF, because `clauseFrom`'s fallback states its
+      -- lemma over them and splits it. It is the leaves that the fast path uses, and
+      -- they are the producers rather than projections out of this.
+      let some (statement, proof) := Cnf.conjoin clauses
+        | throwError "vampire: the parent of step {num} clausified into nothing"
+      return { statement, proof, index, clauses, sigs := clauses.map (Bridge.sig ·.1),
+               full }
+    | none =>
+      -- A CNF wider than `Cnf.maxClauses`. `cnfify` as before, over the formula the
+      -- prenexing already produced.
+      let (statement, proof) ← Tac.transformOnce proof
+        (fun v => do return #[← `(tactic| cnfify at $v:ident)])
+        m!"clausifying the parent of step {num}"
+      let clauses ← andLeaves proof statement
+      let index := clauses.foldl (init := ({} : Std.HashMap Expr Expr))
+        fun m (ty, pf) => if m.contains ty then m else m.insert ty pf
+      return { statement, proof, index, clauses, sigs := clauses.map (Bridge.sig ·.1),
+               full }
 
   /--
   The proof of one clause, out of a clausified parent.
@@ -1629,7 +1725,8 @@ where
   ask again.
   -/
   clauseFrom (cnf : Clausified) (want : Expr) (reorder : Array (TSyntax `tactic))
-      (num parentNum : Nat) (mayFail : Bool) : TermElabM (Option Expr) := do
+      (num parentNum : Nat) (mayFail : Bool)
+      (droppable : Option (Std.HashSet FVarId)) : TermElabM (Option Expr) := do
     -- Usually the clause is one of the leaves as the split left it, and then there is
     -- nothing to prove: the projection out of the CNF *is* the proof. It is ascribed so
     -- that a later step reading this one with `inferType` gets the statement Vampire
@@ -1648,7 +1745,7 @@ where
       let lemma ← proveBy (← mkArrow cnf.statement want)
         (#[← `(tactic| intro $hc:ident)] ++ reorder ++
           #[← `(tactic| vampire_finish_clausify)])
-        m!"step {num} (cnf transformation)" (restrict := true)
+        m!"step {num} (cnf transformation)" (restrict := true) (droppable := droppable)
       applyChecked lemma #[cnf.proof] m!"step {num} (cnf transformation)"
         (fun _ => m!"{parentNum}")
     if mayFail then
@@ -1690,15 +1787,15 @@ where
         -- Folding a definition in is exactly a step of definitional unfolding, so it
         -- is the one derived rule that needs to see through the `let`.
         let opaqueLets := s.handler != .definitionFoldingPred
-        let lemma ← stepLemma st.interp r.symbols s premises opaqueLets
+        let lemma ← stepLemma st.interp r.symbols s premises opaqueLets st.droppable
         applyChecked lemma args m!"step {s.number} ({s.ruleName})"
           (fun k => m!"{(argOf[k]?).map toString |>.getD s!"at position {k}"}")
     replayFrom r { st with
       proofs := st.proofs.insert s.number e, last := some e } (k + 1)
 
 /-- Replay a refutation as a Lean proof of `False`. -/
-def replay (i : Interp) (r : Refutation) : TermElabM Expr :=
-  replayFrom r { interp := i } 0
+def replay (i : Interp) (r : Refutation) : TermElabM Expr := do
+  replayFrom r { interp := i, droppable := some (← classifyDroppable) } 0
 
 end Replay
 

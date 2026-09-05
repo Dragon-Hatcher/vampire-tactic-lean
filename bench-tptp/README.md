@@ -215,6 +215,66 @@ when it starts, and keeps load on the page for the same reason. Even in this run
 numbers the effect is plain: at `--jobs 3` several two-second problems came out at
 eighteen.
 
+### After the clausification and AVATAR term work
+
+`../docs/STATUS.md`'s "Clausifying is not rewriting, and a split name is its component":
+a parent's CNF built by `Vampire/Cnf.lean` instead of by VampLean's `cnfify`, AVATAR's
+split substitutions and implication chains done as terms by `Vampire/Avatar.lean`, a
+disjunction under a hoisted binder taught to the bridge, and `restrictedContext`'s
+classification computed once instead of per step.
+
+**This set is 199 problems** (the paper's 57 plus 142 newly generated; `gen.sh` gets a
+different number through each time, since Vampire is nondeterministic under a wall-clock
+limit). **198/199 both before and after.** The one failure is `Q_GRA006p1`, whose goal is
+higher-order — "a proposition cannot be the sort of an argument" — which is out of scope
+by design and reported rather than admitted; it is on the list because this run of
+`gen.sh` happened to generate a test for it.
+
+Before and after **interleaved**, B A B A B A, three runs each, in one file:
+
+| | before | after |
+| --- | ---: | ---: |
+| whole file, CPU | 128.4 / 181.0 / 142.5s | 123.5 / **129.9** / 132.0s |
+| of which the prover | 29.7 / 50.8 / 30.4s | 41.0 / 43.8 / 42.9s |
+| the file less the prover | 98.7 / 130.2 / 112.1s | 82.5 / **86.1** / 89.1s |
+| the replay | 52.8 / 78.0 / 62.4s | 43.3 / **45.8** / 48.4s |
+| of which step scripts | 33.9 / 51.5 / 40.4s | 29.9 / 32.1 / 34.4s |
+| the kernel, on the replayed term | 14.2s | 12.5s |
+| pass | 198/199 | 198/199 |
+
+**Read the middle column of each, not the total.** The prover is untouched C++ and its
+time is noise — 29.7s to 50.8s across six runs of two builds — so it is broken out and
+subtracted. On the medians the replay is **62.4s to 45.8s** and the file less the prover
+**112.1s to 86.1s**; on the best of three, 52.8s to 43.3s and 98.7s to 82.5s. The kernel
+fell 12% without being aimed at, because the replay now builds smaller terms.
+
+The three before runs spread over 25s and the three after runs over 5s, which is a result
+in itself: `simp` and `grind` allocate, allocation is what makes a run sensitive to the
+state of the machine, and replacing a rewrite with a construction buys predictability as
+well as speed.
+
+**And the controlled figure.** `paired.py` compares two logs only on the problems where
+both replayed the same number of steps — the cheapest witness that the same refutation
+came back — because a different proof is a different replay and a per-rule bucket can
+double for that reason alone. Over the 151 problems that replayed the same proof in all
+six runs, taking each side's best of three:
+
+    replay:  24.38s -> 19.08s  (-21.8%)
+
+    (clausify parent)          5.64s -> 1.47s   -4.17s
+    cnf transformation         2.77s -> 2.19s   -0.58s
+    (cnf shared)               2.26s -> 1.85s   -0.41s
+    flattening                 0.36s -> 0.15s   -0.21s
+    avatar split clause        0.90s -> 0.71s   -0.18s
+    (input steps)              0.33s -> 0.17s   -0.17s
+    avatar contradiction       0.25s -> 0.12s   -0.13s
+    everything else                             within noise
+
+That 24.38s is **46% of the replay**, not all of it: the problems that fail to pair are
+disproportionately the expensive ones, because a hard search is both slow and
+nondeterministic. So the paired percentage and the whole-set medians are answering
+different questions and both are quoted. `paired.py` prints the coverage for this reason.
+
 ### Against other tactics
 
 `retarget.py` rewrites these same statements to be proved by `duper` or `smt` instead,

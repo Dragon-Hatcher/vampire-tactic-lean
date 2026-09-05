@@ -245,5 +245,6 @@ initialize Lean.registerTraceClass `vampire.replay
 initialize Lean.registerTraceClass `vampire.timing
 initialize Lean.registerTraceClass `vampire.timing.tactic
 initialize Lean.registerTraceClass `vampire.prover
+initialize Lean.registerTraceClass `vampire.bridge
 
 end Vampire

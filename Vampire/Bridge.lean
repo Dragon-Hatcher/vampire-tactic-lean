@@ -37,6 +37,17 @@ namespace Vampire.Bridge
 
 open Lean Meta
 
+/-- `Or.elim`, as a function of the hypothesis rather than of a proof of it.
+
+`elimOr` used to build `fun x => …` per disjunct and abstract it with `mkLambdaFVars`,
+and the right-hand branch of a clause carries the whole rest of the chain: abstracting
+`k` binders over an accumulating term walks it once per binder and is quadratic in the
+width of the clause. Stated this way each branch is an *argument*, so the chain is
+applications and the only abstraction left is one per leaf, over that leaf's own proof.
+This is the lesson `Vampire/Sat.lean` records, in the one place here that was still
+paying for it. -/
+theorem orCases {a b c : Prop} (f : a → c) (g : b → c) : a ∨ b → c := fun h => h.elim f g
+
 /-- How far the recursion may go before giving up. A formula this deep is not something
 the reordering was ever going to explain, and the bound keeps a pathological pairing
 search from running away. -/
@@ -398,18 +409,54 @@ private partial def assemble (fuel : Nat) (want : Expr) (proofs : Array Expr) (i
 /-- Case on every disjunct of `h`, injecting each into `want`. -/
 private partial def elimOr (want : Expr) (idx : OrIdx) (h : Expr) (hty : Expr)
     (depth : Nat) : MetaM Expr := do
+  return mkApp (← elimOrFn want idx hty depth) h
+
+/--
+A function from `hty` to `want`, casing on `hty`'s disjuncts.
+
+The chain is `orCases` applications rather than nested `fun`s; see `orCases` for why that
+matters. What abstracts is a leaf, over its own injection, and the quantifier rule below.
+-/
+private partial def elimOrFn (want : Expr) (idx : OrIdx) (hty0 : Expr) (depth : Nat) :
+    MetaM Expr := do
   if depth > maxDepth then throwError "bridge: gave up at depth {maxDepth}"
-  let hty := hty.consumeMData
+  let hty := hty0.consumeMData
   if hty.isAppOfArity ``Or 2 then
     let a := hty.appFn!.appArg!
     let b := hty.appArg!
-    let l ← withLocalDeclD `bl a fun x => do
-      mkLambdaFVars #[x] (← elimOr want idx x a (depth + 1))
-    let r ← withLocalDeclD `br b fun x => do
-      mkLambdaFVars #[x] (← elimOr want idx x b (depth + 1))
-    return mkAppN (.const ``Or.elim []) #[a, b, want, h, l, r]
-  else
-    inject want idx h hty depth
+    return mkAppN (.const ``orCases [])
+      #[a, b, want, ← elimOrFn want idx a (depth + 1), ← elimOrFn want idx b (depth + 1)]
+  -- A disjunction *under* a binder the conclusion has hoisted out. `transport`'s own
+  -- `hty.isForall` rule instantiates a quantified premise, but it is at the leaf: it is
+  -- reached from `inject`, which is asking for the whole `∀` to go into one disjunct of
+  -- the conclusion, and here the `∀`'s body spans several of them. This is a clause that
+  -- came out of clausification, where hoisting a binder out of a disjunction and
+  -- distributing over it is one step. `Q_HAL004p1` has one such clause, and closing it
+  -- here rather than in the `ac_nf0` and `assumption` the reference falls back to is
+  -- 1.75s of its 1.8s replay.
+  --
+  -- The term is a metavariable, as in `transport`'s rule, and the disjuncts settle it:
+  -- every one of them mentions the variable, so the first `isDefEq` at a leaf assigns it
+  -- and the rest have to agree. Where none of them does, `tryTransport` refuses a proof
+  -- with a hole rather than handing one back.
+  --
+  -- Only where the conclusion has no disjunct that *is* this `∀`. `flattening` and the
+  -- other reassociating rules carry a quantified disjunct across unchanged, and for
+  -- those `inject` settles it by lookup; distributing first cost them 1.34s over the
+  -- benchmark to discover that. The signature is what the disjuncts are already indexed
+  -- by, so this is a scan of hashes and not a second search.
+  if hty.isForall && hty.bindingBody!.consumeMData.isAppOfArity ``Or 2 &&
+      !idx.sigs.contains (sig hty) then
+    let st ← saveState
+    try
+      return ← withLocalDeclD `bq hty fun hq => do
+        let m ← mkFreshExprMVar hty.bindingDomain!
+        let inner ← elimOrFn want idx (hty.bindingBody!.instantiate1 m) (depth + 1)
+        mkLambdaFVars #[hq] (mkApp inner (mkApp hq m))
+    catch _ =>
+      st.restore
+  withLocalDeclD `bl hty fun x => do
+    mkLambdaFVars #[x] (← inject want idx x hty depth)
 
 /--
 Put `h` into whichever disjunct of `want` accepts it.
@@ -473,6 +520,11 @@ elab_rules : tactic
       let fv ← getFVarId h
       match ← tryTransport (← instantiateMVars (← g.getType)) (.fvar fv) with
       | .inl e => g.assign e; replaceMainGoal []
-      | .inr why => throwError "vampire_bridge: {why}"
+      | .inr why =>
+        -- Every caller has the reference's script behind this, so a failure here is
+        -- swallowed by a `first` and shows up only as the slow path being taken. The
+        -- trace is the one way to see which step missed and why.
+        trace[vampire.bridge] "missed{indentD (← instantiateMVars (← g.getType))}\nfrom          {indentD (← inferType (.fvar fv))}\nbecause{indentD why}"
+        throwError "vampire_bridge: {why}"
 
 end Vampire.Bridge

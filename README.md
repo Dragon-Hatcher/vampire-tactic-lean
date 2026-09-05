@@ -172,6 +172,34 @@ they are made, so this is a debugging aid rather than a safeguard.
   that names it as a premise. Stating every step of every refutation in the benchmark
   went from 2.8s to 0.44s.
 
+- **A clausification is not a rewrite either.** `LeanChecker::clausify` puts a parent
+  into CNF and destructures it, and this port followed it through VampLean's `cnfify` —
+  which over `bench-tptp/` was the largest single thing left in a replay, 10.4s across
+  843 parents. A `sample` of one such call is `Lean.Meta.Simp.simpLoop` all the way down:
+  the cost is not deciding what to rewrite but the congruence proof simp builds from the
+  root of a several-hundred-atom formula to each of its several hundred sites. CNF is
+  three rules and no search, so the clauses are determined by the shape of the formula
+  and so are their proofs. `Vampire/Cnf.lean` walks it once and hands back each clause
+  with a *function* from the formula to it — a function, because distributing over a
+  disjunction is a case analysis and each case needs the whole of its own side. 6.2s to
+  1.5s, and the conjunction is never built: `andLeaves` used to walk back down it for an
+  `And.left`/`And.right` chain per leaf, which was work to undo work.
+
+- **A split name *is* its component.** The reference writes `try rw [hk]` per AVATAR
+  split definition because in a generated file `sA9` is a section variable and
+  `h9 : sA9 ↔ C` is the only thing relating the two. Here the replay binds the split with
+  `withLetDecl`, so the two are the same term after `zeta`: the substitution is
+  type-preserving by itself and wants no motive, no congruence proof and no equation.
+  `Vampire/Avatar.lean` does all of them in one `Expr.replace`, guarded by one `isDefEq`
+  on the pair rather than on the formula it sits in. Those `rw`s were 1.68s over 2894
+  calls on the three `ALG` problems.
+
+  The same file reads a clause's `sA₁ → … → sAₙ → C` prefix as the disjunction
+  `imp_iff_not_or` would rewrite it into, by one application per arrow — and does nothing
+  where there are no arrows, which is the common case and was 0.83s of simp finding it
+  out. With the chain read as a clause, `avatar contradiction clause` is a one-premise
+  resolution and goes to `Vampire/Clause.lean`: 0.66s to 0.26s.
+
 ## What translates
 
 Monomorphic first-order logic with equality: uninterpreted sorts, functions and
@@ -250,6 +278,8 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     Vampire/Prenex.lean             hoisting a goal's quantifiers out of its disjunctions
     Vampire/Sat.lean                AVATAR's SAT refutation, by unit propagation
     Vampire/Clause.lean             a derived inference, by unit propagation
+    Vampire/Cnf.lean                a parent's CNF, built rather than rewritten
+    Vampire/Avatar.lean             AVATAR's own steps, as terms
     Vampire/Support.lean            tactics the replay needs and the generated file does not
     Vampire/Reconstruct.lean        the port of Vampire's Lean code generator
     Vampire/Tactic.lean             `vampire` and `vampire?`
@@ -258,6 +288,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     ffi/vampire_proof.cpp           exports the refutation as structured data
     bench-tptp/                     the wider TPTP benchmark and its scripts
     bench-tptp/onefile.py           all of it in one file, to time without the start-up
+    bench-tptp/paired.py            two runs compared on the problems that replayed alike
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
     docs/comparison.md              the same problems under `duper` and `smt`
     docs/STATUS.md                  working notes
@@ -272,7 +303,11 @@ run, which is what makes them a test of this port rather than of the generated f
 | | problems | pass |
 | --- | ---: | ---: |
 | the paper's set (`../bodingbauer-etall/bench/work`) | 57 | **57** |
-| `bench-tptp/`, that set plus 139 more | 196 | **196** |
+| `bench-tptp/`, that set plus 142 more | 199 | **198** |
+
+The one failure is a goal that is higher-order, which is out of scope and is reported
+rather than admitted; which problems `bench-tptp/` contains moves between runs, because
+`gen.sh` generates a test only for what Vampire refutes within its own budget.
 
 `bench-tptp/README.md` has the timing distribution, everything that used to fail and
 what each one turned out to be, and the scripts to reproduce the run.
@@ -280,13 +315,33 @@ what each one turned out to be, and the scripts to reproduce the run.
 Run one problem to a file, the whole set is 464.6s of CPU — but 344.6s of that is
 `lake lean` start-up and the statements' own elaboration, a floor measured by replacing
 `vampire [*]` with `sorry`, so most of it is not about the tactic. `bench-tptp/onefile.py`
-puts all 195 in one file and one process instead: **109.4s of CPU**, against 221.7s
-before this round of work. That is the number to read for the tactic; the per-file run is
-the one to read for memory (no problem holds more than 2.0GB) and for pass/fail, since a
-hang there takes one problem down rather than the file. Per file the median problem is
-1.95s of CPU and is start-up, the 90th percentile 3.3s and the slowest 12.9s. Whichever way it is run, run the numbers you quote alone:
-a parallel run inflates CPU as well as wall time, because Lean elaborates on several
-threads and time they spend spinning for a core is charged to the process.
+puts them all in one file and one process instead, which is the number to read for the
+tactic; the per-file run is the one to read for memory and for pass/fail, since a hang
+there takes one problem down rather than the file.
+
+**Quote the replay, and break the prover out of the total.** The prover is Vampire, and
+its limit is wall-clock: over six runs of two builds its own time ranged 29.7s to 50.8s,
+±24s on a ~130s total, which swamps anything the replay does. Before and after the last
+round of work, run interleaved, three runs each, medians of three:
+
+| | before | after |
+| --- | ---: | ---: |
+| the replay | 62.4s | **45.8s** |
+| the whole file less the prover | 112.1s | **86.1s** |
+| the kernel, on the replayed term | 14.2s | 12.5s |
+| pass | 198/199 | 198/199 |
+
+`bench-tptp/paired.py` is the controlled version: it compares two runs only on the
+problems where both replayed the same number of steps, because a nondeterministic search
+returns a different refutation and a different refutation is a different replay. On the
+151 problems that replayed alike across all six runs, 24.4s to 19.1s — which is 46% of
+the replay and not all of it, since the problems that fail to pair are the expensive ones.
+
+Whichever way it is run, run the numbers you quote alone: a parallel run inflates CPU as
+well as wall time, because Lean elaborates on several threads and time they spend
+spinning for a core is charged to the process. And run a before and an after
+*interleaved* — a long sequence of full-load runs drifts, and `Q_PRD001p1` has replayed
+the same proof twice as slowly at the end of one as at the start.
 `bench-tptp/sweep.py` runs the set and serves a live page while it does.
 
 `docs/comparison.md` puts the same 194 statements through `duper` and `smt`, by
