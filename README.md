@@ -290,6 +290,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     bench-tptp/onefile.py           all of it in one file, to time without the start-up
     bench-tptp/paired.py            two runs compared on the problems that replayed alike
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
+    docs/portfolio.md               why the tactic does not solve what Vampire solves
     docs/comparison.md              the same problems under `duper` and `smt`
     docs/STATUS.md                  working notes
 
