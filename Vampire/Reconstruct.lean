@@ -1644,8 +1644,17 @@ partial def replayFrom (r : Refutation) (st : State) (k : Nat) : TermElabM Expr 
   else
     let some e := st.last | throwError "vampire: the exported refutation is empty"
     -- Close every `let` the definitions opened.
+    --
+    -- Neither of `mkLetFVars`'s two default passes is wanted here, and both are paid for
+    -- by walking a proof term that is the whole refutation. `usedLetOnly` drops the
+    -- bindings the body does not mention, which costs a scan per binding to discover
+    -- something this side already knows -- every binding is a definition, a split or a
+    -- skolem that a step asked for. `generalizeNondepLet` turns a `let` whose body does
+    -- not depend on it into a `fun` applied to its value, which is the opposite of what
+    -- the replay wants: the design rests on a split name *being* its component after
+    -- zeta, not on it being a parameter that happens to be applied to it.
     let tAbs ← IO.monoMsNow
-    let e ← mkLetFVars st.bound e
+    let e ← mkLetFVars st.bound e (usedLetOnly := false) (generalizeNondepLet := false)
     let tChk ← IO.monoMsNow
     trace[vampire.timing] "abstracted {st.bound.size} definitions in {tChk - tAbs}ms"
     -- Every application the assembly makes was checked as it was made, by
