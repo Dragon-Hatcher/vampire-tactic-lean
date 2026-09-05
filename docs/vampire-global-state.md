@@ -51,6 +51,7 @@ signature and term sharing table.
 | `Random::_seed` | `Lib/Random.cpp:22` | Determinism across runs depends on this. |
 | `Formula::DEFAULT_LABEL` | `Kernel/Formula.cpp:26` | |
 | `MLMatcher matcher` | `Kernel/MLMatcher.cpp:736` | File-scope matcher instance, reused. |
+| `EqualityProxyMono::s_proxyPredicates` and two siblings | `Shell/EqualityProxyMono.cpp:35-37` | Predicate numbers keyed by sorts, both from a signature that has been deleted. Reached only with `ep`, so only by a portfolio. Reset; see section 6a. |
 | `outputBoolOperators` | `Shell/LeanChecker/LeanPrinter.hpp:22` | leancheck printer flag. |
 | `replayer` | `Shell/SMTCheck.hpp:23` | |
 | `PERF_FD`, `LAST_INSTRUCTION_COUNT_READ`, `START_TIME`, `EXIT_LOCK` | `Lib/Timer.cpp:41,42,61,115` | |
@@ -196,18 +197,56 @@ The rest of the list, gone through after that:
 | `TermOrderingDiagram::Polynomial::get` `static Set<Polynomial*>` | content-keyed and holds only integers and variable numbers. Leaks; does not dangle. |
 | `Perfect<T>::_ids` (`Lib/Perfect.hpp`) | instantiated at `MonomFactors` and `FuncTerm` — polynomial normalisation, so arithmetic only. |
 | `InterpretedLiteralEvaluator.cpp` cached `zero`/`one` `TermList`s | the built-in-constant bug exactly, but arithmetic only. |
-| `OperatorType::operatorTypes()` | **an open hazard.** See below. |
+| `OperatorType::operatorTypes()` | keyed by sorts from the sharing table. Cleared; see below. |
 
 `OperatorType::operatorTypes()` interns `OperatorType`s in a static map keyed by
 `OperatorKey = Vector<TermList>` — a vector of *sort* terms from the sharing table
-`env.reset()` deletes. Nothing clears it, so the next problem can in principle match a
-stale key against recycled memory and be handed a type built over freed sorts. It has
-never been observed to bite, and there is a plausible reason: the sorts are re-created in
-the same order each run, so a stale key that matches is likely to have matched something
-structurally identical. That is luck, not an argument. It is left alone because clearing
-it means reaching into `Environment::reset`'s teardown order — between `delete signature`
-and `init()`, since `init()` starts refilling the map — and there is no test that
-exercises the failure. Fixing an allocation path blind is how the next bug gets written.
+`env.reset()` deletes. Nothing cleared it, so the next problem could match a stale key
+against recycled memory and be handed a type built over freed sorts. It was left alone
+for a while on the grounds that it had never been observed to bite and that the sorts are
+re-created in the same order each run, so a stale key that matches has probably matched
+something structurally identical — luck, and said to be luck at the time.
+`OperatorType::resetCache()` now drops it, from `Environment::reset` between
+`delete signature` and `init()`: after the symbols that point into the map are gone, and
+before `init()` starts refilling it.
+
+Note `Lib::Set::deleteAll` frees the values and leaves the cells occupied — correct for
+the destructor it was written for, and a use-after-free anywhere else — so the reset is
+`deleteAll` followed by `reset`. Getting that wrong turns the segfault into an abort one
+run earlier, which is at least loud.
+
+## 6a. Static caches keyed by a dead signature
+
+The same shape one level up, and the one that made the portfolio crash. A schedule runs
+many strategies over one problem, so it turns options on that the default strategy never
+uses, and each of those reaches code with its own statics.
+
+`EqualityProxyMono` (`--equality_proxy`, `ep`) keeps three:
+
+```cpp
+static DHMap<TermList, unsigned> s_proxyPredicates;      // sort -> proxy predicate
+static DHMap<unsigned, TermList> s_proxyPredicateSorts;  // and back
+static DHMap<TermList, Unit*>    s_proxyPremises;        // its defining unit
+```
+
+Both what they hold and what they are keyed by belong to a problem that has ended: a
+predicate *number* in a signature that has been deleted, keyed by a sort term from the
+sharing table deleted with it. The allocator hands that memory back for the next
+problem's sorts, so a lookup can match a dead key and return a predicate number that now
+names something else, of another arity. The failure is a long way from the cause:
+`Property::scan` reads the argument sorts of the wrong symbol's type, walks off the end
+of its key, and dereferences whatever is there.
+
+Found by bisecting a schedule down to a pair — `ep=RS:nm=10` on one strategy and `ep=R`
+three strategies later — which is worth recording as the method, since the crash moved
+with the amount of allocation that had happened before it and looked like nothing in
+particular. `EqualityProxyMono::resetCache()` drops all three, from
+`Lib::resetGlobalState`.
+
+The lesson generalises: a static that holds a signature number or a `TermList` is a bug
+waiting for a second problem, and how long it waits depends on the allocator. The two
+found so far are the ones a *portfolio* reaches; running one strategy per process, as
+the tactic did before, reaches neither.
 
 ## 7. Threading: Lean elaborates in parallel
 
@@ -242,6 +281,11 @@ context, which is a much larger change than the reset.
 1. **Reusable, not re-entrant.** `Lib::resetGlobalState()` (`Lib/Reset.cpp`) restores
    the state above, so a process can solve many problems — sequentially. The state is
    still global, so concurrent runs are not possible.
+1a. **A portfolio is many more runs, under options one strategy never sets.** The tactic
+   used to make two or three runs per goal, all with Vampire's defaults; it now makes
+   dozens, each configured differently. That is a different test of the reset, and it
+   found two things the old one could not (section 6a). Expect more of the same shape
+   from any strategy that turns on a pass nothing here has run yet.
 2. **The shim must not call the `vampire.cpp` setup.** Signal handlers and `setrlimit`
    are the dangerous ones.
 3. **No exception may cross the boundary**, and `exit()` on the proof path has to go.

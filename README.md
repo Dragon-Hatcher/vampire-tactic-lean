@@ -42,6 +42,28 @@ and under the whole budget only if it has to be, because Vampire's default satur
 algorithm reads the limit as a *search parameter*. `set_option vampire.escalate false`
 makes it one attempt at the whole budget.
 
+A goal the default strategy does not refute is then put to **Vampire's own portfolio** —
+the schedule `--mode portfolio --schedule casc` would have chosen for this problem,
+strategy by strategy, under a second budget of `vampire.timeout`. That is where most of
+the difference between this tactic and the `vampire` binary was; see "Diversity is the
+other half" below and `docs/portfolio.md`. `set_option vampire.portfolio false` turns it
+off, and `vampire.portfolioSlice` caps what one strategy may have (20 deciseconds by
+default). Nothing the default refutes ever reaches it, so the cost is paid only by a
+goal that was going to fail.
+
+When the portfolio is what refuted a goal, the tactic says which strategy did it and
+offers it back:
+
+    vampire: refuted by a portfolio strategy, after the default failed.
+    To go straight to it next time:
+      vampire (strategy := "lrs+1011_1:32_tgt=full:st=5.0:sd=1:ss=included:er=filter:alpa=true_0") [*]
+
+`strategy` runs that one first, ahead of the default and the schedule, which is the
+difference between paying for the search again on every elaboration and not: on
+`RNG120+4`, 14.4s becomes 2.1s. It is a hint and not an instruction — the ordinary
+schedule still follows behind it, so a pin that has gone stale costs a run and cannot
+lose a proof.
+
 **What the timeout bounds, and what it does not.** It bounds the saturation loop, which
 is where the check is. It does not bound anything else a run does, and a slow goal can
 be any of them, so `trace.vampire.timing` reports each separately — `built in 0ms,
@@ -106,6 +128,37 @@ they are made, so this is a debugging aid rather than a safeguard.
   calling it, so the limit reached only the strategy's estimate and never the loop.
   `vampire.timeout` was not a timeout at all: `BOO028-1` asked for two seconds and
   searched for thirty.
+
+- **Diversity is the other half, so run Vampire's own schedule.** Depth is all the
+  escalation varies, and depth is not what the tactic was missing. Over the problems in
+  the corpus that are provable and that the default strategy does not refute inside 20
+  seconds, tripling the budget buys three of them and no single alternative strategy
+  buys any, while `--mode portfolio --schedule casc` — the same 20 seconds, spread over
+  many strategies — buys more than half. `docs/portfolio.md` has that table; it is the
+  evidence this was built on.
+
+  So the tactic asks Vampire which strategies it would have tried on *this* problem and
+  tries them, in order, until the second budget runs out. Not a list transcribed into
+  Lean: `Schedules::getCasc2025Schedule` branches on the problem's `Property`, so a
+  unit-equality problem gets a different schedule from a general first-order one, and
+  the schedule that ships with the fork is the one that runs. What Lean owns is the
+  loop, which is the part that has to escalate on a *replay* failure as well as a search
+  failure.
+
+  Two things do not carry over from the binary, both because this is one process and
+  not a fork per strategy. A slice's share of the schedule is in mega-instructions,
+  which needs `perf` and so exists only under Linux; it is converted to time at the same
+  nominal rate the portfolio itself uses when it has no `perf`. And a slice that wants
+  thirty seconds cannot have them sequentially, so `vampire.portfolioSlice` caps it —
+  the portfolio's advantage is in its first few dozen strategies at about a tenth of a
+  second each, and spending the budget on one long slice buys the depth that has already
+  been tried.
+
+  Running many strategies over one problem in one process is also a much harder test of
+  the reset than running one, and it found two static caches that had survived it — see
+  `docs/vampire-global-state.md` section 6a. Both are the same shape: a signature number
+  or a sort term, kept in a `static`, read after the signature it belongs to was deleted
+  and its memory handed back out.
 
 - **A whole run is one call.** Build, solve and export happen together. The FFI entry
   lock makes a call atomic but not a sequence of them, and Vampire's environment is
@@ -290,7 +343,7 @@ guessed at. `Vampire/Reconstruct.lean`'s header is the authoritative list.
     bench-tptp/onefile.py           all of it in one file, to time without the start-up
     bench-tptp/paired.py            two runs compared on the problems that replayed alike
     docs/vampire-global-state.md    audit of Vampire's shared mutable state
-    docs/portfolio.md               why the tactic does not solve what Vampire solves
+    docs/portfolio.md               the portfolio: the measurement, and what it needed
     docs/comparison.md              the same problems under `duper` and `smt`
     docs/STATUS.md                  working notes
 
@@ -305,6 +358,20 @@ run, which is what makes them a test of this port rather than of the generated f
 | --- | ---: | ---: |
 | the paper's set (`../bodingbauer-etall/bench/work`) | 57 | **57** |
 | `bench-tptp/`, that set plus 142 more | 199 | **198** |
+| every provable problem in the corpus, read from TPTP (`tptp2lean.py --provable-only`) | 315 | **206** |
+
+The third row is the honest denominator and the one to watch: it is the corpus, not the
+part of it Vampire's own search selected. `vampire --mode portfolio --schedule casc`
+refutes 243 of the same 315 in the same 20 seconds, so the tactic is 37 short of the
+prover it embeds — 26 of those are searches that found nothing, 6 are goals whose
+*statement* Lean cannot elaborate in the time (megabytes long; `sorry` in place of the
+tactic does not finish either), and 5 are refutations it found and could not replay. None
+is a crash. It was 186 before the portfolio, on one strategy.
+
+`docs/portfolio.md` has the whole comparison, including the 38 problems the old fork's
+binary "refuted" through an unsound definition — an upstream bug, fixed upstream in May
+2026 and inherited here by a branch cut a week too early — which the replay refused, and
+which the rebase onto upstream master has since removed from both columns.
 
 The one failure is a goal that is higher-order, which is out of scope and is reported
 rather than admitted; which problems `bench-tptp/` contains moves between runs, because

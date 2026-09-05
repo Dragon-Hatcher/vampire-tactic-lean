@@ -7,7 +7,8 @@ Working notes for picking the work back up. See `README.md` for what the library
 
     lean-vampire/
       vampire/            our fork of vprover/vampire (upstream = vprover, branch
-                          `avatar-resolution-replay`)
+                          `leancheck-2026-09`; `avatar-resolution-replay` is the
+                          pre-rebase branch and is kept only for reference)
       vampire-tactic/     this package: the Lean tactic (branch `main`)
         bench-tptp/       a second, wider TPTP benchmark; see its own README
       bodingbauer-etall/  the paper's artifacts, left as reference
@@ -17,6 +18,7 @@ Working notes for picking the work back up. See `README.md` for what the library
 
 ## Build
 
+    git -C ../vampire switch leancheck-2026-09
     cmake -S ../vampire -B ../vampire/build -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     cmake --build ../vampire/build --target vampire_lib   # the static archive
@@ -24,6 +26,11 @@ Working notes for picking the work back up. See `README.md` for what the library
     lake build                                            # tactic + tests
 
 Lean 4.33.0 everywhere. `lake build` runs the tests as `#eval`s and fails on regression.
+
+**C++20, and the two sides must agree.** Upstream moved to it; `vampireCompileArgs` in
+`lakefile.lean` names `-std=c++20` for the shim for the same reason it names every other
+flag CMake gives Vampire — a mismatch here moves a class layout and the failure is a
+crash in unrelated code.
 
 macOS is the platform this is developed and benchmarked on. A Linux build gets as far
 as a working FFI — `Test/Ffi.lean` passes, including the reset cycles — and then aborts
@@ -78,7 +85,16 @@ source text. This fork's changes are included, AVATAR's resolution replay among 
 AVATAR runs, and its splitting, components, split clauses and SAT refutation all replay.
 
 `vampire?` stops before the replay and shows the problem as Vampire renders it plus an
-outline of the refutation.
+outline of the refutation, and — when the portfolio is what refuted the goal — which
+strategy did it.
+
+**The portfolio.** A goal the default strategy does not refute inside `vampire.timeout`
+is put to the schedule Vampire's own `--mode portfolio --schedule casc` would have chosen
+for *this problem*, strategy by strategy, under a second budget of the same size. The
+schedule is read out of the fork through `lean_vampire_schedule`, so it is Vampire's and
+stays Vampire's; the loop is in `Vampire/Tactic.lean`, because it has to escalate on a
+replay failure as well as a search failure. `docs/portfolio.md` is the whole story,
+including the five memory bugs that running dozens of strategies per process turned up.
 
 ## What does not
 
@@ -851,11 +867,19 @@ Recorded because each cost real time to find.
    `ffi/vampire_lock.hpp`. A guard that only some entry points take is worse than none.
 2. **Run-then-read is not atomic.** The lock makes each call atomic, not the sequence.
    The step buffers are `thread_local` for that reason.
-3. **Lake does not track the Vampire archive.** It is declared as an input to
-   `extern_lib`; without that a rebuilt Vampire leaves a stale dylib whose calls into new
-   symbols fault with no stack.
-4. **`env.proofExtra.get<>` segfaults on a missing entry** — no RTTI, no check. Guard
-   with `find()`.
+3. **Lake does not track the Vampire archive, and declaring it an input is not enough.**
+   It *was* declared an input to `extern_lib`, and a rebuilt Vampire still left the
+   previous `libvampireffi.dylib` in place: recompiling unchanged sources produces an
+   identical object file and an identical static library, so nothing downstream has
+   anything to rebuild from. The archive's hash is now compiled *into* the shim as
+   `-DVAMPIRE_ARCHIVE_ID`, which `Ffi.archiveId` returns. If a fix to the fork appears
+   not to work, check that number first; an afternoon went into a bug that had already
+   been fixed.
+4. **`env.proofExtra.get<>` segfaults on a missing entry** — no RTTI, no check. Use
+   `extraFor` in `ffi/vampire_proof.cpp`, which reports the step instead. Which extras a
+   unit carries depends on which engine produced its rule, and a portfolio runs engines
+   the default strategy does not: `FORWARD_SUBSUMPTION_RESOLUTION` records its resolved
+   literal from the code-tree engine and nothing from subsumption demodulation.
 5. **Function-local statics that cache Vampire objects** dangle after a reset. Fixed for
    the built-in sorts; six more are listed in the audit, unhandled.
 6. **The whole run is one FFI call, deliberately.** Build, solve and export together.
@@ -906,13 +930,59 @@ Recorded because each cost real time to find.
    that may not finish, write to a file and flush it, or stop the tactic earlier —
    `vampire?` does translation and search and no replay, which is how the two-minute
    question "is this the prover or the replay?" got a seven-second answer.
-14. **`sample` truncates a deep stack.** The replay nests one frame per `let` it binds
+14. **Do not edit the repository while a sweep is running.** `lake lean` builds what it
+   needs, so a source change halfway through a sweep means the second half of the results
+   was produced by different code — and if the edit does not compile yet, that every
+   remaining result is a failure reading `lakefile.lean:78: failed`. Both happened here.
+15. **A crash report's symbolication is not to be trusted.** macOS `.ips` files resolve a
+   frame to the nearest exported symbol, which in an optimised 18MB dylib can be an
+   unrelated function several thousand bytes away. Three separate hypotheses here were
+   chased down from frames that were simply wrong. `atos -o
+   .lake/build/lib/libvampireffi.dylib -l 0x0 <imageOffset>` does better, and still names
+   dead code, so anything load-bearing wants a build with `-g`.
+16. **`sample` truncates a deep stack.** The replay nests one frame per `let` it binds
    and one per step it chains, and past a few thousand frames the profile shows the
    *top* of the stack with no path back to the caller — every branch looks like it
    starts inside `simp`. Read what the leaves are doing, and get the attribution from
    `trace.vampire.timing.tactic` instead.
 
+## The fork, and where it sits relative to upstream
+
+The branch is **`leancheck-2026-09`**: current upstream master with the Lean-checking work
+rebased onto it, then this repository's own commits on top.
+
+    upstream/master   d1e247b5e  2026-09-03
+    + the leancheck delta        57 files, rebased from its base at 94c7c5b87 (2026-04-30)
+    + 17 commits                 embedding, the portfolio, and the fixes that took
+
+`upstream/leancheck` is a squashed snapshot with no common ancestor with master, so there
+is no merge to do and never was: what there is, is a delta to rebase. Locating its base
+is the only fiddly part —
+
+    for d in <dates>; do
+      c=$(git rev-list -1 --before="$d" upstream/master)
+      echo "$d $c $(git diff --name-only $c upstream/leancheck | wc -l)"
+    done
+
+— and the minimum is the base. From there, `git diff <base> upstream/leancheck` applies to
+master with `git apply --3way`: 48 of 57 files clean, 9 conflicted, 18 hunks. The compiler
+then finds another ten or so API changes. Half a day, and worth repeating before it is
+four months again.
+
+**Do it periodically.** The branch was four months behind and that was long enough to be
+running an unsoundness upstream had already fixed (`portfolio.md`). Nothing in the
+workflow would have said so; the only reason it surfaced is that the replay refused 33
+proofs and named the rule.
+
+What the rebase resolved, where the two sides had converged on the same idea, is in the
+commit message of `Import the leancheck branch onto upstream master`. Two of this
+session's patches did not survive it, which is the right outcome: the twee fix arrives
+from upstream, and upstream has deleted `EqualityProxyMono` and its static caches
+outright.
+
 ## Fork changes, in order
+
+On top of the rebase, oldest first:
 
     2abf74e  AVATAR refutations as resolution steps, not bv_decide
     7032c0f  avoid `contradiction` over the whole context in clausification
@@ -925,6 +995,27 @@ Recorded because each cost real time to find.
     4473042  reset TermPartialOrdering's caches between problems
     b120371  reset TermOrderingDiagram's single-comparison cache too
     d7c7784  install the embedded soft time limit, so a run can be bounded
+
+Uncommitted, all from making the portfolio work (`docs/portfolio.md` §"What it cost"):
+
+    twee goal transformation: collect the term variables it meant to collect
+    backward demodulation: record the substitution over the premise it covers
+    reset EqualityProxyMono's static proxy-predicate maps between problems
+    reset OperatorType's interned types, and InferenceStore's ordering, likewise
+    inference replayer: add to and remove from the active container symmetrically
+    VAMPIRE_SCRIBBLE_FREE, an opt-in poison-on-free for embedded debugging
+
+The first is a backport, not a discovery: upstream fixed it on 2026-05-07 in
+`c098eb89a`, "Remove secondary term variables stack to prevent unsoundness", and this
+fork branched before that. `TweeGoalTransformation::scanVars` filled `_allVars` from a
+file-local `termVars` that shadowed the member it had just filled, so `tgt=full`
+introduced definitions of arity 0 for terms with variables in them — an axiom saying a
+function does not depend on its arguments. Thirty-eight of the 279 problems *this fork's*
+binary refuted under `--schedule casc` were reached that way. `checks/twee/` has the
+two-line non-theorem it turns into `ContradictoryAxioms`, and `checks/sanity` runs it.
+
+The lesson for the fork is the obvious one: it is far enough behind upstream to be
+running a fixed unsoundness, and nothing in the workflow would have said so.
 
 The first three are proof-generation work from before the FFI and are independent of
 it: all 14 ALG problems that Vampire solves now check, 874s → 233s, four former
