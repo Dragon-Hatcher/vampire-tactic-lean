@@ -128,8 +128,9 @@ class Sweep:
     """The pool, the results, and the state the page reads."""
 
     def __init__(self, scratch, tests, jobs, cpu_limit, redo, triage_limit=None,
-                 pkg=DEFAULT_PKG):
+                 pkg=DEFAULT_PKG, wall_limit=None):
         self.pkg = pkg
+        self.wall_limit = wall_limit
         self.scratch = scratch
         # In two-phase mode the sweep starts at the triage limit and finishes at the
         # full one; `cpu_limit` is whichever is in force now, which is what `run_one`
@@ -206,6 +207,7 @@ class Sweep:
         # peak RSS come from — has nothing left to wait for.
         peak = [0]
         ended = threading.Event()
+        overran = [False]
 
         def watch():
             while not ended.wait(2):
@@ -214,6 +216,20 @@ class Sweep:
                     peak[0] = max(peak[0], r)
                     with self.lock:
                         job.rss = peak[0]
+                # A CPU limit cannot bound a job that is not using CPU, and one that is
+                # paging is not: measured against lean-smt, whose dependency closure is
+                # Mathlib and about a gigabyte of oleans, four workers thrash the page
+                # cache and each `lean` gets 7% of a core. Fifteen minutes of wall for
+                # ninety seconds of CPU, and `RLIMIT_CPU` never fires. The wall limit is
+                # the backstop; the group is killed, because `lake` and `lean` are two
+                # processes and only the session dies together.
+                if self.wall_limit and time.time() - job.started > self.wall_limit:
+                    overran[0] = True
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    return
 
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
@@ -236,8 +252,11 @@ class Sweep:
         reason = ""
         timed_out = False
         if not passed:
-            reason = self.explain(out, code, cpu)
-            timed_out = reason.startswith("cpu limit")
+            if overran[0]:
+                reason = f"wall limit ({self.wall_limit}s, used {cpu:.0f}s of cpu)"
+            else:
+                reason = self.explain(out, code, cpu)
+            timed_out = reason.startswith(("cpu limit", "wall limit"))
 
         with self.lock:
             job.state = "passed" if passed else "failed"
@@ -580,6 +599,11 @@ def main():
                          "a large replay can hold 7GB)")
     ap.add_argument("--cpu-limit", type=int, default=150,
                     help="per-test CPU seconds, as `one.sh` (default 150)")
+    ap.add_argument("--wall-limit", type=int, metavar="S", default=None,
+                    help="kill a job after S seconds of wall clock, whatever its CPU. "
+                         "A CPU limit cannot bound a job that is blocked rather than "
+                         "computing -- a tactic whose dependencies are large enough to "
+                         "thrash the page cache spends its time paging, not running")
     ap.add_argument("--triage", type=int, metavar="S",
                     help="two-phase: run everything in parallel under an S-second limit "
                          "first, then rerun whatever hit it one at a time under "
@@ -606,7 +630,7 @@ def main():
             and not (args.package / "lakefile.toml").exists():
         sys.exit(f"no lakefile in {args.package}")
     sweep = Sweep(args.scratch, args.tests, args.jobs, args.cpu_limit, args.redo,
-                  args.triage, args.package)
+                  args.triage, args.package, args.wall_limit)
     if not sweep.all:
         sys.exit(f"no .lean files in {args.tests}")
 

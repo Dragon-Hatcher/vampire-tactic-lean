@@ -67,6 +67,24 @@ the limit.
 Results append to `<scratch>/results.jsonl` as they land, and a rerun skips what is
 already recorded there unless `--redo` is passed, so an interrupted sweep resumes.
 
+### Comparing against the prover itself
+
+`parity.sh` runs `vampire --mode portfolio --schedule casc` over the same problems from
+the command line and `parity.py` diffs the two:
+
+    ./parity.sh $SP                                    # writes $SP/binary.tsv
+    ./parity.py $SP/binary.tsv $SP/res/results.jsonl
+
+The number to read is not the tactic's score but the difference, and the breakdown of it:
+a search that found nothing, a refutation that could not be replayed, and a run that
+exhausted the CPU are three different problems with three different answers. The third is
+usually not about the tactic at all — several of this corpus's statements are megabytes
+long and Lean cannot elaborate them in the time either, which `sorry` in place of the
+tactic will tell you in one run.
+
+Run `parity.sh` on its own. Its time limit is wall-clock, so a sweep running beside it is
+measuring something else.
+
 ### Measuring rather than checking
 
 `onefile.py` is the other instrument: it concatenates the extracted tests into one file,
