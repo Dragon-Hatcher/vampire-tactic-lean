@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "Debug/Assertion.hpp"
+#include "Lib/Int.hpp"
 #include "Lib/SharedSet.hpp"
 #include "Inferences/ProofExtra.hpp"
 #include "Kernel/Clause.hpp"
@@ -198,6 +199,54 @@ struct ExportError {
   std::string what;
   explicit ExportError(std::string w) : what(std::move(w)) {}
 };
+
+/// The functor a `Signature::Symbol` is registered under.
+///
+/// Upstream's `InferenceStore` records the symbols an inference introduced as
+/// `Signature::Symbol*`, and everything that crosses this boundary identifies a symbol
+/// by its number instead: that is what a `Term` carries, and what the Lean side has a
+/// map from. The signature is keyed by name and arity, which is the way back. Whether
+/// the symbol is a predicate or a function is not something the store says any more, so
+/// this asks, and the round trip is checked rather than assumed -- looking a name up in
+/// the wrong table would otherwise return a number belonging to a different symbol.
+static unsigned functorOf(Signature::Symbol *sym) {
+  const std::string &name = sym->name();
+  unsigned arity = sym->arity();
+  if (env.signature->predicateExists(name, arity) &&
+      env.signature->getPredicate(env.signature->getPredicateNumber(name, arity)) == sym)
+    return env.signature->getPredicateNumber(name, arity);
+  if (env.signature->functionExists(name, arity) &&
+      env.signature->getFunction(env.signature->getFunctionNumber(name, arity)) == sym)
+    return env.signature->getFunctionNumber(name, arity);
+  throw ExportError("the symbol '" + name + "' an inference introduced is not in the "
+                    "signature under its own name");
+}
+
+/// `env.proofExtra.get`, with the check it does not do.
+///
+/// `ProofExtra::get` looks the unit up with `DHMap::get`, whose only guard is an `ASS`
+/// that `-DVDEBUG=0` compiles out, so a unit whose extra was never recorded reads a null
+/// `unique_ptr` and dereferences it — a segfault in the middle of an export, which as a
+/// way to tell a Lean user that a proof cannot be replayed leaves something to be
+/// desired.
+///
+/// Not hypothetical, and not something the default strategy reaches. Which extras a run
+/// records depends on which engines the strategy switched on, and a rule can come from
+/// more than one engine: `FORWARD_SUBSUMPTION_RESOLUTION` from the code-tree engine,
+/// which records the literal it resolved on, and from subsumption demodulation, which
+/// records nothing. A portfolio runs both.
+///
+/// The cast is unchecked because the build has no RTTI; what stands in for the check is
+/// that a rule is emitted by engines that agree on the extra's type.
+template <class T>
+static const T &extraFor(Unit *u, const char *what) {
+  const Lib::InferenceExtra *x = env.proofExtra.find(u);
+  if (x == nullptr)
+    throw ExportError("step " + Int::toString(u->number()) + " (" +
+                      ruleName(u->inference().rule()) + ") carries no recorded " + what +
+                      ", so this proof cannot be exported");
+  return *static_cast<const T *>(x);
+}
 
 /// The SAT variable a named formula stands for. Defined before the exporter because
 /// `writeFormula` needs it.
@@ -448,7 +497,7 @@ static bool satClauseOf(Unit *u, std::vector<std::pair<unsigned, bool>> &out) {
     return false;
   if (env.proofExtra.find(u) == nullptr) return false;
   std::map<unsigned, bool> seen;   // ordered by variable, as LeanChecker prints them
-  for (SAT::SATLiteral l : env.proofExtra.get<Indexing::SATClauseExtra>(u).clause->iter())
+  for (SAT::SATLiteral l : extraFor<Indexing::SATClauseExtra>(u, "SAT clause").clause->iter())
     seen.insert({l.var(), l.positive()});
   for (auto [v, p] : seen) out.push_back({v, p});
   return true;
@@ -522,7 +571,8 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       UnitIterator it = u->getParents();
       Clause *left = static_cast<Clause *>(it.next());
       Clause *right = static_cast<Clause *>(it.next());
-      auto sr = env.proofExtra.get<Inferences::LiteralInferenceExtra>(concl);
+      const auto &sr =
+        extraFor<Inferences::LiteralInferenceExtra>(concl, "resolved literal");
       Literal *m = sr.selectedLiteral;
       SATSubsumption::SATSubsumptionAndResolution satSR;
       if (!satSR.checkSubsumptionResolutionWithLiteral(right, left,
@@ -604,7 +654,8 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
         previousSplits.insert(Saturation::Splitter::getLiteralFromName(split).var());
 
     std::map<unsigned, bool> currentSplits;
-    for (SAT::SATLiteral l : env.proofExtra.get<Indexing::SATClauseExtra>(u).clause->iter())
+    for (SAT::SATLiteral l :
+         extraFor<Indexing::SATClauseExtra>(u, "SAT clause").clause->iter())
       currentSplits.insert({l.var(), l.positive()});
 
     std::unordered_map<unsigned, Clause *> components;
@@ -613,7 +664,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     unsigned index = 0;
     for (Unit *p : iterTraits(u->getParents())) {
       if (index++ == 0) continue;
-      auto dex = env.proofExtra.get<Shell::SplitDefinitionExtra>(p);
+      const auto &dex = extraFor<Shell::SplitDefinitionExtra>(p, "split definition");
       unsigned component = dex.component->splits()->sval();
       components.insert({component, dex.component});
       unsigned var = Saturation::Splitter::getLiteralFromName(component).var();
@@ -643,7 +694,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
         unsigned var = Saturation::Splitter::getLiteralFromName(name).var();
         if (klass.size() == 1 && klass[0]->ground() &&
             Literal::positiveLiteral(klass[0]) == Literal::positiveLiteral((*component)[0])) {
-          DHMap<unsigned, TermList> map;
+          DHMap<unsigned, TermList, FnvHash, IdentityHash> map;
           SortHelper::collectVariableSorts(klass[0], map);
           auto dom = map.domain();
           while (dom.hasNext()) varToSplit.insert({dom.next(), var});
@@ -667,7 +718,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     for (auto [split, _] : currentSplits) {
       auto it = splitToParent.find(split);
       if (it == splitToParent.end()) continue;
-      DHMap<unsigned, TermList> map;
+      DHMap<unsigned, TermList, FnvHash, IdentityHash> map;
       SortHelper::collectVariableSorts(it->second.second, map);
       std::set<unsigned> vars;
       for (unsigned v : iterTraits(map.domain())) vars.insert(v);
@@ -677,7 +728,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     for (auto [split, v] : intros) { e.put(split); e.put(v); }
 
     // The arguments the parent clause is applied to.
-    DHMap<unsigned, TermList> parentSorts;
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> parentSorts;
     SortHelper::collectVariableSorts(parent, parentSorts);
     std::set<unsigned> sortedVars;
     for (unsigned v : iterTraits(parentSorts.domain())) sortedVars.insert(v);
@@ -703,7 +754,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     for (Unit *p : iterTraits(u->getParents())) sortedParents.insert(p);
     e.put(static_cast<uint32_t>(sortedParents.size()));
     for (Unit *p : sortedParents)
-      putSatClause(env.proofExtra.get<Indexing::SATClauseExtra>(p).clause);
+      putSatClause(extraFor<Indexing::SATClauseExtra>(p, "SAT clause").clause);
 
     SAT::SATClause *proof = u->inference().satPremise();
     if (proof == nullptr) { e.put(0); return; }
@@ -748,10 +799,10 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     if (!is->hasIntroducedSymbols(u))
       throw ExportError("a skolemisation introduced no symbols");
     std::map<long, unsigned> byVar;
-    for (auto [_, sym] : iterTraits(is->getIntroducedSymbols(u).iter())) {
-      long replaced = is->variableReplacedByIntroducedSymbol(sym);
+    for (auto *symbol : iterTraits(is->getIntroducedSymbols(u).iter())) {
+      long replaced = is->variableReplacedByIntroducedSymbol(symbol);
       if (replaced < 0) throw ExportError("a skolem symbol replaced no variable");
-      byVar[replaced] = sym;
+      byVar[replaced] = functorOf(symbol);
     }
 
     VariablePrenexOrderingTree tree;
@@ -773,8 +824,8 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     if (introduced.size() != 1)
       throw ExportError("a predicate definition introduced " +
                         std::to_string(introduced.size()) + " symbols");
-    unsigned sym = introduced.top().second;
-    Formula *body = is->formulaReplacedByIntroducedSymbol(sym);
+    unsigned sym = functorOf(introduced.top());
+    Formula *body = is->formulaReplacedByIntroducedSymbol(introduced.top());
     if (body == nullptr) throw ExportError("a predicate definition has no body");
     if (u->isClause()) throw ExportError("a predicate definition is a clause");
 
@@ -783,7 +834,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
 
     // The parameters, which are the conclusion's universal variables in the order it
     // binds them — rectification has already sorted them.
-    DHMap<unsigned, TermList> sorts;
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> sorts;
     SortHelper::collectVariableSorts(u, sorts);
     std::vector<std::pair<unsigned, unsigned>> params;
     if (u->getFormula()->connective() == FORALL)
@@ -814,31 +865,56 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     if (introduced.size() != 1)
       throw ExportError("a function definition introduced " +
                         std::to_string(introduced.size()) + " symbols");
-    unsigned sym = introduced.top().second;
+    unsigned sym = functorOf(introduced.top());
     if (!u->isClause() || u->asClause()->size() != 1)
       throw ExportError("a function definition is not a unit clause");
     Literal *lit = (*u->asClause())[0];
     if (!lit->isEquality()) throw ExportError("a function definition is not an equation");
 
+    // Which side of the equation is the definition, and which the term it stands for,
+    // is not something to assume. Two passes introduce this rule and they orient it
+    // oppositely — `TweeGoalTransformation` writes `t = sF(vars)` and
+    // `DefinitionIntroduction` (`fdi`) writes `sF(vars) = t` — and
+    // `Literal::createEquality` may turn either of them round again, because it orients
+    // by the term ordering when it shares the literal. Assuming the first cost 33
+    // problems of the portfolio measurement: every `fdi` strategy that refuted a goal
+    // produced a proof whose `rfl` compared a term with a constant.
+    TermList sides[2] = {lit->termArg(0), lit->termArg(1)};
+    int defSide = -1;
+    for (int k = 0; k < 2; k++)
+      if (sides[k].isTerm() && sides[k].term()->functor() == sym) defSide = k;
+    if (defSide < 0)
+      throw ExportError("a function definition has its symbol on neither side");
+    Term *def = sides[defSide].term();
+    TermList body = sides[1 - defSide];
+
     e.declareFun(sym);
     e.put(sym);
 
-    DHMap<unsigned, TermList> sorts;
+    // The parameters are the definition's own arguments, in its own order, because that
+    // is the order the lambda has to abstract them in. They are all distinct variables
+    // by construction — both passes build the application out of the variables they
+    // collected — and a type argument would mean a polymorphic definition, which this
+    // translation cannot produce and should not silently mis-read.
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> sorts;
     SortHelper::collectVariableSorts(lit, sorts);
-    std::set<unsigned> vars;
-    for (unsigned v : iterTraits(sorts.domain())) vars.insert(v);
-    e.put(static_cast<uint32_t>(vars.size()));
-    for (unsigned v : vars) {
-      TermList sort = sorts.get(v);
+    e.put(def->arity());
+    for (unsigned i = 0; i < def->arity(); i++) {
+      TermList arg = *def->nthArgument(i);
+      if (!arg.isVar())
+        throw ExportError("a function definition takes an argument that is not a variable");
+      TermList sort;
+      if (!sorts.find(arg.var(), sort))
+        throw ExportError("a function definition's parameter has no recorded sort");
       e.declareSort(sort);
-      e.put(v);
+      e.put(arg.var());
       e.put(sort.term()->functor());
     }
 
     size_t lenAt = e.code.size();
     e.put(0);
     size_t start = e.code.size();
-    e.writeTerm(lit->termArg(0));
+    e.writeTerm(body);
     e.code[lenAt] = static_cast<uint32_t>(e.code.size() - start);
   }
 
@@ -848,7 +924,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     // interleave the two.
     std::vector<Substitution> subs = substitutionsFor(u);
 
-    DHMap<unsigned, TermList> varSorts;
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> varSorts;
     SortHelper::collectVariableSorts(u, varSorts);
 
     InferenceRule rule = u->inference().rule();
@@ -914,8 +990,8 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
     if (handlerFor(rule) == H_CLAUSIFY) {
       unsigned n = 0;
       for (Unit *p : iterTraits(u->getParents())) {
-        // Guarded: `proofExtra.get` neither checks presence nor, with RTTI off, the
-        // type, so a missing entry is a segfault rather than an error.
+        // Absence is meaningful here rather than an error — a parent that recorded no
+        // clause count contributes none — so this asks rather than using `extraFor`.
         if (env.proofExtra.find(p) != nullptr)
           n = env.proofExtra.get<Inferences::CNFTransformationInferenceExtra>(p).number;
       }
@@ -953,7 +1029,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       for (Unit *p : iterTraits(u->getParents())) premises.push_back(p);
       if (env.proofExtra.find(u) == nullptr)
         throw ExportError("no definition information for a definition unfolding");
-      auto &extra = env.proofExtra.get<Shell::FunctionDefinitionExtra>(u);
+      const auto &extra = extraFor<Shell::FunctionDefinitionExtra>(u, "function definition");
       e.put(static_cast<uint32_t>(premises.size() > 0 ? premises.size() - 1 : 0));
       for (size_t k = 1; k < premises.size(); k++) {
         Clause *rw = premises[k]->asClause();
@@ -979,7 +1055,7 @@ struct ProofExporter : public InferenceStore::AbstractProofPrinter {
       unsigned i = 0;
       for (Unit *p : iterTraits(u->getParents())) {
         if (i >= subs.size()) break;
-        DHMap<unsigned, TermList> premiseSorts;
+        DHMap<unsigned, TermList, FnvHash, IdentityHash> premiseSorts;
         SortHelper::collectVariableSorts(p, premiseSorts);
         std::vector<unsigned> vars;
         auto it = premiseSorts.domain();

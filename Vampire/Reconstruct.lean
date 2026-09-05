@@ -1126,7 +1126,14 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
         | exact imp_iff_not_or.mp ($sIdent).mp))
     return tacs
   | .functionDefinition =>
-    let ids := s.definedParams.map (fun (p : Nat × Nat) => mkIdent (varName p.1))
+    -- `intro` in the order the statement binds them, which is ascending, and *not* in
+    -- the order the symbol takes them, which is the definition's own — the same
+    -- distinction `.predicateDefinition` makes just above. They coincided as long as
+    -- the parameters were exported as a sorted set of the equation's variables; they
+    -- stopped coinciding when the export started reading them off the definition, which
+    -- is what it has to do to get the arguments in the right places.
+    let ids := (s.definedParams.qsort (fun a b => a.1 < b.1)).map
+      (fun (p : Nat × Nat) => mkIdent (varName p.1))
     let mut tacs ← intros ids
     tacs := tacs.push (← `(tactic| rfl))
     return tacs
