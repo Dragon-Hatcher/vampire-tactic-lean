@@ -9,7 +9,7 @@ def vampireBuildDir : FilePath := vampireDir / "build"
 
 /-- The flags Vampire's own objects are compiled with; the shim must agree. -/
 def vampireCompileArgs : Array String := #[
-  "-std=c++17", "-fno-threadsafe-statics", "-fno-rtti",
+  "-std=c++20", "-fno-threadsafe-statics", "-fno-rtti",
   "-DVDEBUG=0", "-DCHECK_LEAKS=0", "-DNBUILD=1", "-DNCLOSEFROM=1",
   "-DVTIME_PROFILING=0", "-DVZ3=0", "-DNDEBUG",
   "-I" ++ vampireDir.toString,
@@ -49,29 +49,7 @@ require auto from git
 @[default_target] lean_lib Test where
   globs := #[.one `Test, .submodules `Test]
 
-target vampire_ffi.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_ffi.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_ffi.cpp"
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
-  buildO oFile srcJob flags #[] "c++"
-
-target vampire_proof.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_proof.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_proof.cpp"
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
-  buildO oFile srcJob flags #[] "c++"
-
-target vampire_build.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_build.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_build.cpp"
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
-  buildO oFile srcJob flags #[] "c++"
-
-/--
-The prebuilt Vampire archive. Declaring it as an input means Lake relinks when the
-archive changes; without it a rebuilt Vampire leaves a stale dylib whose calls into
-the new symbols fault at run time.
--/
+/-- The prebuilt Vampire archive, as an input. -/
 target vampire_archive : FilePath := do
   let archive := vampireBuildDir / "libvampire_lib.a"
   unless (← archive.pathExists) do
@@ -79,10 +57,48 @@ target vampire_archive : FilePath := do
       build it first: cmake --build {vampireBuildDir} --target vampire_lib"
   inputBinFile archive
 
+/--
+What the shim was compiled and linked against, as a hash of the archive.
+
+It is passed in as `-DVAMPIRE_ARCHIVE_ID`, which `lean_vampire_archive_id` returns, and
+that is not only a diagnostic: it is what makes the build correct. Lake tracks the
+`.cpp` files and nothing else — not Vampire's headers, which the shim compiles against,
+and not the archive, which the library the tactic loads is *linked* against — so a
+rebuilt fork left the previous `libvampireffi` in place: the same symbols, the previous
+code, and a fix to Vampire that the tactic went on running without. Nothing downstream
+can notice, because a recompile of unchanged sources produces an identical object file
+and an identical archive. Making the archive's identity part of what is compiled is what
+gives the object file something to differ by, and it is also the answer to the question
+you ask when a fix appears not to work.
+-/
+def archiveIdFlag (archive : FilePath) : JobM String := do
+  let trace : BuildTrace ← computeTrace archive
+  return s!"-DVAMPIRE_ARCHIVE_ID=\"{trace.hash}\""
+
+target vampire_ffi.o pkg : FilePath := do
+  let oFile := pkg.buildDir / "ffi" / "vampire_ffi.o"
+  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_ffi.cpp"
+  let archive ← (← fetch <| pkg.target ``vampire_archive).await
+  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
+  buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
+
+target vampire_proof.o pkg : FilePath := do
+  let oFile := pkg.buildDir / "ffi" / "vampire_proof.o"
+  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_proof.cpp"
+  let archive ← (← fetch <| pkg.target ``vampire_archive).await
+  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
+  buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
+
+target vampire_build.o pkg : FilePath := do
+  let oFile := pkg.buildDir / "ffi" / "vampire_build.o"
+  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_build.cpp"
+  let archive ← (← fetch <| pkg.target ``vampire_archive).await
+  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
+  buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
+
 extern_lib libvampireffi pkg := do
   let name := nameToStaticLib "vampireffi"
   let ffiO ← fetch <| pkg.target ``vampire_ffi.o
   let buildO ← fetch <| pkg.target ``vampire_build.o
   let proofO ← fetch <| pkg.target ``vampire_proof.o
-  let _ ← fetch <| pkg.target ``vampire_archive
   buildStaticLib (pkg.staticLibDir / name) #[ffiO, buildO, proofO]

@@ -27,6 +27,21 @@ using namespace Lib;
 
 extern "C" {
 
+/// Which build of Vampire this shim was compiled and linked against.
+///
+/// Set by the lakefile from a hash of `libvampire_lib.a`, and the reason it is compiled
+/// in rather than read at run time: Lake tracks the shim's `.cpp` files and neither
+/// Vampire's headers nor the archive, so without something in the *source* that changes
+/// with the archive, a rebuilt fork leaves the previously linked library in place. See
+/// `archiveIdFlag` in `lakefile.lean`.
+#ifndef VAMPIRE_ARCHIVE_ID
+#define VAMPIRE_ARCHIVE_ID "unknown"
+#endif
+
+lean_obj_res lean_vampire_archive_id(lean_obj_arg) {
+  return lean_mk_string(VAMPIRE_ARCHIVE_ID);
+}
+
 /// Status codes returned across the boundary. Structured, never text.
 enum : uint32_t {
   VAMPIRE_OK = 0,
