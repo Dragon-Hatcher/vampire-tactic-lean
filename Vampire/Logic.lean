@@ -1,325 +1,548 @@
-import Lean
+/-
+The logic Vampire's Lean output is written in, from VampLean.
 
-/-!
-# The logic the replay's scripts are written in
+Source: https://github.com/vprover/vamplean, revision 5a62658, part of the Vampire
+project (https://github.com/vprover). Copied rather than depended on, and see `NOTICE`
+for the attribution: as a dependency it could only be a *path* one, so this package
+could not be installed from git at all.
 
-Vampire's Lean output is written in a vocabulary: one tactic per preprocessing inference
-rule, over a library of propositional and quantifier equivalences. The replay is a port
-of that generator, so it needs the same vocabulary, and this is it.
+Two changes, and only two:
 
-It used to come from [VampLean](https://github.com/vprover/vamplean). That was a bad
-dependency in three separate ways: it could only be a *path* dependency, so this package
-could not be installed from git; it declares a dozen of these at the root under names
-Mathlib also uses, so no file could import both; and it carries no licence, so it could
-not be vendored either. Everything here is in `Vampire`, which settles all three.
+* it is in `namespace Vampire` rather than at the root. Upstream declares about a dozen
+  of these under names Mathlib also uses -- `Xor'`, `not_and_or`, `imp_iff_not_or`,
+  `forall_true_iff` and more -- and two modules declaring one name collide at the
+  *import*, so no file could have both upstream and Mathlib. Nearly every real Lean
+  development imports Mathlib.
+* this comment.
 
-**The equivalences have to match Vampire, not merely be true.** Each step's script leaves
-a formula in the shape the *next* step was generated against, so a lemma set that reaches
-a logically equivalent but differently oriented or differently associated form breaks the
-chain rather than the step. Where an orientation looks arbitrary below, it is Vampire's.
+Everything else is as upstream, deliberately. An earlier attempt wrote these from the
+semantics of each inference rule instead, and it cost a problem: the equivalences have
+to agree with Vampire's normal forms rather than merely be true, because each step's
+script leaves a formula in the shape the *next* step was generated against. A
+re-derivation of `our_iff_to_nnf` that was logically correct still broke `SEU206+1` at
+step 130. Being identical is the point.
 -/
-
-namespace Vampire
+import Lean.Meta.WHNF
+import Lean.Meta.AppBuilder
+import Lean.Meta.Tactic
+import Std.Tactic.BVDecide
 
 universe u
-variable {ι : Sort u} {a b c d : Prop} {p q : ι → Prop}
+set_option linter.all false
+set_option linter.unusedVariables false
+set_option linter.unusedSectionVars false
+set_option warningAsError false
 
-/-! ## Exclusive or
+set_option maxHeartbeats 1000000000
 
-Vampire has a real xor connective — `<~>` in its output — and the ENNF and NNF rules
-rewrite *into* it. Desugaring it to `¬(a ↔ b)` would leave formulas those rules never
-fire on, so it is a definition of its own. -/
+/- Everything below is in the `VampLean` namespace, and it has to be: this library
+dropped its Mathlib dependency and re-proved what it needed, so at the root it declares
+a dozen names Mathlib also declares — `Xor'`, `xor_def`, `not_and_or`, `imp_iff_not_or`,
+`by_contradiction`, `forall_true_iff` and more, with the same statements. Two identical
+declarations still collide, and the collision is at the *import*: a downstream file
+could not have both this library and Mathlib at all.
 
-/-- Vampire's `<~>`. -/
-def Xor' (a b : Prop) : Prop := (a ∧ ¬b) ∨ (b ∧ ¬a)
+    import VampLean failed, environment already contains 'xor_def' from Mathlib.Logic.Basic
 
-theorem xor_def : Xor' a b ↔ (a ∧ ¬b) ∨ (b ∧ ¬a) := Iff.rfl
+Namespacing all of it rather than the names that happen to clash today is the point —
+the set grows with whatever Mathlib adds next, and with how much of Mathlib the
+downstream file imports. The tactic syntax (`prenexify`, `ennf_transformation`, …) is
+declared by keyword and is unaffected; a consumer that wants the lemma names bare wants
+`open VampLean`. -/
+namespace Vampire
 
-theorem xor_self (a : Prop) : Xor' a a ↔ False := by
-  simp only [Xor', and_not_self_iff, or_self]
+variable {iota : Type u}
+variable [Inhabited iota]
 
-theorem true_xor (a : Prop) : Xor' True a ↔ ¬a := by
-  simp only [Xor', true_and, not_true, and_false, or_false]
+omit [Inhabited iota] in
+theorem or_forall_prenex (A : Prop) (B : iota → Prop) : (A ∨ (∀ v0 : iota, B v0)) ↔ (∀ v0 : iota, (A ∨ B v0)) := by
+  constructor
+  · intro h v0
+    cases h with
+    | inl a => left; exact a
+    | inr b => right; exact b v0
+  · intro h
+    by_cases ha : A
+    · left; exact ha
+    · right; intro v0; have hb := h v0; cases hb with
+      | inl a' => contradiction
+      | inr b' => exact b'
 
-theorem xor_true (a : Prop) : Xor' a True ↔ ¬a := by
-  simp only [Xor', not_true, and_false, true_and, false_or]
+omit [Inhabited iota] in
+theorem or_forall_prenex_left (ι : Type u) (A : Prop) (B : ι → Prop) : ((∀ v0 : ι, B v0) ∨ A) ↔ (∀ v0 : ι, (B v0 ∨ A)) := by
+  constructor
+  · intro h v0
+    cases h with
+    | inl a => left; exact a v0
+    | inr b => right; exact b
+  · intro h
+    by_cases ha : A
+    · right; exact ha
+    · left; intro v0; have hb := h v0; cases hb with
+      | inl b' => exact b'
+      | inr a' => contradiction
 
-theorem false_xor (a : Prop) : Xor' False a ↔ a := by
-  simp only [Xor', false_and, not_false_iff, and_true, false_or]
+theorem and_forall_prenex (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) : (A ∧ (∀ v0 : ι, B v0)) ↔ (∀ v0 : ι, (A ∧ B v0)) := by
+  constructor
+  · intro h v0
+    have a := h.left
+    have b := h.right v0
+    exact And.intro a b
+  · intro h
+    constructor
+    · have a := h (Classical.choice hι)
+      exact a.left
+    · intro v0
+      exact (h v0).right
 
-theorem xor_false (a : Prop) : Xor' a False ↔ a := by
-  simp only [Xor', not_false_iff, and_true, false_and, or_false]
+theorem and_forall_prenex_left (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) : ((∀ v0 : ι, B v0) ∧ A) ↔ (∀ v0 : ι, (B v0 ∧ A)) := by
+  constructor
+  · intro h v0
+    have a := h.left v0
+    have b := h.right
+    exact And.intro a b
+  · intro h
+    constructor
+    · intro v0
+      exact (h v0).left
+    · have a := h (Classical.choice hι)
+      exact a.right
 
-/-! ## Negation, implication, equivalence
+theorem or_exists_prenex (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) :
+  (A ∨ (∃ v0 : ι, B v0)) ↔ (∃ v0 : ι, (A ∨ B v0)) := by
+  constructor
+  · intro h
+    cases h with
+    | inl a => apply Exists.intro (Classical.choice hι); left; exact a
+    | inr b => rcases b with ⟨ v0 , hb ⟩ ; apply Exists.intro v0; right; exact hb
+  · intro h
+    rcases h with ⟨ v0 , h1 ⟩
+    cases h1 with
+    | inl a => left; exact a
+    | inr b => right; apply Exists.intro v0; exact b
 
-`¬(a ↔ b) ↔ Xor' a b` is what makes the xor connective appear during ENNF; the rest
-eliminate `→` and push `¬` inward. -/
+
+theorem or_exists_prenex_left (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) :
+  ((∃ v0 : ι, B v0) ∨ A) ↔ (∃ v0 : ι, (B v0 ∨ A)) := by
+  constructor
+  · intro h
+    cases h with
+    | inl a => rcases a with ⟨ v0 , hb ⟩ ; apply Exists.intro v0; left; exact hb
+    | inr b => apply Exists.intro (Classical.choice hι); right; exact b
+  · intro h
+    rcases h with ⟨ v0 , h1 ⟩
+    cases h1 with
+    | inl b => left; apply Exists.intro v0; exact b
+    | inr a => right; exact a
+
+theorem and_exists_prenex_left (ι : Type u) (A : Prop) (B : ι → Prop) :
+   ((∃ v0 : ι, B v0) ∧ A) ↔ (∃ v0 : ι, (B v0 ∧ A)) := by
+  constructor
+  · intro h
+    cases h with
+    | intro a b => rcases a with ⟨ v0 , hb ⟩ ; apply Exists.intro v0; constructor; exact hb; exact b
+  · intro h
+    rcases h with ⟨ v0 , h1 ⟩
+    constructor
+    · apply Exists.intro v0; exact h1.left
+    · exact h1.right
+
+theorem and_exists_prenex (ι : Type u) (A : Prop) (B : ι → Prop) :
+   (A ∧ (∃ v0 : ι, B v0)) ↔ (∃ v0 : ι, (A ∧ B v0)) := by
+  simp_all only [exists_and_left]
+
+export Classical (not_not)
+
+syntax "prenexify" (" at " ident)? : tactic
+
+macro_rules
+  | `(tactic| prenexify) => `(tactic| repeat (first | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_forall_prenex_left, and_forall_prenex_left] | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [and_forall_prenex, or_forall_prenex]))
+  | `(tactic| prenexify at $a:ident) => `(tactic | repeat (first | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_forall_prenex_left, and_forall_prenex_left] at $a:ident | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [and_forall_prenex, or_forall_prenex] at $a:ident))
+
+syntax "exists_prenex" (" at " ident)? : tactic
+
+macro_rules
+  | `(tactic| exists_prenex) => `(tactic| repeat (first | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_exists_prenex_left, and_exists_prenex_left, Classical.skolem] | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_exists_prenex, and_exists_prenex, Classical.skolem]))
+  | `(tactic| exists_prenex at $a:ident) => `(tactic | repeat (first | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_exists_prenex_left, and_exists_prenex_left, Classical.skolem] at $a:ident | simp (config := {maxSteps := 10000000, failIfUnchanged := true}) only [or_exists_prenex, and_exists_prenex, Classical.skolem] at $a:ident))
+
+def Xor' (a b : Prop) := (a ∧ ¬b) ∨ (b ∧ ¬a)
+
+@[grind =] theorem xor_def {a b : Prop} : Xor' a b ↔ (a ∧ ¬b) ∨ (b ∧ ¬a) := Iff.rfl
+
+@[simp] theorem xor_true : Xor' True = Not := by grind
+
+@[simp] theorem xor_false : Xor' False = id := by grind
+
+/-- Stated here with the rest of the `Xor'` lemmas rather than beside the `ennf`
+tactic that uses it, so that all five colliding names are in one namespace. -/
+@[simp] theorem xor_self (a : Prop) : Xor' a a = False := by grind
+
 
 theorem not_iff_xor (a b : Prop) : ¬(a ↔ b) ↔ Xor' a b := by
-  simp only [Xor']; by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-theorem not_xor_iff (a b : Prop) : ¬Xor' a b ↔ (a ↔ b) := by
-  simp only [Xor']; by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-/-- `→` as a disjunction with the *conclusion first*, which is the orientation Vampire's
-ENNF leaves behind. -/
-theorem imp_iff_or_not : (b → a) ↔ a ∨ ¬b := by
-  by_cases hb : b <;> by_cases ha : a <;> simp_all
-
-/-- The same the other way round, for the scripts that want it. -/
-theorem imp_iff_not_or : (a → b) ↔ ¬a ∨ b := by
-  by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-theorem not_and_or : ¬(a ∧ b) ↔ ¬a ∨ ¬b := by
-  by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-theorem not_imp_not : (¬a → ¬b) ↔ (b → a) := by
-  by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-theorem imp_congr_eq (h₁ : a = c) (h₂ : b = d) : (a → b) = (c → d) := by
-  subst h₁; subst h₂; rfl
-
-theorem by_contradiction (h : ¬a → False) : a := by
-  by_cases ha : a
-  · exact ha
-  · exact (h ha).elim
-
-/-! ## Quantifiers over a trivial body
-
-Vampire drops these during tautology removal. The `∀` cases need the sort inhabited --
-over an empty sort `∀ _, False` is vacuously true -- and Vampire assumes its sorts are
-inhabited throughout, which is where the instance comes from. -/
-
-theorem forall_true_iff : (∀ _ : ι, True) ↔ True := by simp
-
-theorem forall_false_iff [Nonempty ι] : (∀ _ : ι, False) ↔ False :=
-  ⟨fun h => h (Classical.choice inferInstance), False.elim⟩
-
-theorem exists_true_iff [Nonempty ι] : (∃ _ : ι, True) ↔ True :=
-  ⟨fun _ => trivial, fun _ => ⟨Classical.choice inferInstance, trivial⟩⟩
-
-theorem exists_false_iff : (∃ _ : ι, False) ↔ False := by simp
-
-/-! ## Prenexing
-
-One quantifier out of one connective, in both argument positions. `simp` applied
-repeatedly with these pulls the whole prefix to the front. -/
-
-theorem or_forall_prenex : (a ∨ ∀ v, p v) ↔ ∀ v, a ∨ p v := by
   constructor
-  · rintro (ha | hp) v
-    · exact Or.inl ha
-    · exact Or.inr (hp v)
   · intro h
-    by_cases ha : a
-    · exact Or.inl ha
-    · exact Or.inr fun v => (h v).resolve_left ha
-
-theorem or_forall_prenex_left : ((∀ v, p v) ∨ a) ↔ ∀ v, p v ∨ a := by
-  simp only [or_comm (a := ∀ v, p v)]
-  simp only [or_forall_prenex, or_comm (b := a)]
-
-theorem and_forall_prenex [Nonempty ι] : (a ∧ ∀ v, p v) ↔ ∀ v, a ∧ p v := by
-  constructor
-  · rintro ⟨ha, hp⟩ v; exact ⟨ha, hp v⟩
+    grind
   · intro h
-    exact ⟨(h (Classical.choice inferInstance)).1, fun v => (h v).2⟩
+    grind
 
-theorem and_forall_prenex_left [Nonempty ι] : ((∀ v, p v) ∧ a) ↔ ∀ v, p v ∧ a := by
-  simp only [and_comm (a := ∀ v, p v)]
-  simp only [and_forall_prenex, and_comm (b := a)]
-
-theorem or_exists_prenex [Nonempty ι] : (a ∨ ∃ v, p v) ↔ ∃ v, a ∨ p v := by
+theorem not_xor_iff (a b : Prop) : ¬ Xor' a b ↔ (a ↔ b) := by
   constructor
-  · rintro (ha | ⟨v, hv⟩)
-    · exact ⟨Classical.choice inferInstance, Or.inl ha⟩
-    · exact ⟨v, Or.inr hv⟩
-  · rintro ⟨v, ha | hv⟩
-    · exact Or.inl ha
-    · exact Or.inr ⟨v, hv⟩
+  · intro h
+    grind
+  · intro h
+    grind
 
-theorem or_exists_prenex_left [Nonempty ι] : ((∃ v, p v) ∨ a) ↔ ∃ v, p v ∨ a := by
-  simp only [or_comm (a := ∃ v, p v)]
-  simp only [or_exists_prenex, or_comm (b := a)]
+theorem true_xor (a : Prop) : (Xor' True a) ↔ ¬a := by
+  simp_all only [xor_true]
 
-theorem and_exists_prenex : (a ∧ ∃ v, p v) ↔ ∃ v, a ∧ p v := by
-  constructor
-  · rintro ⟨ha, v, hv⟩; exact ⟨v, ha, hv⟩
-  · rintro ⟨v, ha, hv⟩; exact ⟨ha, v, hv⟩
+theorem false_xor (a : Prop) : (Xor' False a) ↔ a := by
+  simp_all only [xor_false, id_eq]
 
-theorem and_exists_prenex_left : ((∃ v, p v) ∧ a) ↔ ∃ v, p v ∧ a := by
-  simp only [and_comm (a := ∃ v, p v)]
-  simp only [and_exists_prenex, and_comm (b := a)]
+theorem by_contradiction {p : Prop} : (¬p → False) → p :=
+  open scoped Classical in Decidable.byContradiction
 
-/-! ## To negation normal form
-
-`↔` and xor become conjunctions of disjunctions. The orientations are Vampire's: its NNF
-puts the negated argument second in one conjunct and first in the other, and a later step
-is generated against exactly that. -/
-
-theorem our_iff_to_nnf (a b : Prop) : (a ↔ b) ↔ (a ∨ ¬b) ∧ (b ∨ ¬a) := by
-  by_cases ha : a <;> by_cases hb : b <;> simp_all
-
-theorem our_not_iff_to_nnf (a b : Prop) : ¬(a ↔ b) ↔ (¬b ∨ ¬a) ∧ (b ∨ a) := by
-  by_cases ha : a <;> by_cases hb : b <;> simp_all
 
 theorem our_xor_to_nnf (a b : Prop) : Xor' a b ↔ (¬b ∨ ¬a) ∧ (b ∨ a) := by
-  simp only [Xor']; by_cases ha : a <;> by_cases hb : b <;> simp_all
+  unfold Xor'
+  constructor
+  · intro h
+    cases h with
+    | inl x =>
+      constructor
+      · left; exact x.right
+      · right; exact x.left
+    | inr x =>
+      constructor
+      · right; exact x.right
+      · left; exact x.left
+  · intro h
+    have h1 := h.left
+    have h2 := h.right
+    simp only [Classical.or_iff_not_imp_left,Classical.not_not] at h1 h2
+    apply by_contradiction
+    intro contra
+    simp_all only [not_or, not_and, Classical.not_not, not_false_eq_true, not_true_eq_false, imp_false,
+      or_true, or_false, and_self]
 
-theorem our_not_xor_to_nnf (a b : Prop) : ¬Xor' a b ↔ (a ∨ ¬b) ∧ (b ∨ ¬a) := by
-  simp only [Xor']; by_cases ha : a <;> by_cases hb : b <;> simp_all
+theorem our_iff_to_nnf {a b : Prop} : (a ↔ b) ↔ (a ∨ ¬b) ∧ (b ∨ ¬a) :=
+  by
+  constructor
+  · intro h
+    rw[h]
+    simp only [and_self]
+    exact Classical.em b
+  · intro h
+    classical
+    simp only [Decidable.iff_iff_not_or_and_or_not]
+    rw[And.comm]
+    rewrite (occs := [2]) [Or.comm]
+    trivial
 
-/-! ## To conjunctive normal form
+theorem our_not_xor_to_nnf (a b : Prop) : ¬(Xor' a b) ↔ (a ∨ ¬b) ∧ (b ∨ ¬a) := by
+  simp only [not_xor_iff]
+  exact our_iff_to_nnf
 
-Distributing `∨` over `∧`, then putting the quantifier prefix back inside each conjunct.
-`cnf_prenex1` is the one that needs the sort inhabited: dropping a `∀` whose body does
-not mention it is only sound over a non-empty sort. -/
+theorem our_not_iff_to_nnf (a b : Prop) : ¬(a ↔ b) ↔ (¬b ∨ ¬a) ∧ (b ∨ a) := by
+  simp only [not_iff_xor]
+  exact our_xor_to_nnf a b
 
-theorem cnf1 : (a ∨ (b ∧ c)) ↔ (a ∨ b) ∧ (a ∨ c) := by
-  by_cases ha : a <;> simp_all [and_or_left, or_and_left]
+theorem forall_false_iff {α : Prop} [hα : Nonempty α] : (∀ x : α, False) ↔ (False) := by
+  constructor
+  · intro h
+    exact h (Classical.choice hα)
+  · intro h
+    intro x
+    exact h
 
-theorem cnf2 : ((a ∧ b) ∨ c) ↔ (a ∨ c) ∧ (b ∨ c) := by
-  by_cases hc : c <;> simp_all [and_or_right, or_and_right]
+theorem exists_true_iff {alpha : Prop} [hα : Nonempty α] : (∃ x : α, True) ↔ (True) := by
+  constructor
+  · intro h
+    trivial
+  · intro
+    apply Exists.intro (Classical.choice hα)
+    trivial
 
-theorem cnf_prenex1 [Nonempty ι] : (∀ _ : ι, a) ↔ a :=
-  ⟨fun h => h (Classical.choice inferInstance), fun h _ => h⟩
+theorem imp_iff_not_or : a → b ↔ ¬a ∨ b := open scoped Classical in Decidable.imp_iff_not_or
 
-theorem cnf_prenex2 : (∀ v, p v ∧ q v) ↔ (∀ v, p v) ∧ (∀ v, q v) :=
-  ⟨fun h => ⟨fun v => (h v).1, fun v => (h v).2⟩, fun ⟨h₁, h₂⟩ v => ⟨h₁ v, h₂ v⟩⟩
+theorem imp_iff_or_not {b a : Prop} : b → a ↔ a ∨ ¬b :=
+  open scoped Classical in Decidable.imp_iff_or_not
 
-theorem cnf_prenex3 : (∀ v, p v ∧ q v) ↔ (∀ v, p v) ∧ (∀ w, q w) := cnf_prenex2
+theorem not_and_or : ¬(a ∧ b) ↔ ¬a ∨ ¬b := open scoped Classical in Decidable.not_and_iff_not_or_not
 
-/-! ## AVATAR's SAT part
+theorem forall_true_iff {α : Prop} [hα : Nonempty α] : (∀ x : α, True) ↔ (True) := by
+  constructor
+  · intro h
+    trivial
+  · intro
+    intro x
+    trivial
 
-The SAT refutation is replayed by unit propagation, and these are the shapes it
-normalises the clauses into first. -/
-
-theorem sat_not_norm1 : (¬¬a) ↔ a := Classical.not_not
-
-theorem sat_or_norm1 : (a ∨ b) ↔ (¬a → b) := by
-  by_cases ha : a <;> simp_all
-
-theorem sat_or_norm2 : (¬a ∨ b) ↔ (a → b) := by
-  by_cases ha : a <;> simp_all
-
-theorem sat_or_norm3 : (a ∨ ¬b) ↔ (b → a) := by
-  by_cases hb : b <;> simp_all
-
-theorem sat_or_norm4 : (¬a ∨ ¬b) ↔ (a → ¬b) := by
-  by_cases ha : a <;> simp_all
-
-/-! ## The tactics Vampire's proofs are written in
-
-One per preprocessing inference rule, so a step the refutation calls `flattening` is
-replayed by a tactic of that name. Each is `simp only` over the sets above.
-
-`maxSteps` is raised throughout. A prenex prefix of ninety binders over an eighty-way
-disjunction needs far more rewrite steps than simp's default budget, and exceeding that
-budget is a silent partial normalisation rather than an error -- which shows up later as
-a step whose premise is the wrong shape, a long way from the cause.
-
-`failIfUnchanged := false` because these run over whatever the previous step produced:
-a formula with no implication left in it is a normal case for `ennf_transformation`, not
-a failure.
--/
-
-open Lean
+theorem not_imp_not : ¬a → ¬b ↔ b → a := by
+  constructor
+  · intro h hb
+    apply Classical.byContradiction
+    intro ha
+    exact h ha hb
+  · exact mt
 
 syntax "ennf_transformation" "at" ident : tactic
 macro_rules
-  | `(tactic| ennf_transformation at $h:ident) =>
-    `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [imp_iff_or_not, not_and_or, not_or, Classical.not_not, not_iff_xor, not_xor_iff,
-         Classical.not_forall, not_exists, xor_self] at $h:ident)
+  | `(tactic| ennf_transformation at $a) =>
+    `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [imp_iff_or_not, not_and_or, not_or,
+      Classical.not_not, not_iff_xor, not_xor_iff, Classical.not_forall,
+       not_exists, not_false_iff, not_true, xor_self, ne_eq,-eq_self] at $a:ident<;> simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [not_true, xor_self, -eq_self])
 
-syntax "nnf_transformation" "at" ident : tactic
+syntax "flattening" "at" ident : tactic
 macro_rules
-  | `(tactic| nnf_transformation at $h:ident) =>
-    -- The negation-pushing rules are here as well as in `ennf_transformation` because
-    -- rewriting `a ↔ b` into `(a ∨ ¬b) ∧ (b ∨ ¬a)` introduces negations over what may be
-    -- compound subformulas, and negation normal form means negations on atoms.
-    --
-    -- It is worth saying that this was added to recover `SEU206+1`, the one problem
-    -- `bench-100/` loses against the VampLean version, and it did not: 58 either way.
-    -- So the remaining mismatch with Vampire's normal form is somewhere else, and the
-    -- lemmas are kept because NNF means what it says, not because they fixed anything.
-    `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [our_iff_to_nnf, our_not_iff_to_nnf, our_xor_to_nnf, our_not_xor_to_nnf,
-         not_and_or, not_or, Classical.not_not, Classical.not_forall, not_exists]
-        at $h:ident)
-
-syntax "flattening" (" at " ident)? : tactic
-macro_rules
-  | `(tactic| flattening) =>
-    `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [and_assoc, or_assoc, Classical.not_not])
-  | `(tactic| flattening at $h:ident) =>
-    `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [and_assoc, or_assoc, Classical.not_not] at $h:ident)
+  | `(tactic| flattening at $a) => `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [and_assoc, or_assoc, Classical.not_not] at $a:ident<;> simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [])
 
 syntax "remove_tauto" "at" ident : tactic
 macro_rules
-  | `(tactic| remove_tauto at $h:ident) =>
-    `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [true_and, and_true, false_and, and_false, or_true, true_or, false_or, or_false,
-         true_iff, iff_true, false_iff, iff_false, true_xor, xor_true, false_xor,
-         xor_false, forall_true_iff, forall_false_iff, exists_true_iff, exists_false_iff]
-        at $h:ident)
+  | `(tactic| remove_tauto at $a) =>
+     `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [true_and, and_true, false_and, and_false, or_true, true_or,
+       false_or, or_false, not_true, not_false_iff, imp_true_iff, false_imp_iff,
+       true_imp_iff, true_iff, iff_true, false_iff, iff_false,
+       true_xor, xor_true, false_xor, xor_false ,forall_true_iff,
+       forall_false_iff, exists_true_iff, exists_false] at $a:ident<;> simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [not_true])
 
-/-- Universals to the front. Two passes, because a quantifier in either argument of
-either connective has its own rule and one pass leaves the other position alone. -/
-syntax "prenexify" (" at " ident)? : tactic
+syntax "nnf_transformation" "at" ident: tactic
 macro_rules
-  | `(tactic| prenexify) =>
-    `(tactic| repeat (first
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [or_forall_prenex_left, and_forall_prenex_left]
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [and_forall_prenex, or_forall_prenex]))
-  | `(tactic| prenexify at $h:ident) =>
-    `(tactic| repeat (first
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [or_forall_prenex_left, and_forall_prenex_left] at $h:ident
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [and_forall_prenex, or_forall_prenex] at $h:ident))
+| `(tactic| nnf_transformation at $a) =>
+    `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [↓ not_and_or, ↓ not_or, imp_iff_or_not,
+       ↓ Classical.not_not, ↓  Classical.not_forall, ↓ not_exists, ↓ not_false,
+       ↓ not_true, ↓ our_iff_to_nnf, ↓ our_xor_to_nnf,
+       ↓ our_not_iff_to_nnf, ↓ our_not_xor_to_nnf] at $a:ident<;>try simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [not_true])
 
-/-- Existentials to the front. `Classical.skolem` is what lifts one out from under a
-universal, which is what makes a skolem symbol come back as a function of the universals
-it sits under rather than as something buried under binders. -/
-syntax "exists_prenex" (" at " ident)? : tactic
+theorem imp_congr_eq {a b c d : Prop} (h₁ : a = c) (h₂ : b = d) : (a → b) = (c → d) :=
+  propext (imp_congr h₁.to_iff h₂.to_iff)
+
+partial def symmUnify (e1 e2 : Lean.Expr) : Lean.MetaM Lean.Expr := do
+  let e1 ← Lean.Meta.whnf e1
+  let e2 ← Lean.Meta.whnf e2
+  if ← Lean.Meta.isDefEq e1 e2 then return ← Lean.Meta.mkEqRefl e1
+  -- Leaf Case: (a = b) vs (b = a)
+  if let some (_, l1, r1) := e1.eq? then
+    if let some (_, l2, r2) := e2.eq? then
+      if (← Lean.Meta.isDefEq l1 r2) && (← Lean.Meta.isDefEq r1 l2) then
+        let commIff ← Lean.Meta.mkAppOptM ``Eq.comm #[none, some l1, some r1]
+        return ← Lean.Meta.mkAppM ``propext #[commIff]
+  if e1.isArrow && e2.isArrow then
+    let dom1 := e1.bindingDomain!
+    let dom2 := e2.bindingDomain!
+    let body1 := e1.bindingBody!
+    let body2 := e2.bindingBody!
+    let domEq ← symmUnify dom1 dom2
+    let bodyEq ← symmUnify body1 body2
+    return ← Lean.Meta.mkAppM ``imp_congr_eq #[domEq, bodyEq]
+  if e1.isForall && e2.isForall && !e1.isArrow && !e2.isArrow then
+    if !(← Lean.Meta.isDefEq e1.bindingDomain! e2.bindingDomain!) then
+      throwError "Symmetry match failed: Quantifier domain mismatch."
+    return ← Lean.Meta.withLocalDecl e1.bindingName! e1.bindingInfo! e1.bindingDomain! fun x => do
+      -- Instantiate the binder bodies with the local variable x
+      let b1 := e1.bindingBody!.instantiate1 x
+      let b2 := e2.bindingBody!.instantiate1 x
+      --trace debug b1 b2
+      let eqBody ← symmUnify b1 b2
+      -- mkForallCongr: (∀ x, P x = Q x) → (∀ x, P x) = (∀ x, Q x)
+      Lean.Meta.mkForallCongr (← Lean.Meta.mkLambdaFVars #[x] eqBody)
+  if e1.isLambda && e2.isLambda then
+    if !(← Lean.Meta.isDefEq e1.bindingDomain! e2.bindingDomain!) then
+      throwError "Symmetry match failed: Lambda domain mismatch."
+    return ← Lean.Meta.withLocalDecl e1.bindingName! e1.bindingInfo! e1.bindingDomain! fun x => do
+      let b1 := e1.bindingBody!.instantiate1 x
+      let b2 := e2.bindingBody!.instantiate1 x
+      let eqBody ← symmUnify b1 b2
+      -- Apply funext: (∀ x, f x = g x) → f = g
+      let proofForall ← Lean.Meta.mkLambdaFVars #[x] eqBody
+      Lean.Meta.mkAppM ``funext #[proofForall]
+  -- Structural Recursion
+  if e1.isApp && e2.isApp then
+    let f1 := e1.getAppFn
+    let f2 := e2.getAppFn
+    if ← Lean.Meta.isDefEq f1 f2 then
+      let args1 := e1.getAppArgs
+      let args2 := e2.getAppArgs
+      if args1.size == args2.size then
+        let mut pr ← Lean.Meta.mkEqRefl f1
+        for i in [:args1.size] do
+          let arg1 := args1[i]!
+          let arg2 := args2[i]!
+          let argPr ← symmUnify arg1 arg2
+          -- mkCongr: given (f = g) and (a = b), produces (f a = g b)
+          pr ← Lean.Meta.mkCongr pr argPr
+        return pr
+  throwError "Symmetry match failed between types:\n  {e1} and \n  {e2}"
+
+/--
+  Usage:
+  'symm_match'      (tries to find a matching hyp in context)
+  'symm_match h'    (uses specific hypothesis h)
+-/
+syntax (name := symm_match_tactic) "symm_match" "using" (ident) : tactic
+
+elab_rules : tactic
+  | `(tactic| symm_match using $h) => do
+    -- try simplifying the goal first
+    try Lean.Elab.Tactic.evalTactic (← `(tactic| simp only at $h:ident)) catch _ => pure ()
+    try Lean.Elab.Tactic.evalTactic (← `(tactic| simp only)) catch _ => pure ()
+    -- also try simplifying the given hypothesis `h`
+    let goal ← Lean.Elab.Tactic.getMainGoal
+    goal.withContext do
+      let target ← goal.getType
+      let fvarId ← Lean.Elab.Tactic.getFVarId h
+      let hypDecl ← fvarId.getDecl
+      let eqPr ← symmUnify hypDecl.type target
+      let finalPr ← Lean.Meta.mkAppM ``Eq.mp #[eqPr, hypDecl.toExpr]
+      goal.assign finalPr
+
+
+theorem sat_or_norm1 {a b:Bool} : (¬(a = true) ∨ (b = true)) = (!a || b) := by
+  simp only [Bool.not_eq_true, Bool.or_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true]
+
+theorem sat_or_norm2 {a b: Bool} : ((a = true) ∨ ¬(b = true)) = (a || !b) := by
+  simp only [Bool.not_eq_true, Bool.or_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true]
+
+theorem sat_or_norm3 {a b:Bool} : (¬(a = true) ∨ ¬(b = true)) = (!a || !b) := by
+  simp only [Bool.not_eq_true, Bool.or_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true]
+
+theorem sat_or_norm4 {a b:Bool} : ((a = true) ∨ (b = true)) = (a || b) := by
+  simp only [Bool.or_eq_true]
+
+theorem sat_not_norm1 {a:Bool} : (¬a = true) = (!a) := by
+  simp only [Bool.not_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true]
+
+syntax "rewrite_decide_eq" "[" (ident)+ "]" : tactic
+elab "rewrite_decide_eq" "[" vars:(ident)+ "]" : tactic => do
+  for v in vars do
+    Lean.Elab.Tactic.evalTactic (← `(tactic| rewrite [← @decide_eq_true_eq $(v)]))
+
+syntax "sat_norm" : tactic
 macro_rules
-  | `(tactic| exists_prenex) =>
-    `(tactic| repeat (first
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [or_exists_prenex_left, and_exists_prenex_left, Classical.skolem]
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [and_exists_prenex, or_exists_prenex, Classical.skolem]))
-  | `(tactic| exists_prenex at $h:ident) =>
-    `(tactic| repeat (first
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [or_exists_prenex_left, and_exists_prenex_left, Classical.skolem] at $h:ident
-        | simp (config := { maxSteps := 10000000, failIfUnchanged := true }) only
-            [and_exists_prenex, or_exists_prenex, Classical.skolem] at $h:ident))
+  | `(tactic| sat_norm) => `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [sat_or_norm1, sat_or_norm2, sat_or_norm3, sat_or_norm4, ← Bool.or_assoc, sat_not_norm1])
 
-/-- Distribute to CNF, then put the prefix back inside each conjunct. -/
+theorem cnf1 {a b c : Prop} : a ∧ b ∨ c ↔ (a ∨ c) ∧ (b ∨ c) := by
+  exact and_or_right
+
+theorem cnf2 {a b c : Prop} : c ∨ a ∧ b ↔ (c ∨ a) ∧ (c ∨ b) := by
+  exact or_and_left
+
+theorem cnf_prenex1 {α : Sort u} [hα : Nonempty α] (a : α → Prop) (b : Prop) : (∀ x, a x ∧ b) ↔ (∀ x, a x) ∧ b := by
+  constructor
+  · intro h
+    constructor
+    · intro x
+      exact (h x).left
+    · exact (h (Classical.choice hα)).right
+  · intro h
+    intro x
+    constructor
+    · exact h.left x
+    · exact h.right
+
+theorem cnf_prenex2 {α : Sort u} [hα : Nonempty α] (a : α → Prop) (b : Prop) : (∀ x, b ∧ a x) ↔ b ∧ (∀ x, a x) := by
+  constructor
+  · intro h
+    constructor
+    · exact (h (Classical.choice hα)).left
+    · intro x
+      exact (h x).right
+  · intro h
+    intro x
+    constructor
+    · exact h.left
+    · exact h.right x
+
+theorem cnf_prenex3 {α : Sort u} (a b : α → Prop) : (∀ x, a x ∧ b x) ↔ (∀ x, a x) ∧ (∀ x, b x) := by
+  constructor
+  · intro h
+    constructor
+    · intro x
+      exact (h x).left
+    · intro x
+      exact (h x).right
+  · intro h
+    intro x
+    constructor
+    · exact h.left x
+    · exact h.right x
+
 syntax "cnfify" "at" ident : tactic
-macro_rules
-  | `(tactic| cnfify at $h:ident) =>
-    `(tactic|
-        simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-          [cnf1, cnf2, and_assoc] at $h:ident <;>
-        simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-          [cnf_prenex1, cnf_prenex2, cnf_prenex3] at $h:ident)
+macro_rules  | `(tactic| cnfify at $a) => `(tactic | (simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [cnf1, cnf2, and_assoc] at $a:ident; simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [cnf_prenex1, cnf_prenex2, cnf_prenex3] at $a:ident))
 
-/-- Close a goal against a proof that differs from it only in how its equations are
-oriented. Vampire orients an equation by its term ordering and Lean's copy need not
-agree, so `exact` alone fails on a proof that is otherwise exactly right. -/
-syntax "symm_match" "using" term : tactic
+def exists' {α : Sort u} (p : α → Prop) := ∃ x, p x
+
+theorem exists'_eq_exists {α : Sort u} (p : α → Prop) : exists' p ↔ ∃ x, p x := by
+  constructor
+  · intro h
+    exact h
+  · intro h
+    exact h
+
+theorem or_exists'_prenex (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) :
+  (A ∨ (exists' B)) ↔ (exists' (fun v0 => A ∨ B v0)) := by
+  simp_all only [exists'_eq_exists, or_exists_prenex]
+
+theorem or_exists'_prenex_left (ι : Type u) [hι : Nonempty ι] (A : Prop) (B : ι → Prop) :
+  ((exists' B) ∨ A) ↔ (exists' (fun v0 => B v0 ∨ A)) := by
+  simp_all only [exists'_eq_exists, or_exists_prenex_left]
+
+theorem and_exists'_prenex_left (ι : Type u) (A : Prop) (B : ι → Prop) :
+   ((exists' B) ∧ A) ↔ (exists' (fun v0 => B v0 ∧ A)) := by
+  simp_all only [exists'_eq_exists, exists_and_right]
+
+theorem and_exists'_prenex (ι : Type u) (A : Prop) (B : ι → Prop) :
+   (A ∧ (exists' B)) ↔ (exists' (fun v0 => A ∧ B v0)) := by
+  simp_all only [exists'_eq_exists, exists_and_left]
+
+theorem exists'_skolem.{v} {α : Sort u} {b : α → Sort v} {p : (x : α) → b x → Prop} :
+  (∀ (x : α), exists' (fun y => p x y)) ↔ exists' (fun f : ((x : α) → b x) => ∀ (x : α), p x (f x)) := by
+  simp_all [exists'_eq_exists, Classical.skolem]
+
+
+theorem exists'_exists_prenex.{v} (α : Type u) (β: Type v) (A : α → β → Prop) : (∃ x: α, exists' (fun y : β => A x y)) ↔ (exists' (fun x: β => ∃ y: α, A y x)) := by
+  simp_all only [exists'_eq_exists]
+  rw[exists_comm]
+
+
+#check Classical.skolem
+
+syntax "existspr_prenex" (" at " ident)? : tactic
+
 macro_rules
-  | `(tactic| symm_match using $h:term) =>
-    `(tactic| first
-        | exact $h
-        | exact ($h).symm
-        | (have _symm_match := $h; grind))
+  | `(tactic| existspr_prenex) => `(tactic| simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [or_exists'_prenex_left, and_exists'_prenex_left, exists'_skolem, or_exists'_prenex, and_exists'_prenex, exists'_exists_prenex] )
+  | `(tactic| existspr_prenex at $a:ident) => `(tactic | simp (config := {maxSteps := 10000000, failIfUnchanged := false}) only [or_exists'_prenex_left, and_exists'_prenex_left, exists'_skolem, or_exists'_prenex, and_exists'_prenex,exists'_exists_prenex] at $a:ident)
+
+open Lean Meta Elab Tactic
+
+/--
+Removes all free variables from the local context except for those specified
+in the `exceptions` array.
+-/
+def _root_.Lean.MVarId.clearAllExcept (mvarId : MVarId) (exceptions : Array FVarId) : MetaM MVarId :=
+  mvarId.withContext do
+    let lctx ← getLCtx
+    -- Collect all fvars in the context that are NOT in the exceptions list
+    let toClear := lctx.foldl (init := #[]) fun acc localDecl =>
+      if exceptions.contains localDecl.fvarId then acc else acc.push localDecl.fvarId
+
+    -- tryClearMany clears from bottom-to-top, handling basic dependency ordering
+    mvarId.tryClearMany toClear
+
+-- Syntax allowing one or more identifiers: e.g., `clear - asdf` or `clear - a b c`
+syntax (name := clearExcept) "clearExcept" (ident+) : tactic
+
+@[tactic clearExcept]
+def evalClearExcept : Tactic := fun stx => do
+  match stx with
+  | `(tactic| clearExcept $ids*) => do
+    let mvarId ← getMainGoal
+    mvarId.withContext do
+      -- Resolve the syntax identifiers to actual FVarIds in the current context
+      let exceptFVarIds ← ids.mapM getFVarId
+      -- Run the clearing function
+      let newMVarId ← mvarId.clearAllExcept exceptFVarIds
+      -- Update the proof state with the new goal
+      replaceMainGoal [newMVarId]
+  | _ => throwUnsupportedSyntax
 
 end Vampire

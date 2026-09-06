@@ -1,3 +1,18 @@
+`Vampire/Logic.lean` is VampLean, copied rather than depended on, and it is the library
+Vampire's own generated Lean files import: one tactic per preprocessing inference rule
+over the propositional and quantifier equivalences those rules need.
+
+    VampLean — https://github.com/vprover/vamplean
+    Part of the Vampire project, https://github.com/vprover
+    Copied from revision 5a62658.
+
+That repository carries no licence file or per-file headers of its own; it is used here
+as part of Vampire, whose licence is at https://vprover.github.io/license.html. The only
+change is that the declarations are in `namespace Vampire` instead of at the root, so
+that a file can import this package and Mathlib at once — upstream declares about a
+dozen names Mathlib also declares, and two modules declaring one name collide at the
+import.
+
 This package contains code ported from lean-smt, used under the Apache License 2.0.
 
     lean-smt — https://github.com/ufmg-smite/lean-smt
