@@ -114,7 +114,24 @@ register_option vampire.portfolioShare : Nat := {
   descr := "percent of `vampire.timeout` for Vampire's own portfolio; 0 to skip it"
 }
 
-/-- The most one strategy of the portfolio may search for. -/
+/--
+The most one strategy of the portfolio may search for.
+
+**Deciseconds, not a share, and deliberately.** `vampire.timeout` is seconds and the two
+stage options are percentages of it, so an absolute duration here looks like an oversight.
+It is the same argument `vampire.probeShare` makes about probes: what makes a slice worth
+running is that it is short *in itself* -- the portfolio's advantage is its first few
+dozen strategies at about a tenth of a second each -- not that it is short relative to
+what the caller allowed. As a fraction of the portfolio's share it would grow with the
+budget, which is the opposite of the point: a generous `vampire.timeout` would stop the
+schedule reaching the diversity the cap exists to preserve.
+
+The cap is also close to inert at the default budget. Over the hundred problems of
+`bench-100/`, lowering it from 20 to 5 alongside `portfolioShare 30` changed nothing --
+same 60 at the time, the same problems, 5.8s more wall clock spent getting there. So the
+guess it was testing, that one slow strategy eats a 3s portfolio, is wrong: what bounds
+the phase is the phase's own deadline, and this only matters when a single slice would
+otherwise run away with it. -/
 register_option vampire.portfolioSlice : Nat := {
   defValue := 20
   descr := "deciseconds a single portfolio strategy may search for, capping what the \
