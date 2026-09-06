@@ -244,19 +244,31 @@ target vampire_ffi.o pkg : FilePath := shimObject pkg "vampire_ffi"
 target vampire_proof.o pkg : FilePath := shimObject pkg "vampire_proof"
 target vampire_build.o pkg : FilePath := shimObject pkg "vampire_build"
 
-/-- The shim. -/
-extern_lib libvampireffi pkg := do
-  let name := nameToStaticLib "vampireffi"
-  let ffiO ← fetch <| pkg.target ``vampire_ffi.o
-  let buildO ← fetch <| pkg.target ``vampire_build.o
-  let proofO ← fetch <| pkg.target ``vampire_proof.o
-  buildStaticLib (pkg.staticLibDir / name) #[ffiO, buildO, proofO]
-
 /--
-Vampire itself, as a second `extern_lib` rather than a `-L`/`-l` pair.
+The shim and Vampire, as one archive.
 
-Both are whole-archived by Lake, so which comes first does not matter for resolution --
-and it is the only way to name the archive by an absolute path, since a target knows
-`pkg` and `moreLinkArgs` does not.
+Two `extern_lib`s do not work: Lake links the one it builds through `buildStaticLib` and
+an `inputBinFile` pointing at a prebuilt archive never reaches the link line, so the
+shared object comes out with `Lib::env` and the rest of Vampire undefined. That failure
+is invisible until Lean loads the library, and it hid for a while behind a stale `.so` --
+Lake does not track `moreLinkArgs`, so a shared object linked before this file was
+rewritten kept being reused and kept working for the old reason.
+
+So the members are merged with `ar`, whose MRI script is the one interface that appends
+one archive's members to another rather than nesting it. One artifact, whose objects are
+all really objects, and nothing depending on link order.
 -/
-extern_lib libvampirecore pkg := fetch <| pkg.target ``vampireArchive
+extern_lib libvampireffi pkg := do
+  let ffiO ← (← fetch <| pkg.target ``vampire_ffi.o).await
+  let buildO ← (← fetch <| pkg.target ``vampire_build.o).await
+  let proofO ← (← fetch <| pkg.target ``vampire_proof.o).await
+  let archive ← (← fetch <| pkg.target ``vampireArchive).await
+  let out := pkg.staticLibDir / nameToStaticLib "vampireffi"
+  IO.FS.createDirAll pkg.staticLibDir
+  let mri := pkg.buildDir / "ffi" / "combine.mri"
+  IO.FS.writeFile mri <| String.intercalate "\n"
+    [s!"CREATE {out}", s!"ADDLIB {archive}",
+     s!"ADDMOD {ffiO} {buildO} {proofO}", "SAVE", "END", ""]
+  -- `ar -M` reads its script on stdin, so this goes through a shell.
+  run "sh" #["-c", s!"ar -M < {mri}"]
+  return pure out
