@@ -235,8 +235,17 @@ macro_rules
 syntax "nnf_transformation" "at" ident : tactic
 macro_rules
   | `(tactic| nnf_transformation at $h:ident) =>
+    -- The negation-pushing rules are here as well as in `ennf_transformation` because
+    -- rewriting `a ↔ b` into `(a ∨ ¬b) ∧ (b ∨ ¬a)` introduces negations over what may be
+    -- compound subformulas, and negation normal form means negations on atoms.
+    --
+    -- It is worth saying that this was added to recover `SEU206+1`, the one problem
+    -- `bench-100/` loses against the VampLean version, and it did not: 58 either way.
+    -- So the remaining mismatch with Vampire's normal form is somewhere else, and the
+    -- lemmas are kept because NNF means what it says, not because they fixed anything.
     `(tactic| simp (config := { maxSteps := 10000000, failIfUnchanged := false }) only
-        [our_iff_to_nnf, our_not_iff_to_nnf, our_xor_to_nnf, our_not_xor_to_nnf]
+        [our_iff_to_nnf, our_not_iff_to_nnf, our_xor_to_nnf, our_not_xor_to_nnf,
+         not_and_or, not_or, Classical.not_not, Classical.not_forall, not_exists]
         at $h:ident)
 
 syntax "flattening" (" at " ident)? : tactic

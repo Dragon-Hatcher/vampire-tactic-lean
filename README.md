@@ -60,10 +60,11 @@ the portfolio off. `vampire.portfolioSlice` caps what a single strategy may have
 deciseconds by default).
 
 That ordering and that split are measured, on 100 random TPTP problems under a 10s wall
-clock: the portfolio last, on a budget of its own equal to `vampire.timeout`, proves 58;
-in the middle on a 30% share it proves 60 and loses nothing. Both halves matter — moving
-it without giving it a share of its own proves 59 and gives a problem up, and a 40% share
-gives the same problem up again. `bench-100/` has the harness.
+clock. The portfolio last, on a budget of its own equal to `vampire.timeout`, proves 58;
+in the middle on a share of its own, 59. Both halves of that matter — moving it without
+giving it a share proves 59 but gives a problem up, and a 40% share gives the same problem
+up again, so the useful window is narrow. `bench-100/` has the harness, and
+`vampire.portfolioShare`'s docstring has the problem names.
 
 When the portfolio is what refuted a goal, the tactic says which strategy did it and
 offers it back:
@@ -114,7 +115,7 @@ Add it to your `lakefile.lean`:
 
 ```lean
 require vampire from git
-  "https://github.com/Dragon-Hatcher/vampire-tactic-lean.git" @ "main"
+  "https://github.com/Dragon-Hatcher/vampire-tactic-lean.git" @ "linux-build-and-coexistence"
 ```
 
 then `lake build`. Nothing else has to be prepared: Lake checks out the Vampire fork the
