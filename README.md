@@ -115,7 +115,7 @@ Add it to your `lakefile.lean`:
 
 ```lean
 require vampire from git
-  "https://github.com/Dragon-Hatcher/vampire-tactic-lean.git" @ "linux-build-and-coexistence"
+  "https://github.com/Dragon-Hatcher/vampire-tactic-lean.git" @ "main"
 ```
 
 then `lake build`. Nothing else has to be prepared: Lake checks out the Vampire fork the
