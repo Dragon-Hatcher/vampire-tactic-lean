@@ -42,23 +42,85 @@ Use `vampire?` to see the problem Vampire was given and the refutation it found;
 leaves the goal alone.
 -/
 
-/-- How long Vampire may search, in seconds. -/
+/--
+The whole search budget, in seconds.
+
+All of it: the three stages below divide this between them and nothing gets a second
+budget of its own. That was not always so -- the default strategy used to take
+`vampire.timeout` and the portfolio a further `vampire.timeout` after it, so `timeout
+10` asked for up to 22s, which is bearable when the number is a search parameter and
+wrong when it is a deadline. If you are giving the tactic a wall clock, this is the
+number to set and it means what it says. -/
 register_option vampire.timeout : Nat := {
   defValue := 10
-  descr := "seconds Vampire may spend searching for a refutation"
+  descr := "seconds Vampire may spend searching, across all stages"
 }
 
-/-- Whether to probe with a tight budget before spending the whole one. -/
-register_option vampire.escalate : Bool := {
-  defValue := true
-  descr := "search under a tight time limit first, then under the whole `vampire.timeout`"
+/--
+Percent of `vampire.timeout` for the probe: Vampire's default strategy, first, briefly.
+
+**A tight limit is a different search and often a better one.** Vampire's default
+saturation algorithm is the limited-resource strategy, which uses the limit to estimate
+which clauses it can still reach and discards the rest, so a tighter budget prunes
+harder and can reach a refutation sooner: `MGT035+2` is 14.9s given 30s and 1.6s given
+2s, `MGT035-2` 6.6s against 1.2s, `HEN009-5` 3.3s against 0.5s. The probe is also what
+keeps a goal that refutes instantly from paying for anything else.
+
+`0` skips it and hands its share to the fallback.
+
+A note on what was lost in making this a fraction. The probes used to be *absolute* --
+20 and 80 deciseconds, included only while small relative to the budget -- on the
+reasoning that what makes a probe worth trying is being small in itself rather than
+small relative to what the caller allowed. At the default 10s that reasoning and this
+one agree, since 20% of it is the 2s probe that was measured; they diverge as the budget
+grows, and at `timeout 60` a 20% "probe" is 12s and not really a probe. Set this lower
+when the budget is large. -/
+register_option vampire.probeShare : Nat := {
+  defValue := 20
+  descr := "percent of `vampire.timeout` for the initial tight probe; 0 to skip it"
 }
 
-/-- Whether a goal the default strategy does not refute is put to Vampire's portfolio. -/
-register_option vampire.portfolio : Bool := {
-  defValue := true
-  descr := "after the default strategy has had the whole budget, try the strategies of \
-    Vampire's own schedule, each for a share of a second budget of `vampire.timeout`"
+/--
+Percent of `vampire.timeout` for Vampire's own portfolio.
+
+**The tactic runs one strategy and Vampire's strength is its portfolio.** Over the 121
+problems of the corpus that are provable and that the default strategy does not refute
+inside 20s, `--mode portfolio --schedule casc` refutes 71 in the same 20s, where
+tripling the default's budget buys three and no single alternative strategy buys any.
+What is missing is not time and not a better strategy but *diversity*; see
+`portfolioSchedule` and `docs/portfolio.md`.
+
+`0` skips it and hands its share to the fallback, which is the old behaviour of
+`vampire.portfolio false`.
+
+**Why the portfolio is in the middle and not last.** It used to run only after the
+default strategy had had the whole budget, so that a goal the default refutes never paid
+for it. Under a deadline that is the wrong way round, because what matters is not what
+the default costs when it succeeds but what it costs when it *fails*, and that is
+everything -- the run is killed inside the default phase and the portfolio never
+happens. Measured over the 100 problems of `bench-100/` under a 10s wall: portfolio last
+proves 58, portfolio in the middle on a share of its own proves 60 and loses nothing.
+The two it gains, `SET351+4` and `SEU417+1`, are ones where the default burned the whole
+wall and the first portfolio slice then refuted in tens of milliseconds.
+
+Both halves of that mattered. Moving the portfolio without giving it its own share
+proves 59 and gives up `NUM506+3`, because it then takes the budget out of the
+default's; and 40% rather than 30% gives `NUM506+3` up again. The useful window is
+narrow.
+
+**What this arrangement actually proves is 59, not the 60 above**, and the one it gives
+back is `NUM506+3` again. The 60 was measured with the fallback holding a *nominal*
+`vampire.timeout` and being cut off by the wall, where dividing the budget strictly
+hands it its share and no more -- a nominal 5s rather than a nominal 10s truncated to
+about 3.5s. Those are not the same search: the limited-resource strategy reads that
+number to decide what to discard, so a smaller one prunes differently rather than merely
+stopping sooner (`vampire.probeShare` has the measurements). Recovering the problem would
+mean letting the fallback search under the whole budget while spending only its share of
+the clock, and then `vampire.timeout` would no longer bound the search, which is worth
+more than one marginal problem -- it flips between three of the configurations tried. -/
+register_option vampire.portfolioShare : Nat := {
+  defValue := 30
+  descr := "percent of `vampire.timeout` for Vampire's own portfolio; 0 to skip it"
 }
 
 /-- The most one strategy of the portfolio may search for. -/
@@ -77,32 +139,28 @@ def timeoutDeciseconds : MetaM UInt32 := do
   return (((← getOptions).get `vampire.timeout (10 : Nat)) * 10).toUInt32
 
 /--
-The time limits to search under, in the order to try them.
+The budget each stage gets, in deciseconds: `(probe, portfolio, fallback)`.
 
-**The time limit is a search parameter, not just a cap.** Vampire's default saturation
-algorithm is the limited-resource strategy, which uses the limit to estimate which
-clauses it can still reach and discards the rest — so a *tighter* budget prunes harder
-and can reach a refutation sooner. Measured through the tactic on the benchmark, with
-the budget the only thing changed: `MGT035+2` 14.9s at 30s against 1.6s at 2s,
-`MGT035-2` 6.6s against 1.2s, `HEN009-5` 3.3s against 0.5s. Handing the prover the whole
-of a generous `vampire.timeout` is therefore the slow way to use it.
+The shares are of `vampire.timeout` and the fallback is what is left, so the three
+always sum to the whole budget and the caller sets one number to bound the search. A
+share of 0 hands its time to the fallback rather than shortening the total, which is
+what makes `probeShare 0` and `portfolioShare 0` mean "skip that stage" rather than
+"search for less".
 
-So probe first and fall back. The last entry is always the whole budget, so a problem
-that needs the wide search still gets it and nothing that used to be provable stops
-being; what a probe costs when it fails is its own limit, which is why the limit has to
-be *enforced* — see `s_embeddedSoftTimeLimit` in `ffi/vampire_build.cpp`.
-
-The probes are absolute rather than fractions of the budget, because what makes a probe
-worth trying is that it is small in itself, not that it is small relative to what the
-user allowed. One at half the budget would mostly duplicate the fallback, so a probe is
-dropped once it reaches that.
+Shares over 100 between them are clamped by giving the fallback nothing; the probe and
+the portfolio keep what they asked for, since a caller who has over-allocated has said
+more clearly what they want tried than what they want fallen back to.
 -/
-def searchSchedule (budget : UInt32) (escalate : Bool) : Array UInt32 := Id.run do
-  if !escalate then return #[budget]
-  let mut out := #[]
-  for probe in [(20 : UInt32), 80] do
-    if 2 * probe <= budget then out := out.push probe
-  return out.push budget
+def stageBudgets (total : UInt32) (probePct portfolioPct : Nat) :
+    UInt32 × UInt32 × UInt32 :=
+  let share := fun (pct : Nat) => total * pct.toUInt32 / 100
+  let probe := share probePct
+  let portfolio := share portfolioPct
+  -- Saturating: `UInt32` subtraction wraps, and an over-allocated pair would otherwise
+  -- turn a zero fallback into a four-billion-decisecond one.
+  let used := probe + portfolio
+  let fallback := if used >= total then 0 else total - used
+  (probe, portfolio, fallback)
 
 /-- One attempt at the problem: a strategy, and how long it may search for. -/
 structure Attempt where
@@ -449,15 +507,22 @@ private def scheduleVerdict (st : Progress) : MessageData :=
 /--
 Translate the goal, then search for a refutation and make something of it.
 
-Two phases. First `searchSchedule`: Vampire's default strategy, under a tight limit and
-then under the whole budget. Then, if `vampire.portfolio` is on and the problem is still
-open, the schedule Vampire's own portfolio would have used for it, strategy by strategy
-under a second budget of the same size — see `portfolioSchedule` for why that is the
-thing that closes the gap, and `docs/portfolio.md` for the measurement.
+Three stages, dividing `vampire.timeout` between them by `stageBudgets`:
 
-The portfolio goes *behind* the default and not in front of it, so a goal the default
-refutes never pays for it; the cost of having it is paid only by a goal that was going
-to fail anyway, and what it buys there is the difference between failing and not.
+1. **the probe** — Vampire's default strategy under a tight limit, which is a different
+   search and often a better one, and which keeps an easy goal from paying for the rest;
+2. **the portfolio** — the schedule Vampire's own portfolio would have used for this
+   problem, strategy by strategy, which is where its strength actually is;
+3. **the fallback** — the default strategy again, with everything left, for the problems
+   that want one strategy searching for seconds rather than many for tenths.
+
+The order is the point and it is measured; `vampire.portfolioShare` has the numbers and
+the two things that go wrong if the portfolio is last instead of in the middle. The
+short of it: under a deadline what matters is what a failing stage costs, and a default
+strategy that has the whole budget and fails has spent all of it.
+
+Anything left over lands on the fallback, which is where truncation belongs -- a wall
+clock that expires during stage 3 has already had the probe and the portfolio.
 
 Only the search is repeated. The translation happens once, and each `Ffi.run` rebuilds
 the problem from the same instruction stream, so a retry costs a rebuild and a search
@@ -470,37 +535,53 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
   let built ← buildProblem cfg mv hs all
   trace[vampire.timing] "translated in {(← IO.monoMsNow) - t0}ms"
   let opts ← getOptions
-  let escalate := opts.getBool `vampire.escalate true
-  let portfolio := opts.getBool `vampire.portfolio true
-  -- A pinned strategy goes in front of everything: the point of naming one is to skip
-  -- the search that found it. Everything else still follows behind, so a pin that no
-  -- longer works costs a run and does not lose the proof.
-  let mut st : Progress := {}
-  unless cfg.strategy.isEmpty do
-    let pinned := #[({ limit := deciseconds, strategy := cfg.strategy } : Attempt)]
-    let (st', r') ← runAttempts built pinned none true use st
-    st := st'
-    if let some a := r' then return (built, st.winner, .ok a)
-  -- Not if the pin already settled it: a strategy that finished the search space has
-  -- said something about the problem, and running another is asking the same question.
-  unless st.settled do
-    let byDefault := (searchSchedule deciseconds escalate).map ({ limit := · })
-    let (st₀, r) ← runAttempts built byDefault none portfolio use st
-    st := st₀
-    if let some a := r then return (built, st.winner, .ok a)
-  -- The portfolio, if the default's whole budget did not settle the question.
-  if portfolio && !st.settled then
+  let (probe, portfolio, fallback) :=
+    stageBudgets deciseconds (opts.get `vampire.probeShare (20 : Nat))
+      (opts.get `vampire.portfolioShare (30 : Nat))
+  trace[vampire.timing] "budget {deciseconds}ds: probe {probe}, portfolio {portfolio}, \
+    fallback {fallback}"
+
+  -- Each stage as a function of what is known so far: the progress it made, and a
+  -- result if it found one. A stage with no budget returns what it was given.
+  let runDefault (limit : UInt32) (more : Bool) (st : Progress) :
+      TermElabM (Progress × Option α) := do
+    -- Not if something already settled it: a strategy that finished the search space has
+    -- said something about the problem, and running another is asking the same question.
+    if st.settled || limit == 0 then return (st, none)
+    runAttempts built #[{ limit }] none more use st
+  let runPortfolio (budget : UInt32) (st : Progress) :
+      TermElabM (Progress × Option α) := do
+    if st.settled || budget == 0 then return (st, none)
     match ← Ffi.schedule built.names built.code with
-    | .error e => trace[vampire] "no portfolio schedule for this problem: {e}"
+    | .error e =>
+      trace[vampire] "no portfolio schedule for this problem: {e}"
+      return (st, none)
     | .ok slices =>
       let cap := (opts.get `vampire.portfolioSlice (20 : Nat)).toUInt32
-      let attempts := portfolioSchedule slices deciseconds cap
-      let deadline := (← IO.monoMsNow) + 100 * deciseconds.toNat
+      let attempts := portfolioSchedule slices budget cap
+      let deadline := (← IO.monoMsNow) + 100 * budget.toNat
       let (st', r') ← runAttempts built attempts (some deadline) false use st
         (headline := false)
-      st := st'
-      trace[vampire.timing] "portfolio: {st.tried} of {attempts.size} strategies run"
-      if let some a := r' then return (built, st.winner, .ok a)
+      trace[vampire.timing] "portfolio: {st'.tried} of {attempts.size} strategies run"
+      return (st', r')
+
+  let mut st : Progress := {}
+  -- A pinned strategy goes in front of everything: the point of naming one is to skip
+  -- the search that found it. It gets the portfolio's share, because that is what it is
+  -- -- `vampire?` offers a pin after a portfolio strategy wins, and one that wins takes
+  -- tens of milliseconds. Everything else still follows behind, so a pin that has gone
+  -- stale costs a stage and cannot lose the proof; giving it the whole budget instead
+  -- would mean a stale pin left nothing for the stages that would have succeeded.
+  unless cfg.strategy.isEmpty do
+    let limit := if portfolio == 0 then deciseconds else portfolio
+    let (st', r') ← runAttempts built #[{ limit, strategy := cfg.strategy }] none true use st
+    st := st'
+    if let some a := r' then return (built, st.winner, .ok a)
+  for stage in [runDefault probe true, runPortfolio portfolio,
+                runDefault fallback false] do
+    let (st', r) ← stage st
+    st := st'
+    if let some a := r then return (built, st.winner, .ok a)
   return (built, none, .error (scheduleVerdict st))
 
 /-- Translate the goal, then search for a refutation, asking nothing of it. -/

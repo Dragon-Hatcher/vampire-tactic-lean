@@ -36,20 +36,34 @@ found, and leaves the goal alone:
 What it prints is Vampire's own rendering of the units it holds — evidence about the
 transfer, produced at the far end of it.
 
-`set_option vampire.timeout n` gives the prover `n` seconds to search (default 10).
-That is a budget and not a single attempt: the search is run under a tight limit first
-and under the whole budget only if it has to be, because Vampire's default saturation
-algorithm reads the limit as a *search parameter*. `set_option vampire.escalate false`
-makes it one attempt at the whole budget.
+`set_option vampire.timeout n` gives the prover `n` seconds to search (default 10), and
+it is the *whole* search: three stages divide it between them and none of them gets a
+budget of its own on top.
 
-A goal the default strategy does not refute is then put to **Vampire's own portfolio** —
-the schedule `--mode portfolio --schedule casc` would have chosen for this problem,
-strategy by strategy, under a second budget of `vampire.timeout`. That is where most of
-the difference between this tactic and the `vampire` binary was; see "Diversity is the
-other half" below and `docs/portfolio.md`. `set_option vampire.portfolio false` turns it
-off, and `vampire.portfolioSlice` caps what one strategy may have (20 deciseconds by
-default). Nothing the default refutes ever reaches it, so the cost is paid only by a
-goal that was going to fail.
+| stage | share | what it is |
+| --- | --- | --- |
+| probe | `vampire.probeShare`, 20% | Vampire's default strategy, briefly |
+| portfolio | `vampire.portfolioShare`, 30% | the schedule `--mode portfolio --schedule casc` would have chosen for this problem, strategy by strategy |
+| fallback | what is left, 50% | the default strategy again, with the rest |
+
+The probe is first because a tight limit is a *different* search and often a better one:
+Vampire's default saturation algorithm reads the limit as a search parameter and prunes
+harder when it is small. The portfolio is in the middle because that is where most of the
+difference between this tactic and the `vampire` binary was — see "Diversity is the other
+half" below and `docs/portfolio.md`. And the fallback is last because a problem that
+wants one strategy searching for seconds, rather than many for tenths, needs somewhere to
+get it.
+
+Either share can be `0`, which hands its time to the fallback rather than shortening the
+total; `probeShare 0` is one attempt at the whole budget, and `portfolioShare 0` turns
+the portfolio off. `vampire.portfolioSlice` caps what a single strategy may have (20
+deciseconds by default).
+
+That ordering and that split are measured, on 100 random TPTP problems under a 10s wall
+clock: the portfolio last, on a budget of its own equal to `vampire.timeout`, proves 58;
+in the middle on a 30% share it proves 60 and loses nothing. Both halves matter — moving
+it without giving it a share of its own proves 59 and gives a problem up, and a 40% share
+gives the same problem up again. `bench-100/` has the harness.
 
 When the portfolio is what refuted a goal, the tactic says which strategy did it and
 offers it back:

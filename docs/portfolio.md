@@ -360,7 +360,8 @@ tactic faster touches them.
 
 **The escalation pays for itself, and the margin is not small.** The 2s probe is thrown
 away on the 9 goals it does not solve, which costs 18.1s of search. Turning it off with
-`vampire.escalate false` and giving every goal the whole budget at once:
+`vampire.probeShare 0` (which was `vampire.escalate false` when this was run) and
+giving every goal the whole budget at once:
 
 | | tactic time | search | passes |
 | --- | ---: | ---: | ---: |
@@ -391,7 +392,7 @@ bindings made it a third of that one goal's replay.
     mkdir -p $SP/base/bench $SP/gap/bench
     for f in $SP/tests/*.lean; do
       sed 's/^set_option vampire.timeout 30$/set_option vampire.timeout 10\
-    set_option vampire.portfolio false/' $f > $SP/base/bench/$(basename $f)
+    set_option vampire.portfolioShare 0/' $f > $SP/base/bench/$(basename $f)
     done
     ./sweep.py $SP/base $SP/base/bench --jobs 4 --exit-when-done
 
