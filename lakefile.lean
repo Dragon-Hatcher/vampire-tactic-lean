@@ -1,22 +1,55 @@
 import Lake
 open Lake DSL System
 
-/-- Checkout of the Vampire fork we build against. -/
-def vampireDir : FilePath :=
-  "../vampire"
+/-!
+# Building the `vampire` tactic
 
-def vampireBuildDir : FilePath := vampireDir / "build"
+The tactic embeds Vampire, so `lake build` has a C++ project to get hold of and compile
+before there is anything for Lean to link. It does that itself: `vampireSource` checks
+out the fork at a pinned revision under `.lake/`, and `vampireArchive` runs its CMake
+build. Nothing has to be prepared by hand and nothing is expected to sit beside this
+package, so `require vampire from git ...` is all a downstream project needs.
+
+Every path here is absolute, derived from `pkg.dir` or `pkg.buildDir`. That is not
+tidiness: Lake runs the compiler from the *root* package's directory, so a relative
+`-I` or `-L` in a package that is someone's dependency resolves against their directory
+rather than this one. Relative paths are why this package used to work only when it was
+itself the root.
+
+Requires `cmake`, `git` and a C++20 compiler. The Vampire build is a few minutes once,
+then cached like any other Lake target.
+-/
+
+/-- The Vampire fork the shim is written against, pinned. -/
+def vampireUrl : String :=
+  "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
+
+/-- The revision of that fork. The shim calls into Vampire's internals, which are not a
+stable interface, so this is a hard pin rather than a branch. -/
+def vampireRev : String := "b86421484"
+
+/-- Include paths for compiling the shim against a Vampire checkout. -/
+def vampireIncludes (src : FilePath) : Array String := #[
+  "-I" ++ src.toString,
+  "-I" ++ (src / "viras" / "src").toString,
+  "-I" ++ (src / "mini-gmp-6.3.0").toString,
+  "-I" ++ (src / "cadical" / "src").toString
+]
 
 /-- The flags Vampire's own objects are compiled with; the shim must agree. -/
-def vampireCompileArgs : Array String := #[
+def vampireCompileArgs (src : FilePath) : Array String := #[
   "-std=c++20", "-fno-threadsafe-statics", "-fno-rtti",
   "-DVDEBUG=0", "-DCHECK_LEAKS=0", "-DNBUILD=1", "-DNCLOSEFROM=1",
-  "-DVTIME_PROFILING=0", "-DVZ3=0", "-DNDEBUG",
-  "-I" ++ vampireDir.toString,
-  "-I" ++ (vampireDir / "viras" / "src").toString,
-  "-I" ++ (vampireDir / "mini-gmp-6.3.0").toString,
-  "-I" ++ (vampireDir / "cadical" / "src").toString
-]
+  "-DVTIME_PROFILING=0", "-DVZ3=0", "-DNDEBUG"
+] ++ vampireIncludes src
+
+/-- Run a command, failing the build with its output if it fails. -/
+def run (cmd : String) (args : Array String) (cwd : Option FilePath := none) :
+    JobM Unit := do
+  let out ← IO.Process.output { cmd, args, cwd := cwd.map (·.toString) }
+  if out.exitCode != 0 then
+    error s!"{cmd} {" ".intercalate args.toList} failed with {out.exitCode}:\n\
+      {out.stdout}\n{out.stderr}"
 
 /--
 The C++ standard library to link against: libc++ under Apple's toolchain, libstdc++
@@ -91,19 +124,21 @@ def cxxStdlib : Array String :=
     | _, _, _ => return #["-lstdc++"]
 
 package vampire where
-  -- Link the embedded prover. `vampire_lib` is a static archive of the same objects
-  -- the `vampire` executable is built from; see the fork's CMakeLists.
-  moreLinkArgs := #[
-    "-L" ++ vampireBuildDir.toString, "-lvampire_lib"
-  ] ++ cxxStdlib
+  -- Only the C++ runtime, which `cxxStdlib` gives as absolute paths. Vampire itself
+  -- arrives as an `extern_lib` rather than through `-L`/`-l`, because an `extern_lib`
+  -- is built in a monadic target that knows where this package is, and a relative
+  -- `-L` in `moreLinkArgs` would be read from whoever's project is the root.
+  moreLinkArgs := cxxStdlib
 
-require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
-
--- Monomorphisation. `Vampire/Preprocess/Mono.lean` is a port of lean-smt's
--- `Smt/Preprocess/Mono.lean`, which drives auto's `runMono`; the pinned tag is the one
--- lean-smt itself pins for this toolchain.
 require auto from git
   "https://github.com/leanprover-community/lean-auto.git" @ "v4.33.0"
+
+-- Still a path dependency, and it is the one thing left standing between this package
+-- and `require vampire from git ...`. See `docs/vamplean.md`: upstream declares a dozen
+-- names at the root that Mathlib also declares, so the checkout this needs is a
+-- namespaced one, and the repository carries no licence under which it could be
+-- vendored here instead.
+require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
 
 @[default_target] lean_lib Vampire where
   globs := #[.one `Vampire, .submodules `Vampire]
@@ -114,12 +149,73 @@ require auto from git
 @[default_target] lean_lib Test where
   globs := #[.one `Test, .submodules `Test]
 
-/-- The prebuilt Vampire archive, as an input. -/
-target vampire_archive : FilePath := do
-  let archive := vampireBuildDir / "libvampire_lib.a"
-  unless (← archive.pathExists) do
-    error s!"missing {archive}\n\
-      build it first: cmake --build {vampireBuildDir} --target vampire_lib"
+/--
+A checkout of the Vampire fork, at `vampireRev`.
+
+Under `.lake/` so that it is build output and `lake clean` reaches it. Set
+`VAMPIRE_TACTIC_SRC` to an existing checkout to work against one you are editing, which
+is what the fork's own development wants; nothing then fetches or checks out anything.
+-/
+target vampireSource pkg : FilePath := do
+  if let some dir ← IO.getEnv "VAMPIRE_TACTIC_SRC" then
+    let dir : FilePath := dir
+    unless ← (dir / "CMakeLists.txt").pathExists do
+      error s!"VAMPIRE_TACTIC_SRC={dir} has no CMakeLists.txt"
+    return pure dir
+  let src := pkg.buildDir / "vampire"
+  unless ← (src / ".git").pathExists do
+    IO.FS.createDirAll pkg.buildDir
+    logInfo s!"fetching Vampire into {src}"
+    run "git" #["clone", "--no-checkout", vampireUrl, src.toString]
+  -- Idempotent, and the tree has to be tested as well as the commit: a `--no-checkout`
+  -- clone is *already* at the pinned revision with no files in it, so checking the
+  -- revision alone skips the checkout and leaves cmake nothing to configure.
+  let head ← IO.Process.output
+    { cmd := "git", args := #["rev-parse", "HEAD"], cwd := src.toString }
+  let atPin := head.exitCode == 0 && head.stdout.startsWith vampireRev
+  unless atPin && (← (src / "CMakeLists.txt").pathExists) do
+    run "git" #["fetch", "--all", "--tags"] src
+    run "git" #["checkout", "--force", vampireRev] src
+  return pure src
+
+/--
+`libvampire_lib.a`: the same objects the `vampire` executable is built from, as an
+archive, via the target the fork adds for embedding.
+
+`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` is required and not a preference. The archive
+ends up inside a shared object, because `precompileModules` needs one, and on ELF
+platforms that shared object cannot contain non-PIC objects. The Apple toolchain
+compiles PIC by default and so never asks.
+-/
+target vampireArchive pkg : FilePath := do
+  let srcJob ← fetch <| pkg.target ``vampireSource
+  let src ← srcJob.await
+  -- An archive already built inside the checkout is taken as it stands. That is the
+  -- normal case when `VAMPIRE_TACTIC_SRC` points at a tree being worked on by hand, and
+  -- it keeps editing the fork from meaning a second copy of a 350-file C++ build.
+  let insitu := src / "build" / "libvampire_lib.a"
+  if ← insitu.pathExists then
+    logInfo s!"using the archive already built at {insitu}"
+    return (← inputBinFile insitu)
+  let build := pkg.buildDir / "vampire-build"
+  let archive := build / "libvampire_lib.a"
+  unless ← archive.pathExists do
+    logInfo "configuring Vampire (cmake)"
+    run "cmake" #["-S", src.toString, "-B", build.toString,
+                  "-DCMAKE_BUILD_TYPE=Release",
+                  "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"]
+    -- Two jobs, and the number is about memory rather than time. Vampire is ~350
+    -- translation units of template-heavy C++ and g++ peaks over a gigabyte on several
+    -- of them, so a job per core wants more memory than a 16GB machine has and it does
+    -- not degrade gracefully -- it swaps, thrashes, and stops responding. `--parallel`
+    -- with no number, which is what this said first, is a job per core.
+    -- `VAMPIRE_TACTIC_JOBS` raises it for anyone with the memory to spare.
+    let jobs := (← IO.getEnv "VAMPIRE_TACTIC_JOBS").getD "2"
+    logInfo s!"building Vampire with {jobs} job(s); some minutes, once. Raise \
+      VAMPIRE_TACTIC_JOBS if you have the memory for it."
+    run "cmake" #["--build", build.toString, "--target", "vampire_lib", "-j", jobs]
+  unless ← archive.pathExists do
+    error s!"Vampire's build produced no {archive}"
   inputBinFile archive
 
 /--
@@ -140,30 +236,33 @@ def archiveIdFlag (archive : FilePath) : JobM String := do
   let trace : BuildTrace ← computeTrace archive
   return s!"-DVAMPIRE_ARCHIVE_ID=\"{trace.hash}\""
 
-target vampire_ffi.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_ffi.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_ffi.cpp"
-  let archive ← (← fetch <| pkg.target ``vampire_archive).await
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
+/-- The shim's three translation units, compiled against the checkout. -/
+def shimObject (pkg : NPackage _package.name) (stem : String) :
+    FetchM (Job FilePath) := do
+  let oFile := pkg.buildDir / "ffi" / (stem ++ ".o")
+  let srcJob ← inputTextFile <| pkg.dir / "ffi" / (stem ++ ".cpp")
+  let src ← (← fetch <| pkg.target ``vampireSource).await
+  let archive ← (← fetch <| pkg.target ``vampireArchive).await
+  let flags := vampireCompileArgs src ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
   buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
 
-target vampire_proof.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_proof.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_proof.cpp"
-  let archive ← (← fetch <| pkg.target ``vampire_archive).await
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
-  buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
+target vampire_ffi.o pkg : FilePath := shimObject pkg "vampire_ffi"
+target vampire_proof.o pkg : FilePath := shimObject pkg "vampire_proof"
+target vampire_build.o pkg : FilePath := shimObject pkg "vampire_build"
 
-target vampire_build.o pkg : FilePath := do
-  let oFile := pkg.buildDir / "ffi" / "vampire_build.o"
-  let srcJob ← inputTextFile <| pkg.dir / "ffi" / "vampire_build.cpp"
-  let archive ← (← fetch <| pkg.target ``vampire_archive).await
-  let flags := vampireCompileArgs ++ #["-I", (← getLeanIncludeDir).toString, "-fPIC"]
-  buildO oFile srcJob flags #[← archiveIdFlag archive] "c++"
-
+/-- The shim. -/
 extern_lib libvampireffi pkg := do
   let name := nameToStaticLib "vampireffi"
   let ffiO ← fetch <| pkg.target ``vampire_ffi.o
   let buildO ← fetch <| pkg.target ``vampire_build.o
   let proofO ← fetch <| pkg.target ``vampire_proof.o
   buildStaticLib (pkg.staticLibDir / name) #[ffiO, buildO, proofO]
+
+/--
+Vampire itself, as a second `extern_lib` rather than a `-L`/`-l` pair.
+
+Both are whole-archived by Lake, so which comes first does not matter for resolution --
+and it is the only way to name the archive by an absolute path, since a target knows
+`pkg` and `moreLinkArgs` does not.
+-/
+extern_lib libvampirecore pkg := fetch <| pkg.target ``vampireArchive
