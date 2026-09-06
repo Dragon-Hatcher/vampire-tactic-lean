@@ -66,6 +66,13 @@ giving it a share proves 59 but gives a problem up, and a 40% share gives the sa
 up again, so the useful window is narrow. `bench-100/` has the harness, and
 `vampire.portfolioShare`'s docstring has the problem names.
 
+**Read all of those numbers as ±several problems.** A second, independent hundred drawn
+the same way (`bench-holdout/`, a different seed, two problems of overlap) scores 69
+rather than 59 on the same defaults and the same limit. The tuning is not overfitted —
+that is the point of drawing a second sample — but a ten-problem spread between two
+samples of a hundred is larger than most of the differences these figures are used to
+argue about, this README's included.
+
 When the portfolio is what refuted a goal, the tactic says which strategy did it and
 offers it back:
 
