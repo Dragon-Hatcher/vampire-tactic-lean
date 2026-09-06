@@ -674,7 +674,9 @@ private def suggestStrategy (winner : Option Attempt) (cfg : Config)
   if a.strategy.isEmpty || a.strategy == cfg.strategy then return
   -- `reprint` gives the hints back as the user wrote them, whitespace and all, which is
   -- what makes the suggestion something to copy rather than to read.
-  let hs := (hints.reprint.getD "").trimRight
+  -- `trimAsciiEnd`, not the deprecated `trimRight`: the replacement returns a
+  -- `String.Slice`, so it needs bringing back to a `String` rather than swapping in.
+  let hs := (hints.reprint.getD "").trimAsciiEnd.toString
   logInfo m!"vampire: refuted by a portfolio strategy, after the default failed. \
     To go straight to it next time:\n  \
     vampire (strategy := {repr a.strategy}){hs}"

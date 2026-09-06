@@ -1401,10 +1401,20 @@ def skolemise (i : Interp) (syms : Symbols) (s : Step) (parent : Expr) :
         m!"hoisting the next witness for skolemisation {s.number}"
     let ty := (← instantiateMVars (← inferType h)).consumeMData
     unless ty.isAppOf ``Exists do
+      -- `missing` is reported here and nowhere else, which is the whole reason it is
+      -- computed: a skolemisation that runs out of witnesses has usually run out
+      -- because a sort could not be shown non-empty, and saying which one turns this
+      -- from a report about the shape of a formula into something to act on.
+      let why :=
+        if missing.isEmpty then m!""
+        else m!"\n\nNon-emptiness could not be established for \
+          {MessageData.joinSep (missing.map fun (n, σ) => m!"{n} : {σ}") ", "}, \
+          which is usually why. An `[Inhabited _]` or `[Nonempty _]` instance for \
+          those, or a hypothesis naming an element, is what is wanted."
       throwError "vampire: step {s.number} has {s.skolems.size} skolem symbols but \
         after prenexing its parent is{indentD ty}\nwhich has no further witness to \
         take. The parent was{indentD (← inferType parent)}\nand `exists_prenex` made \
-        it{indentD prenexed}"
+        it{indentD prenexed}{why}"
     witnesses := witnesses.push (f, ← mkAppM ``Classical.choose #[h])
     h ← mkAppM ``Classical.choose_spec #[h]
   return (witnesses, h)

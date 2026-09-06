@@ -1,5 +1,10 @@
 import Test.Mono
 
+-- The unused-variable linter cannot see through `vampire [*]`, which takes the whole
+-- local context: every hypothesis below *is* used, just not by name in a proof term.
+set_option linter.unusedVariables false
+set_option linter.unusedSectionVars false
+
 /-!
 First-order group theory, over the `Group` class and `+mono`.
 

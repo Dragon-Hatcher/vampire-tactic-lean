@@ -1,5 +1,10 @@
 import Vampire
 
+-- The unused-variable linter cannot see through `vampire [*]`, which takes the whole
+-- local context: every hypothesis below *is* used, just not by name in a proof term.
+set_option linter.unusedVariables false
+set_option linter.unusedSectionVars false
+
 /-!
 Monomorphisation, by way of lean-auto.
 

@@ -1,5 +1,10 @@
 import Vampire
 
+-- The unused-variable linter cannot see through `vampire [*]`, which takes the whole
+-- local context: every hypothesis below *is* used, just not by name in a proof term.
+set_option linter.unusedVariables false
+set_option linter.unusedSectionVars false
+
 /-!
 Unit tests for the two pieces of the replay that reconcile formulas by construction
 rather than by rewriting: `Vampire/Prenex.lean`'s `vampire_or_prenex` and the rules
