@@ -303,3 +303,33 @@ context, which is a much larger change than the reset.
    global lock for the duration of every call.
 5. **Determinism is restored by the reset** (`Random::_seed` and the unit counters are
    both reset), but the allocator's pools are not, so a long-lived process grows.
+
+## The export gap on forward subsumption resolution
+
+`NUM591+1` in `bench-100/` fails with
+
+    step 13485 (forward subsumption resolution) carries no recorded resolved literal,
+    so this proof cannot be exported
+
+and it is worth writing down because the obvious readings are all wrong. It is not a
+budget problem — a portfolio strategy refutes it in 139ms. It is not an unported rule —
+forward subsumption resolution replays fine elsewhere. And it is not the stale-entry bug
+fixed in `Kernel/Clause.cpp`; this is the same data missing rather than stale.
+
+Three places in the fork build a `FORWARD_SUBSUMPTION_RESOLUTION` inference:
+
+| site | records the resolved literal |
+| --- | --- |
+| `Inferences/CodeTreeForwardSubsumptionAndResolution.cpp` | yes |
+| `Inferences/SubsumptionDemodulationHelper.cpp` | no |
+| `SATSubsumption/SATSubsumptionAndResolution.cpp` | no |
+
+Only the first inserts into `env.proofExtra`, so a step produced by either of the others
+is unexportable however the search reached it. The replay never sees a proof to attempt.
+
+The fix is on the C++ side and looks small — insert the resolved literal in the other two
+paths under `proofExtra() == FULL || LEAN`, as the CodeTree path already does. Worth
+doing before any further budget tuning: the remaining gap to the `vampire` binary is
+export and replay coverage, not search time. Two of the four problems in that gap need
+6–7s from the binary alone and a third spends 6.5s being elaborated, so tuning shares
+cannot reach them either.
