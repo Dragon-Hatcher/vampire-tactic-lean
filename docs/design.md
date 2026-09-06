@@ -83,7 +83,8 @@ of this. Nothing here is needed to *use* the tactic.
   inference, proved by a tactic script, chained by a `fullProof` that applies them in
   turn. `Vampire/Reconstruct.lean` produces the same proof in the elaborator, as `Expr`s
   and tactic `Syntax` rather than as source text, including this fork's own changes to
-  those scripts. The tactics themselves come from VampLean, so this library owns
+  those scripts. The tactics themselves are `Vampire/Logic.lean`, copied from VampLean
+  and namespaced (see `NOTICE`), so this library owns
   translation and replay, not the inference-level lemmas.
 - **Where a formula has to be reconciled, do it structurally.** The generated file is a
   file: it can state a junction in whatever order it likes, because both ends of every
@@ -169,7 +170,9 @@ of this. Nothing here is needed to *use* the tactic.
 ## Layout
 
     Vampire.lean                    library root
+    Vampire/Logic.lean              the equivalences and tactics the scripts use
     Vampire/Attribute.lean          the `@[vampire_translate]` registry
+    Vampire/Preprocess.lean         the preprocessing steps, as one import
     Vampire/Recognizers.lean        matching Lean terms against what translates
     Vampire/Data/Graph.lean         the dependency graph
     Vampire/Preprocess/             hints into the context, intros, negate the goal
