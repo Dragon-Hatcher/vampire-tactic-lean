@@ -1,5 +1,5 @@
 import Lean
-import VampLean
+import Vampire.Logic
 import Vampire.Avatar
 import Vampire.Bridge
 import Vampire.Clause
@@ -8,15 +8,6 @@ import Vampire.Prenex
 import Vampire.Proof
 import Vampire.Sat
 import Vampire.Support
--- `open VampLean`, and it is load-bearing. The replay scripts below are built inside
--- quotations, and quotation identifiers resolve in *this* file's scope, so the lemmas
--- they name -- `not_imp_not`, `not_and_or`, `imp_iff_not_or`, `not_not` and the rest --
--- have to be in scope here. VampLean used to declare them at the root, which is how
--- they resolved before it was namespaced; none of them is in Lean core, so without this
--- a script that names one dies at replay time with `Unknown identifier` and the tactic
--- reports the step as unreplayable. That is invisible at compile time, because a
--- quotation is only syntax until it runs.
-open VampLean
 
 /-!
 # Replaying a refutation as a Lean proof
@@ -242,11 +233,11 @@ partial def formExpr (i : Interp) (syms : Symbols) (vs : Vars) : FForm → MetaM
     -- `<~>` prints as, and the ennf/nnf lemma sets (`not_iff_xor`, `our_xor_to_nnf`, …)
     -- rewrite *into* it. Desugaring to `¬(a ↔ b)` here would leave a formula those
     -- lemmas never fire on, so the reference generator uses `Xor'` and so do we.
-    -- Qualified: `VampLean.Xor'` is namespaced so that this library and Mathlib can be
+    -- Qualified: `Xor'` is namespaced so that this library and Mathlib can be
     -- imported together, and Mathlib has an `Xor'` of its own that no VampLean lemma
     -- mentions -- an unqualified `Xor'` would resolve to that one wherever both are in
     -- scope, and the replay would then rewrite nothing.
-    return mkApp2 (.const ``VampLean.Xor' []) (← formExpr i syms vs a) (← formExpr i syms vs b)
+    return mkApp2 (.const ``Xor' []) (← formExpr i syms vs a) (← formExpr i syms vs b)
   | .all vars f => quantified i syms vs vars f true 0
   | .ex vars f => quantified i syms vs vars f false 0
   | .split v => do
@@ -662,14 +653,14 @@ size.
 -/
 def orPrenex (v : Ident) : TermElabM (TSyntax `tactic) := do
   let cfg ← `(optConfig| (config := { maxSteps := 10000000 }))
-  -- Qualified, like `VampLean.Xor'` above and for the same reason: these two are
+  -- Qualified, like `Xor'` above and for the same reason: these two are
   -- VampLean's and nothing else's, and VampLean is namespaced so that it and Mathlib
   -- can be imported together. The lemma names in the other scripts here --
   -- `imp_iff_not_or`, `not_and_or`, `not_imp_not` -- are core's and are left alone;
   -- VampLean states each of those identically, so which one a script gets does not
   -- matter, and leaving them unqualified is what keeps that true.
-  let left ← `(tactic| simp $cfg:optConfig only [VampLean.or_forall_prenex_left] at $v:ident)
-  let right ← `(tactic| simp $cfg:optConfig only [VampLean.or_forall_prenex] at $v:ident)
+  let left ← `(tactic| simp $cfg:optConfig only [or_forall_prenex_left] at $v:ident)
+  let right ← `(tactic| simp $cfg:optConfig only [or_forall_prenex] at $v:ident)
   `(tactic| repeat (first
       | $(← `(tacticSeq| $left:tactic
                          $right:tactic))

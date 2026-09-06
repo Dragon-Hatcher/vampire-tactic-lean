@@ -107,6 +107,7 @@ which stops before the replay, is the quick way to tell the prover apart from th
 replay. `set_option vampire.checkReplay true` re-checks the assembled proof term with
 `Meta.check` before the kernel sees it; the applications it is made of are checked as
 they are made, so this is a debugging aid rather than a safeguard.
+
 ## Install
 
 Add it to your `lakefile.lean`:
@@ -134,12 +135,6 @@ VAMPIRE_TACTIC_JOBS=8 lake build
 Working on the fork itself: point `VAMPIRE_TACTIC_SRC` at a checkout and nothing is
 fetched. An archive already built at `<checkout>/build/libvampire_lib.a` is used as it
 stands, so you are not paying for that build twice.
-
-> **One caveat before you rely on the `require` above.** The tactic still depends on
-> [VampLean](https://github.com/vprover/vamplean) by *path*, and upstream declares a
-> dozen names at the root that Mathlib also declares — so a file cannot currently import
-> both. `docs/vamplean.md` sets out what is involved; until it is resolved, installing
-> from git needs a namespaced VampLean checkout beside this one.
 
 ## What translates
 
@@ -189,9 +184,9 @@ clauses, and the SAT refutation — replayed as this fork's explicit resolution 
 rather than by re-solving the SAT problem in Lean.
 
 **Not replayed.** Theory axioms: the generated file emits a Lean `axiom` for each, which
-a tactic cannot do. Arithmetic evaluation, whose script needs `norm_num1` — Mathlib-
-backed, and gone since VampLean dropped Mathlib; the translation produces no arithmetic
-either. `rectify`'s recorded renamings, which are not exported: `symm_match` and a
+a tactic cannot do. Arithmetic evaluation, whose script needs `norm_num1` — which is
+Mathlib's, and this package does not depend on Mathlib; the translation produces no
+arithmetic either. `rectify`'s recorded renamings, which are not exported: `symm_match` and a
 permutation fallback cover the alpha-equivalent and reordered cases between them. And
 the `bv_decide` encoding of the SAT refutation, which the generator falls back to when
 the solver's derivation is unavailable.
@@ -220,7 +215,6 @@ replay separately, which is how to tell a slow translation from a slow search.
 ## Further reading
 
 * `docs/design.md` — how the pipeline is put together and why, and what it is a port of
-* `docs/vamplean.md` — the one remaining obstacle to installing from git
 * `docs/portfolio.md` — why the portfolio is worth its share of the budget, measured
 * `docs/comparison.md` — `vampire`, `duper` and `smt` on the same problems
 * `docs/vampire-global-state.md` — the shared mutable state an embedded prover has to reset

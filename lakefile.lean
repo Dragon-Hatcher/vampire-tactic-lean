@@ -133,12 +133,6 @@ package vampire where
 require auto from git
   "https://github.com/leanprover-community/lean-auto.git" @ "v4.33.0"
 
--- Still a path dependency, and it is the one thing left standing between this package
--- and `require vampire from git ...`. See `docs/vamplean.md`: upstream declares a dozen
--- names at the root that Mathlib also declares, so the checkout this needs is a
--- namespaced one, and the repository carries no licence under which it could be
--- vendored here instead.
-require vamp_lean from ".." / "bodingbauer-etall" / "vamplean"
 
 @[default_target] lean_lib Vampire where
   globs := #[.one `Vampire, .submodules `Vampire]
