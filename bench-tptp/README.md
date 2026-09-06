@@ -1,5 +1,24 @@
 # Extended TPTP benchmark
 
+> **Two generations live here, and only one should be used for comparisons.**
+>
+> `tptp2lean.py` reads a TPTP problem and converts it directly. Nothing runs a prover to
+> decide what gets included, so the resulting set is neutral between tactics. This is the
+> current pipeline, and `../../bench-100/` drives it.
+>
+> `gen.sh` → `extract.py` → `one.sh` is the older one: it runs Vampire on each problem
+> and keeps the `fullProof` statement out of the proof it found. That makes a good
+> *regression* set — every problem in it is known replayable — and a bad comparison,
+> because every problem in it is one Vampire could refute, chosen by Vampire's own
+> search. `tptp2lean.py`'s header and `../docs/comparison.md` both say so. Use it to
+> catch replay regressions, never to compare tactics.
+>
+> `sweep.py` and `compare.py` serve live pages for long runs; `parity.sh`/`parity.py`
+> diff the tactic against the `vampire` binary; `paired.py` and `onefile.py` are
+> narrower timing tools. `retarget.py` rewrites tests for `duper`/`smt` and is
+> superseded for new work by `../../bench-100/sample.py`, which emits all four variants
+> directly.
+
 A second benchmark alongside `../../bodingbauer-etall/bench/work` (the paper's original
 57 problems, described in `docs/STATUS.md`). Same idea, wider net: pull more TPTP
 problems, run the reference generator once per problem to get a `fullProof` statement
