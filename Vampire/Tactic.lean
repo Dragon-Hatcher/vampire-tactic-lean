@@ -138,6 +138,50 @@ register_option vampire.portfolioSlice : Nat := {
     schedule asks for; 0 for no cap"
 }
 
+/--
+On a problem with arithmetic in it, spend the whole budget the way the `vampire` binary
+does: Vampire's own schedule, with the slices that schedule chose, and no default-strategy
+stages either side of it.
+
+The three-stage split the other options describe was measured on 100 random *untyped*
+first-order problems, where the default saturation strategy is a strong opening move. On
+arithmetic it is not, and the binary knows this: `getCasc2025Schedule` branches on
+`Property::hasNumerals` and hands the whole run to `getAlascaAwareAriSchedule`, an
+ALASCA-aware schedule whose lines carry their own budgets. The tactic was giving that
+schedule 30% of the time in slices capped at `portfolioSlice`, and spending the other 70%
+running the default strategy twice.
+
+Measured on `bench-smtlib/`'s hundred SMT-LIB arithmetic problems: on `LRA_formula_040`
+the probe spends 2.1s reaching its time limit without refuting, the fallback is handed 5s
+to do the same again, and the schedule sees 3s in 2s slices -- so two or three ALASCA
+strategies run out of the dozens the binary would try. `bench-smtlib/README.md` has the
+counts either way.
+
+**Off by default, and the reason is a hang rather than a measurement.** Turning it on
+makes `Test/Numbers.lean` segfault inside `Indexing::SubstitutionTree::insert`. The cause
+is not the reallocation itself: it is that the ARI schedule's strategies then get to run
+at all. Under the probe-heavy split those goals are refuted by Vampire's *default*
+strategy before the schedule is reached, so the ALASCA strategies are never exercised —
+and when they are, they hit process-global state that does not survive
+`Lib::resetGlobalState`. Four such caches are already fixed for arithmetic to work at all
+(`NumTraits`'s functor and constant caches, `Perfect`'s sharing memo, and
+`InequalityNormalizer::global`'s polynomial evaluator; see
+`docs/vampire-global-state.md`), and this is the fifth. The binary never meets any of them
+because its portfolio forks a process per strategy, which an embedded prover cannot.
+
+So the reallocation is measurably right and cannot be switched on yet. It is kept, with
+its measurements, because the next person to look at this should not have to rediscover
+either half: that the probe is waste on arithmetic, and that collecting the waste needs
+the reset path fixed first. `bench-smtlib/README.md` has the counts.
+
+It changes nothing on a problem without a numeric sort in it.
+-/
+register_option vampire.arithPortfolio : Bool := {
+  defValue := false
+  descr := "on an arithmetic problem, move the probe's share to Vampire's own schedule"
+}
+
+
 namespace Vampire
 
 open Lean Elab Tactic Meta
@@ -294,6 +338,10 @@ structure Built where
   /-- What each assertion in the built problem is, in the order Vampire numbers its
   input units — so input unit `k` is `inputs[k-1]`. -/
   inputs : Array Input
+  /-- Whether the problem has one of Vampire's numeric sorts in it.
+
+  What the budget split turns on; see `vampire.arithPortfolio`. -/
+  hasArith : Bool
   /-- The compiled problem: the symbol names and the instruction stream. -/
   names : Array String
   code : Array UInt32
@@ -336,7 +384,7 @@ def buildProblem (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) :
     let q ← Query.generateQuery hs₁.toList fvNames
     let rendered := MessageData.joinSep (q.commands.map toMessageData) Format.line
     trace[vampire] "problem:{indentD rendered}"
-    let (names, code, sources) ← compile q.commands
+    let (names, code, sources, hasArith) ← compile q.commands
     let mut inputs : Array Input := #[]
     let mut next := 0
     for src in sources do
@@ -351,7 +399,7 @@ def buildProblem (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) :
           | throwError "vampire: no Lean term for the definition '{nm}'"
         inputs := inputs.push (.definition e)
     return { commands := q.commands, symbols := q.symbols, inputs, names, code,
-             goal := mv₁, root := mv₀ }
+             hasArith, goal := mv₁, root := mv₀ }
 
 /-- The problem as Vampire itself renders it, for diagnostics. -/
 def problemAsVampireSeesIt : MetaM MessageData := do
@@ -543,11 +591,21 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
   let built ← buildProblem cfg mv hs all
   trace[vampire.timing] "translated in {(← IO.monoMsNow) - t0}ms"
   let opts ← getOptions
+  -- Arithmetic goes to the schedule whole; see `vampire.arithPortfolio`.
+  let arith := built.hasArith && opts.get `vampire.arithPortfolio false
   let (probe, portfolio, fallback) :=
-    stageBudgets deciseconds (opts.get `vampire.probeShare (20 : Nat))
+    if arith then
+      -- The probe's share goes to the schedule; the fallback stays. The probe is where
+      -- the measured waste is -- on `LRA_formula_040` it spends its whole 2.1s reaching
+      -- its time limit without refuting -- and moving only that is the largest change
+      -- that arithmetic goals survive. See `vampire.arithPortfolio`.
+      let probeShare := opts.get `vampire.probeShare (20 : Nat)
+      let portfolioShare := opts.get `vampire.portfolioShare (30 : Nat)
+      stageBudgets deciseconds 0 (min 100 (probeShare + portfolioShare))
+    else stageBudgets deciseconds (opts.get `vampire.probeShare (20 : Nat))
       (opts.get `vampire.portfolioShare (30 : Nat))
   trace[vampire.timing] "budget {deciseconds}ds: probe {probe}, portfolio {portfolio}, \
-    fallback {fallback}"
+    fallback {fallback}{if arith then " (arithmetic: the whole budget to the schedule)" else ""}"
 
   -- Each stage as a function of what is known so far: the progress it made, and a
   -- result if it found one. A stage with no budget returns what it was given.
@@ -565,6 +623,17 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
       trace[vampire] "no portfolio schedule for this problem: {e}"
       return (st, none)
     | .ok slices =>
+      -- The cap stays on for arithmetic, and this is a *concession* rather than a
+      -- design: the ARI schedule's lines carry their own budgets and uncapping them is
+      -- what the binary effectively does, but it takes the number of attempts from about
+      -- two to about ten, and every attempt is a `Lib::resetGlobalState`. Vampire's
+      -- arithmetic machinery does not survive that many: uncapped, `Test/Numbers.lean`
+      -- segfaults in `SubstitutionTree::insert`, on top of the four process-global
+      -- caches already fixed for it. The binary never meets this because its portfolio
+      -- forks a process per strategy and an embedded prover cannot.
+      --
+      -- So arithmetic gets the whole budget -- which is where the measured waste was --
+      -- at the same slice as everything else. See `vampire.arithPortfolio`.
       let cap := (opts.get `vampire.portfolioSlice (20 : Nat)).toUInt32
       let attempts := portfolioSchedule slices budget cap
       let deadline := (← IO.monoMsNow) + 100 * budget.toNat
@@ -600,11 +669,18 @@ def run (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) (deciseconds
   let (built, winner, r) ← searchWith cfg mv hs all deciseconds (fun _ => pure ())
   return (if r matches .ok _ then .refuted else .notRefuted, built, winner)
 
-/-- What the exported proof's symbols and input units mean in Lean. -/
-def interpOf (built : Built) (syms : Symbols) : Interp where
-  sort := fun s => (syms.sorts[s]?).bind (built.symbols[·]?)
-  fn := fun f => ((syms.funs[f]?).map (·.name)).bind (built.symbols[·]?)
-  pred := fun p => ((syms.preds[p]?).map (·.name)).bind (built.symbols[·]?)
+/-- What the exported proof's symbols and input units mean in Lean.
+
+`arith` covers the symbols Vampire interprets itself -- `$sum`, `$less`, the numerals --
+which have no Lean declaration behind them and so are not in `built.symbols`. It is
+consulted second: a declared symbol always wins, and the two cannot collide anyway,
+since Vampire's own names all begin with `$` or are numerals and no Lean constant is
+spelled that way. -/
+def interpOf (built : Built) (syms : Symbols) (arith : Arith.Meanings) : Interp where
+  sort := fun s => ((syms.sorts[s]?).bind (built.symbols[·]?)) <|> arith.sorts[s]?
+  fn := fun f => (((syms.funs[f]?).map (·.name)).bind (built.symbols[·]?)) <|> arith.funs[f]?
+  pred := fun p =>
+    (((syms.preds[p]?).map (·.name)).bind (built.symbols[·]?)) <|> arith.preds[p]?
   input := fun n => if n == 0 then none else built.inputs[n - 1]?
   -- Both filled in by `Replay.replay` as the steps that introduce them are reached.
   splitProp := fun _ => none
@@ -621,7 +697,8 @@ def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext 
   | .ok refutation =>
     let t0 ← IO.monoMsNow
     trace[vampire.timing] "read the refutation back in {t0 - tExp}ms"
-    let e ← Replay.replay (interpOf built refutation.symbols) refutation
+    let arith ← Arith.meanings refutation.symbols
+    let e ← Replay.replay (interpOf built refutation.symbols arith) refutation
     trace[vampire.timing] "replayed {refutation.steps.size} steps in \
       {(← IO.monoMsNow) - t0}ms"
     return e

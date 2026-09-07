@@ -102,6 +102,12 @@ Lean declarations. `Query` will not try to declare these to Vampire. -/
 def builtins : Std.HashSet String :=
   Std.HashSet.ofList
     ["Bool", "true", "false", "not", "and", "or", "=>", "=", "distinct", "ite",
-     "forall", "exists"]
+     "forall", "exists",
+     -- The numeric sorts. These are Vampire's own, so `Query` must not declare them;
+     -- `Build.lean` gives each a slot on first use instead. The arithmetic *symbols*
+     -- need no entry here: they are `Real.+` and the like, which is not the name of any
+     -- Lean constant, and the translators consume the applications whole so the
+     -- instances behind them are never recorded as dependencies.
+     "Int", "Rat", "Real"]
 
 end Vampire

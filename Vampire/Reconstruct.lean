@@ -1,5 +1,6 @@
 import Lean
 import Vampire.Logic
+import Vampire.Arith
 import Vampire.Avatar
 import Vampire.Bridge
 import Vampire.Clause
@@ -197,7 +198,13 @@ partial def termExpr (i : Interp) (syms : Symbols) (vs : Vars) : FTerm → MetaM
   | .app f args => do
     let hd ← fnExpr i syms f
     let as ← args.mapM (termExpr i syms vs)
-    return mkAppN hd as
+    -- `headBeta`, because an interpreted symbol's meaning *is* a lambda:
+    -- `Vampire/Arith.lean` gives `$sum` as `fun a b : ℝ => a + b`, since there is no
+    -- Lean constant to name that carries its instances. Left unreduced the result reads
+    -- `(fun a b => a + b) x y`, which is defeq to `x + y` and so typechecks and proves
+    -- nothing: `ring` and `linarith` match on `HAdd.hAdd` syntactically and simply do
+    -- not see it. A declared symbol is not a lambda and this is a no-op for it.
+    return (mkAppN hd as).headBeta
 
 /-- A formula as a Lean `Prop`. Mirrors `LeanPrinter::printFormula`.
 
@@ -213,7 +220,9 @@ about `mkAppM`: assigning a metavariable makes `checkAssignment` walk the value.
 partial def formExpr (i : Interp) (syms : Symbols) (vs : Vars) : FForm → MetaM Expr
   | .lit p pol args => do
     let hd ← predExpr i syms p
-    let e := mkAppN hd (← args.mapM (termExpr i syms vs))
+    -- `headBeta` for the same reason as in `termExpr`: `$less` arrives as
+    -- `fun a b : ℝ => a < b`.
+    let e := (mkAppN hd (← args.mapM (termExpr i syms vs))).headBeta
     return if pol then e else notExpr e
   | .eq pol _ lhs rhs => do
     let l ← termExpr i syms vs lhs
@@ -848,7 +857,7 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
       tacs := tacs.push (← instantiate (derived k) (hyp k) (splitArgs ++ args))
     return tacs
   match s.handler with
-  | .genericSubs | .genericNoSubs =>
+  | .genericSubs | .genericNoSubs | .arithInfer =>
     -- intros h0 … hₖ v… ; have i0 := h0 <args> ; … ; grind only […]
     let ids := (Array.range premises.size).map hyp ++ conclusionBinders
     let mut tacs ← intros ids
@@ -866,10 +875,23 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- `L[t]` under `s = t`, which propagation does not see as the same literal.
     let derivedIds := (Array.range premises.size).map derived
     let fallback ←
-      if s.handler == .genericSubs then `(tactic| grind only [cases Or])
+      if s.handler == .genericSubs || s.handler == .arithInfer then
+        `(tactic| grind only [cases Or])
       else `(tactic| grind only)
     tacs := tacs.push
       (← `(tactic| first | vampire_resolve $derivedIds* | $fallback:tactic))
+    -- For an arithmetic generating inference -- constrained resolution and
+    -- superposition, Fourier-Motzkin, the ALASCA factorings -- the arithmetic cascade
+    -- goes behind the propositional bridge and `grind`. The premises are already
+    -- instantiated at the unifier by the lines above, so what is left is a step that is
+    -- *true of the numbers*, and `grind only [cases Or]` on its own is being asked to
+    -- rediscover arithmetic by case analysis: on `p15_NRA` an ARI proof's
+    -- `constrained superposition` step took the elaborator past six minutes and 9GB.
+    --
+    -- `proveBy` stops feeding lines to a closed goal, so these cost nothing on a step
+    -- the bridge already settled.
+    if s.handler == .arithInfer then
+      tacs := tacs ++ (← Arith.arithScript)
     return tacs
   | .generic =>
     -- `genericInference`'s script is a bare `grind`, and that is what a rule falling
@@ -1000,11 +1022,28 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     tacs := tacs.push (← `(tactic| grind only))
     return tacs
   | .evaluation =>
-    -- `LeanChecker` proves this with `norm_num1` and `our_int_not_lt`, which are
-    -- Mathlib-backed and went away when VampLean dropped Mathlib. The translation does
-    -- not produce arithmetic either, so nothing reaches here today.
-    throwError "vampire: step {s.number} is an arithmetic evaluation; its script needs \
-      `norm_num1`, which this build of VampLean does not have"
+    -- `LeanChecker` proves this with `norm_num1` and `our_int_not_lt`. Those are
+    -- Mathlib's and this package does not import Mathlib, so the cascade in
+    -- `Vampire/Arith.lean` is parsed in the environment the replay is running in
+    -- instead -- which is one that has Mathlib, since the goal has `ℝ` in it.
+    --
+    -- The premise is introduced and then ignored: an evaluation's conclusion is its
+    -- premise with the arithmetic worked out, and the worked-out form is true on its
+    -- own. Keeping the premise in scope costs nothing and lets `linarith` use it where
+    -- the conclusion is *not* free-standing.
+    let ids := (Array.range premises.size).map (fun k => mkIdent (Name.mkSimple s!"h{k}"))
+    return (← intros ids) ++ (← Arith.arithScript)
+  | .arithNorm =>
+    -- A formula rewrite. Its premise is introduced and its conclusion is reached by
+    -- normalising both the same way; `Arith.normTactics` is ordered for that, which is
+    -- the difference between a step costing a millisecond and costing 8.5 seconds.
+    let ids := (Array.range premises.size).map (fun k => mkIdent (Name.mkSimple s!"h{k}"))
+    return (← intros ids) ++ (← Arith.normScript)
+  | .theoryAxiom =>
+    -- An axiom Vampire introduced for its own arithmetic: no premises, and a statement
+    -- that is true of `ℤ`, `ℚ` or `ℝ`. `LeanChecker` writes each as a Lean `axiom`,
+    -- which a tactic cannot do and does not have to.
+    return ← Arith.arithScript
   | .avatarComponent =>
     -- `intro h component v…`, then use the definition in the direction the split's
     -- polarity calls for.

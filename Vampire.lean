@@ -1,3 +1,4 @@
+import Vampire.Arith
 import Vampire.Avatar
 import Vampire.Clause
 import Vampire.Cnf
@@ -10,6 +11,7 @@ import Vampire.Sat
 import Vampire.Support
 import Vampire.Tactic
 import Vampire.Translate
+import Vampire.Translate.Arith
 import Vampire.Translate.Bool
 import Vampire.Translate.Build
 import Vampire.Translate.Prop

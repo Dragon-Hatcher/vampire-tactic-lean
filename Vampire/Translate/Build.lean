@@ -37,6 +37,7 @@ here is a change there. -/
 inductive Op where
   | declSort | declFun | declPred | varSort | var | app | atom | eq
   | true | false | not | and | or | imp | iff | forall | exists | assert | xor
+  | declSortNum | num | interpFun | interpPred
   deriving Repr, DecidableEq
 
 def Op.code : Op → UInt32
@@ -45,6 +46,82 @@ def Op.code : Op → UInt32
   | .true     => 9  | .false   => 10 | .not      => 11 | .and    => 12
   | .or       => 13 | .imp     => 14 | .iff      => 15 | .forall => 16
   | .exists   => 17 | .assert  => 18 | .xor      => 19
+  | .declSortNum => 20 | .num => 21 | .interpFun => 22 | .interpPred => 23
+
+/-- Which of Vampire's three numeric sorts an arithmetic instruction is about. Mirrored
+in `ffi/vampire_build.cpp`. -/
+inductive NumKind where
+  | int | rat | real
+  deriving Repr, DecidableEq, Inhabited
+
+def NumKind.code : NumKind → UInt32
+  | .int => 0 | .rat => 1 | .real => 2
+
+/-- The sort's name in the intermediate language. -/
+def NumKind.sortName : NumKind → String
+  | .int => "Int" | .rat => "Rat" | .real => "Real"
+
+def NumKind.ofSortName? (nm : String) : Option NumKind :=
+  match nm with
+  | "Int" => some .int | "Rat" => some .rat | "Real" => some .real
+  | _ => none
+
+/-- An arithmetic operation, independent of the sort it is at. Mirrored in
+`ffi/vampire_build.cpp`. -/
+inductive ArithOp where
+  | plus | minus | times | uminus | quotient | abs
+  | less | lessEq | greater | greaterEq
+  | toReal | toInt | toRat | floor
+  deriving Repr, DecidableEq
+
+def ArithOp.code : ArithOp → UInt32
+  | .plus => 1 | .minus => 2 | .times => 3 | .uminus => 4 | .quotient => 5 | .abs => 6
+  | .less => 10 | .lessEq => 11 | .greater => 12 | .greaterEq => 13
+  | .toReal => 20 | .toInt => 21 | .toRat => 22 | .floor => 23
+
+/-- True for the operations that are predicates rather than functions. -/
+def ArithOp.isPred : ArithOp → Bool
+  | .less | .lessEq | .greater | .greaterEq => true
+  | _ => false
+
+/-- How many arguments the operation takes. -/
+def ArithOp.arity : ArithOp → Nat
+  | .uminus | .abs | .toReal | .toInt | .toRat | .floor => 1
+  | _ => 2
+
+/-- The arithmetic operation a sort-qualified symbol name denotes, with its sort.
+
+The intermediate language spells these `Real.+`, `Int.<` and so on -- sort-qualified,
+unlike the rest of its alphabet, which follows SMT-LIB. That is a deliberate deviation
+and the reason for it is Vampire rather than taste: SMT-LIB overloads `+` across the
+numeric sorts and recovers the sort from the arguments, while Vampire has a *separate*
+interpreted symbol per sort (`REAL_PLUS`, `INT_PLUS`, ...) and needs to be told which.
+Carrying the sort in the name means `Build.lean` does not have to infer it, which it
+could not always do -- the arguments of `+` can both be numerals, and a numeral on its
+own does not say which sort it is at. -/
+def arithSymbol? (nm : String) : Option (NumKind × ArithOp) :=
+  match nm.splitOn "." with
+  | [sortNm, opNm] => do
+    let kind ← NumKind.ofSortName? sortNm
+    let op ← match opNm with
+      | "+" => some ArithOp.plus  | "-" => some ArithOp.minus
+      | "*" => some .times        | "neg" => some .uminus
+      | "/" => some .quotient     | "abs" => some .abs
+      | "<" => some .less         | "<=" => some .lessEq
+      | ">" => some .greater      | ">=" => some .greaterEq
+      | "toReal" => some .toReal  | "toInt" => some .toInt
+      | "toRat" => some .toRat    | "floor" => some .floor
+      | _ => none
+    return (kind, op)
+  | _ => none
+
+/-- The sort a numeral head names: the intermediate language writes a numeral as
+`Real.num` applied to a `literalT`, because a numeral's sort is not recoverable from its
+text -- `2` is a perfectly good real. -/
+def numSymbol? (nm : String) : Option NumKind :=
+  match nm with
+  | "Int.num" => some .int | "Rat.num" => some .rat | "Real.num" => some .real
+  | _ => none
 
 /-- What the compiler knows about a declared symbol. -/
 structure Decl where
@@ -112,7 +189,18 @@ private def sortSlot (t : Term) : BuildM Nat := do
   | .symbolT nm =>
     match (← get).sorts[nm]? with
     | some d => return d.slot
-    | none => throwError "vampire: sort '{nm}' was used before it was declared"
+    | none =>
+      -- A numeric sort is not declared by the query: it is Vampire's own, and
+      -- `Query.lean` leaves it out of the declarations because it is a builtin. So the
+      -- first use is what registers a slot for it.
+      match NumKind.ofSortName? nm with
+      | some kind =>
+        emitOp .declSortNum; emit kind.code
+        let s ← get
+        let slot := s.sorts.size
+        set { s with sorts := s.sorts.insert nm ⟨slot, 0⟩ }
+        return slot
+      | none => throwError "vampire: sort '{nm}' was used before it was declared"
   | t => throwError "vampire: {t} is not a sort Vampire can represent"
 
 /-- Declare a sort. -/
@@ -148,6 +236,26 @@ private partial def compileTerm (t : Term) : BuildM Unit := do
   let (hd, args) := Term.asApp t
   match hd with
   | .symbolT nm =>
+    -- A numeral: `Real.num` applied to the text of the number.
+    if let some kind := numSymbol? nm then
+      match args with
+      | #[.literalT lit] =>
+        let i ← internName lit
+        emitOp .num; emitNat i; emit kind.code
+        return
+      | _ =>
+        throwError "vampire: '{nm}' takes exactly one numeral"
+    -- An interpreted function: Vampire has its own symbol for it, per sort.
+    if let some (kind, op) := arithSymbol? nm then
+      if op.isPred then
+        throwError "vampire: '{nm}' is a predicate, so it cannot appear where a term \
+          is expected"
+      if op.arity != args.size then
+        throwError "vampire: '{nm}' has arity {op.arity} but is applied to \
+          {args.size} arguments"
+      for a in args do compileTerm a
+      emitOp .interpFun; emit op.code; emit kind.code; emitNat args.size
+      return
     if let some v := (← get).vars[nm]? then
       if !args.isEmpty then
         throwError "vampire: the variable '{nm}' is applied to arguments, \
@@ -166,7 +274,10 @@ private partial def compileTerm (t : Term) : BuildM Unit := do
     for a in args do compileTerm a
     emitOp .app; emitNat d.slot
   | .literalT l =>
-    throwError "vampire: the literal '{l}' has no first-order encoding yet"
+    -- A bare literal has no sort, so it cannot stand on its own; the arithmetic
+    -- translators always wrap one in `Real.num` and friends.
+    throwError "vampire: the literal '{l}' has no sort, so it cannot be a term on its \
+      own; a numeral must be written as `Real.num`, `Int.num` or `Rat.num` applied to it"
   | hd =>
     throwError "vampire: {hd} cannot head a term"
 
@@ -194,18 +305,32 @@ private partial def compileForm (t : Term) : BuildM Unit := do
     | .symbolT "ite", _ =>
       throwError "vampire: `ite` is not translated yet"
     | .symbolT nm, args =>
-      let some d := (← get).preds[nm]?
-        | if ((← get).funs[nm]?).isSome then
-            throwError "vampire: '{nm}' is a function, so it cannot appear where a \
-              formula is expected"
-          else
-            throwError "vampire: '{nm}' was used before it was declared"
-      if d.arity != args.size then
-        throwError "vampire: '{nm}' has arity {d.arity} but is applied to {args.size} \
-          arguments"
-      for a in args do compileTerm a
-      emitOp .atom; emitNat d.slot; emitNat 1
+      if let some (kind, op) := arithSymbol? nm then
+        unless op.isPred do
+          throwError "vampire: '{nm}' is a function, so it cannot appear where a \
+            formula is expected"
+        if op.arity != args.size then
+          throwError "vampire: '{nm}' has arity {op.arity} but is applied to \
+            {args.size} arguments"
+        for a in args do compileTerm a
+        emitOp .interpPred; emit op.code; emit kind.code; emitNat 1; emitNat args.size
+      else
+        compileAtom nm args
     | hd, _ => throwError "vampire: {hd} cannot head a formula"
+
+/-- An application of a declared predicate symbol. -/
+private partial def compileAtom (nm : String) (args : Array Term) : BuildM Unit := do
+  let some d := (← get).preds[nm]?
+    | if ((← get).funs[nm]?).isSome then
+        throwError "vampire: '{nm}' is a function, so it cannot appear where a \
+          formula is expected"
+      else
+        throwError "vampire: '{nm}' was used before it was declared"
+  if d.arity != args.size then
+    throwError "vampire: '{nm}' has arity {d.arity} but is applied to {args.size} \
+      arguments"
+  for a in args do compileTerm a
+  emitOp .atom; emitNat d.slot; emitNat 1
 
 private partial def compileQuant (op : Op) (n : String) (s : Term) (b : Term) : BuildM Unit := do
   let slot ← sortSlot s
@@ -251,8 +376,13 @@ end BuildM
 /-- Compile the whole problem into the name table and instruction stream, and say where
 each assertion came from. -/
 def compile (cmds : List Command) :
-    MetaM (Array String × Array UInt32 × Array AssertSource) := do
+    MetaM (Array String × Array UInt32 × Array AssertSource × Bool) := do
   let (_, st) ← (cmds.forM BuildM.compileCommand).run {}
-  return (st.names, st.code, st.asserts)
+  -- Whether the problem has arithmetic in it, which the caller needs in order to spend
+  -- the budget the way the `vampire` binary would: `Signature::Property` makes the same
+  -- distinction on the C++ side and `getCasc2025Schedule` branches on it. Asking here
+  -- rather than re-deriving it there keeps the two answers the same one.
+  let hasArith := st.sorts.toList.any fun (nm, _) => (NumKind.ofSortName? nm).isSome
+  return (st.names, st.code, st.asserts, hasArith)
 
 end Vampire

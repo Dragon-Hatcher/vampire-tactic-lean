@@ -119,6 +119,9 @@ enum Handler : uint32_t {
   H_PREDICATE_DEFINITION    = 20,
   H_FUNCTION_DEFINITION     = 21,
   H_DEFINITION_FOLDING_PRED = 22,
+  H_THEORY_AXIOM            = 23,  // an axiom of the arithmetic Vampire introduced
+  H_ARITH_NORM              = 24,  // an arithmetic *rewrite* of a formula
+  H_ARITH_INFER             = 25,  // a *generating* arithmetic inference
   H_UNSUPPORTED             = 255,
 };
 
@@ -162,7 +165,58 @@ static uint32_t handlerFor(InferenceRule rule) {
     case InferenceRule::AVATAR_SPLIT_CLAUSE: return H_AVATAR_SPLIT_CLAUSE;
     case InferenceRule::AVATAR_REFUTATION:
     case InferenceRule::AVATAR_REFUTATION_SMT: return H_AVATAR_REFUTATION;
-    case InferenceRule::EVALUATION: return H_EVALUATION;
+    // The arithmetic simplifications, all to one handler. Each rewrites a unit into an
+    // arithmetically equal one -- evaluating a numeral expression, normalising an
+    // inequality, cancelling a common addend, eliminating a variable -- so each is
+    // `premise → conclusion` with both sides true of the same numbers, and the cascade
+    // in `Vampire/Arith.lean` closes them all. The alternative for a rule that is not
+    // listed is `genericInference`'s bare `grind`, which on an NRA formula does not
+    // fail so much as run the elaborator out of memory: that is what `p15_NRA` did.
+    // Computing a value: the conclusion is the premise with the arithmetic worked out,
+    // and `ring` or `norm_num` closes it.
+    case InferenceRule::EVALUATION:
+    case InferenceRule::CANCELLATION:
+    case InferenceRule::INTERPRETED_SIMPLIFICATION:
+    case InferenceRule::GAUSSIAN_VARIABLE_ELIMINIATION:
+      return H_EVALUATION;
+
+    // Restating a formula: same numbers, different shape -- `A ≥ 0` as `¬A < 0`, the
+    // products reordered, the conjunctions reassociated. These want the two sides
+    // normalised the same way rather than either side proved, and they are separated
+    // from the group above because sharing its tactic order cost 8.5 seconds a step;
+    // see `Vampire/Arith.lean`'s `normTactics`.
+    case InferenceRule::THEORY_NORMALIZATION:
+    case InferenceRule::ARITHMETIC_SUBTERM_GENERALIZATION:
+    case InferenceRule::ALASCA_NORMALIZATION:
+    case InferenceRule::ALASCA_COHERENCE_NORMALIZATION:
+    case InferenceRule::ALASCA_ABSTRACTION:
+    case InferenceRule::ALASCA_INTEGER_TRANSFORMATION:
+      return H_ARITH_NORM;
+
+    // Generating: the conclusion follows from the premises at a unifier, so the premises
+    // have to be instantiated the way resolution's are before anything arithmetic can be
+    // said about the result. These were falling through to `genericInference`'s bare
+    // `grind`, which is how one `constrained superposition` step in an ARI proof of
+    // `p15_NRA` took the elaborator past six minutes and 9GB -- `grind` rediscovering
+    // arithmetic by case analysis on an NRA formula.
+    case InferenceRule::CONSTRAINED_RESOLUTION:
+    case InferenceRule::CONSTRAINED_SUPERPOSITION:
+    case InferenceRule::CONSTRAINED_FACTORING:
+    case InferenceRule::ALASCA_SUPERPOSITION:
+    case InferenceRule::ALASCA_FWD_DEMODULATION:
+    case InferenceRule::ALASCA_BWD_DEMODULATION:
+    case InferenceRule::ALASCA_COHERENCE:
+    case InferenceRule::ALASCA_FLOOR_BOUNDS:
+    case InferenceRule::ALASCA_FLOOR_ELIMINATION:
+    case InferenceRule::ALASCA_VARIABLE_ELIMINATION:
+    case InferenceRule::ALASCA_FOURIER_MOTZKIN:
+    case InferenceRule::ALASCA_INTEGER_FOURIER_MOTZKIN:
+    case InferenceRule::ALASCA_LITERAL_FACTORING:
+    case InferenceRule::ALASCA_TERM_FACTORING:
+    case InferenceRule::ALASCA_EQ_FACTORING:
+    case InferenceRule::ALASCA_VIRAS_QE:
+    case InferenceRule::ALASCA_INTEGRALITY_AXIOM:
+      return H_ARITH_INFER;
 
     // `LeanChecker::outputInferenceStep` ends its switch with `genericInference`, so
     // an unlisted rule gets a statement of premises implying conclusion and `grind`.
@@ -176,9 +230,18 @@ static uint32_t handlerFor(InferenceRule rule) {
     case InferenceRule::DEFINITION_FOLDING_PRED: return H_DEFINITION_FOLDING_PRED;
 
     default:
-      return isTheoryAxiomRule(rule) || rule == InferenceRule::DISTINCTNESS_AXIOM
-        ? H_UNSUPPORTED   // emitted as a Lean `axiom`, which a tactic cannot do
-        : H_GENERIC;
+      // A theory axiom is a premise-free unit that Vampire introduced because the
+      // problem has arithmetic in it: commutativity of `$sum`, `$uminus($uminus(X)) = X`
+      // and so on. `LeanChecker` writes each as a Lean `axiom`, which a tactic cannot
+      // do -- but it does not have to, because every one of them is *true* in Lean and
+      // provable there. So it is exported with its statement like any other unit and
+      // `Reconstruct` proves it; see `Handler.theoryAxiom`.
+      //
+      // `DISTINCTNESS_AXIOM` goes the same way: it is the pairwise disequality of the
+      // problem's distinct objects, which is true of Lean numerals for the same reason.
+      if (isTheoryAxiomRule(rule) || rule == InferenceRule::DISTINCTNESS_AXIOM)
+        return H_THEORY_AXIOM;
+      return H_GENERIC;
   }
 }
 
@@ -289,6 +352,12 @@ struct Exporter {
   void declareSort(TermList sort) {
     if (!sort.isTerm()) throw ExportError("a sort variable escaped into the proof");
     unsigned tc = sort.term()->functor();
+    // `Signature::getTypeCon` checks this with `ASS_L`, which is compiled out at
+    // `VDEBUG=0` -- so an out-of-range type constructor reads a garbage `Symbol*` and
+    // the crash lands in `plainName` with nothing to say about where it came from.
+    if (tc >= env.signature->typeCons())
+      throw ExportError("sort " + Int::toString((int)tc) + " is not in the signature (" +
+                        Int::toString((int)env.signature->typeCons()) + " type constructors)");
     if (!seenSorts.insert(tc).second) return;
     putDecl(PSYM_SORT);
     putDecl(intern(plainName(env.signature->getTypeCon(tc))));
@@ -297,9 +366,13 @@ struct Exporter {
 
   void declareFun(unsigned f) {
     if (!seenFuns.insert(f).second) return;
+    if (f >= env.signature->functions())
+      throw ExportError("function " + Int::toString((int)f) + " is not in the signature");
     Signature::Symbol *sym = env.signature->getFunction(f);
     unsigned arity = sym->arity();
     OperatorType *type = sym->fnType();
+    if (!type)
+      throw ExportError("the symbol '" + plainName(sym) + "' has no function type");
     std::vector<TermList> args;
     TermList result = type->result();
     for (unsigned i = 0; i < arity; i++) args.push_back(type->arg(i));

@@ -36,6 +36,7 @@
 #include "Kernel/Signature.hpp"
 #include "Kernel/SortHelper.hpp"
 #include "Kernel/Term.hpp"
+#include "Kernel/Theory.hpp"
 #include "Kernel/Unit.hpp"
 #include "Lib/Random.hpp"
 #include "Saturation/ProvingHelper.hpp"
@@ -71,6 +72,27 @@ enum Op : uint32_t {
   OP_FORALL    = 16, // n, (var, sortSlot)*n                      -> pop 1 formula
   OP_EXISTS    = 17, // n, (var, sortSlot)*n                      -> pop 1 formula
   OP_ASSERT    = 18, // conjecture                                -> pop 1 formula, emit a unit
+  // Arithmetic. Vampire's numeric sorts and interpreted symbols are not entries in the
+  // signature that a name can be added to -- they are fixed, and `Theory` hands them
+  // out -- so they need their own opcodes rather than a `nameIdx`.
+  OP_DECL_SORT_NUM = 20, // numKind                               -> defines the next sort slot
+  OP_NUM           = 21, // nameIdx (the numeral, written out), numKind -> push term
+  OP_INTERP_FUN    = 22, // arithOp, numKind, arity               -> pop arity terms, push term
+  OP_INTERP_PRED   = 23, // arithOp, numKind, polarity, arity     -> pop arity terms, push formula
+};
+
+/// Which of Vampire's three numeric sorts an arithmetic instruction is about. Mirrored
+/// in `Vampire/Translate/Build.lean`.
+enum NumKind : uint32_t { NUM_INT = 0, NUM_RAT = 1, NUM_REAL = 2 };
+
+/// An arithmetic operation, independent of the sort it is at. Mirrored in
+/// `Vampire/Translate/Build.lean`. These are *our* numbers, not Vampire's: mapping them
+/// onto `Theory::Interpretation` here rather than sending its enum values across means
+/// the stream does not break silently when that enum gains a member.
+enum ArithOp : uint32_t {
+  A_PLUS = 1, A_MINUS = 2, A_TIMES = 3, A_UMINUS = 4, A_QUOTIENT = 5, A_ABS = 6,
+  A_LESS = 10, A_LESS_EQ = 11, A_GREATER = 12, A_GREATER_EQ = 13,
+  A_TO_REAL = 20, A_TO_INT = 21, A_TO_RAT = 22, A_FLOOR = 23,
 };
 
 /// A value on the builder's stack: Vampire keeps terms and formulas apart, and so must
@@ -134,9 +156,167 @@ static void require(bool cond, const char *msg) {
 }
 
 /// Walk the instruction stream, constructing signature entries and formulas.
+/// One of Vampire's three numeric sorts.
+static TermList numSort(uint32_t kind) {
+  switch (kind) {
+    case NUM_INT:  return AtomicSort::intSort();
+    case NUM_RAT:  return AtomicSort::rationalSort();
+    case NUM_REAL: return AtomicSort::realSort();
+    default: throw BuildError("unknown numeric sort kind");
+  }
+}
+
+/// A numeral, from the decimal (or `p/q`) text the Lean side wrote it as.
+///
+/// The text crosses rather than a machine number, and that is not laziness: Lean's
+/// numerals are arbitrary-precision and so are Vampire's, so any fixed-width channel
+/// between them would be the one place a problem could quietly change meaning.
+static Term *numeral(const std::string &lit, uint32_t kind) {
+  // `parse` returns an `Option` rather than throwing, so a numeral Vampire cannot read
+  // is a build error naming it, not a crash inside the prover.
+  switch (kind) {
+    case NUM_INT: {
+      auto n = IntegerConstantType::parse(lit);
+      if (n.isNone()) throw BuildError("not an integer numeral: '" + lit + "'");
+      return Theory::instance()->representConstant(n.unwrap());
+    }
+    case NUM_RAT: {
+      auto n = RationalConstantType::parse(lit);
+      if (n.isNone()) throw BuildError("not a rational numeral: '" + lit + "'");
+      return Theory::instance()->representConstant(n.unwrap());
+    }
+    case NUM_REAL: {
+      auto n = RealConstantType::parse(lit);
+      if (n.isNone()) throw BuildError("not a real numeral: '" + lit + "'");
+      return Theory::instance()->representConstant(n.unwrap());
+    }
+    default: throw BuildError("unknown numeric sort kind");
+  }
+}
+
+/// An arithmetic function symbol, at one of the three sorts.
+static Theory::Interpretation fnInterp(uint32_t aop, uint32_t kind) {
+  switch (kind) {
+    case NUM_INT:
+      switch (aop) {
+        case A_PLUS:     return Theory::INT_PLUS;
+        case A_MINUS:    return Theory::INT_MINUS;
+        case A_TIMES:    return Theory::INT_MULTIPLY;
+        case A_UMINUS:   return Theory::INT_UNARY_MINUS;
+        case A_ABS:      return Theory::INT_ABS;
+        // Integer division is a family in TPTP; `$quotient_e` is the one SMT-LIB's
+        // `div` agrees with, so it is the one a translated `Int./` must mean.
+        case A_QUOTIENT: return Theory::INT_QUOTIENT_E;
+        case A_TO_REAL:  return Theory::INT_TO_REAL;
+        case A_TO_INT:   return Theory::INT_TO_INT;
+        case A_TO_RAT:   return Theory::INT_TO_RAT;
+        case A_FLOOR:    return Theory::INT_FLOOR;
+        default: break;
+      }
+      break;
+    case NUM_RAT:
+      switch (aop) {
+        case A_PLUS:     return Theory::RAT_PLUS;
+        case A_MINUS:    return Theory::RAT_MINUS;
+        case A_TIMES:    return Theory::RAT_MULTIPLY;
+        case A_UMINUS:   return Theory::RAT_UNARY_MINUS;
+        case A_QUOTIENT: return Theory::RAT_QUOTIENT;
+        case A_TO_REAL:  return Theory::RAT_TO_REAL;
+        case A_TO_INT:   return Theory::RAT_TO_INT;
+        case A_TO_RAT:   return Theory::RAT_TO_RAT;
+        case A_FLOOR:    return Theory::RAT_FLOOR;
+        default: break;
+      }
+      break;
+    case NUM_REAL:
+      switch (aop) {
+        case A_PLUS:     return Theory::REAL_PLUS;
+        case A_MINUS:    return Theory::REAL_MINUS;
+        case A_TIMES:    return Theory::REAL_MULTIPLY;
+        case A_UMINUS:   return Theory::REAL_UNARY_MINUS;
+        case A_QUOTIENT: return Theory::REAL_QUOTIENT;
+        case A_TO_REAL:  return Theory::REAL_TO_REAL;
+        case A_TO_INT:   return Theory::REAL_TO_INT;
+        case A_TO_RAT:   return Theory::REAL_TO_RAT;
+        case A_FLOOR:    return Theory::REAL_FLOOR;
+        default: break;
+      }
+      break;
+    default: throw BuildError("unknown numeric sort kind");
+  }
+  throw BuildError("no interpreted function for this operation at this sort");
+}
+
+/// An arithmetic predicate symbol, at one of the three sorts.
+static Theory::Interpretation predInterp(uint32_t aop, uint32_t kind) {
+  switch (kind) {
+    case NUM_INT:
+      switch (aop) {
+        case A_LESS:       return Theory::INT_LESS;
+        case A_LESS_EQ:    return Theory::INT_LESS_EQUAL;
+        case A_GREATER:    return Theory::INT_GREATER;
+        case A_GREATER_EQ: return Theory::INT_GREATER_EQUAL;
+        default: break;
+      }
+      break;
+    case NUM_RAT:
+      switch (aop) {
+        case A_LESS:       return Theory::RAT_LESS;
+        case A_LESS_EQ:    return Theory::RAT_LESS_EQUAL;
+        case A_GREATER:    return Theory::RAT_GREATER;
+        case A_GREATER_EQ: return Theory::RAT_GREATER_EQUAL;
+        default: break;
+      }
+      break;
+    case NUM_REAL:
+      switch (aop) {
+        case A_LESS:       return Theory::REAL_LESS;
+        case A_LESS_EQ:    return Theory::REAL_LESS_EQUAL;
+        case A_GREATER:    return Theory::REAL_GREATER;
+        case A_GREATER_EQ: return Theory::REAL_GREATER_EQUAL;
+        default: break;
+      }
+      break;
+    default: throw BuildError("unknown numeric sort kind");
+  }
+  throw BuildError("no interpreted predicate for this operation at this sort");
+}
+
+/// Register Vampire's five built-in sorts, in their canonical order.
+///
+/// Not a tidiness measure. `Signature::getRealSort` and its siblings add the sort by
+/// *name*, so which index `$real` lands at depends on the order the sorts happen to be
+/// asked for; and `AtomicSort::realSort` caches the sort term in a file-scope pointer
+/// which `Lib::resetGlobalState` drops. Between the two, a run that reached `$real`
+/// through the cache rather than through `getRealSort` got a term whose functor was the
+/// index `$real` had in an *earlier* signature, while the current one had never
+/// registered it -- `typeCons()` of 2 against a term naming sort 3. Everything then
+/// worked until something printed the term, at which point `Signature::functionName`
+/// indexed past the end of `_typeCons`. `ASS_L` guards that, and `ASS_L` is compiled out
+/// at `VDEBUG=0`, so what came back was a garbage `Symbol*` and the crash landed in
+/// `std::string::length` with nothing to say about where it came from.
+///
+/// Asking for all five, in order, at the top of every build makes the indices the same
+/// in every run: `$i`, `$o`, `$int`, `$rat`, `$real`. The TPTP binary gets this for free
+/// because its parser touches them while reading the header; an embedded builder that
+/// only ever mentions `$real` does not.
+static void registerBuiltinSorts() {
+  // Drop the cached sort terms first: they may still point at the previous signature,
+  // and a cached term is exactly how the index above went stale.
+  Kernel::Term::resetBuiltinCache();
+  env.signature->getDefaultSort();
+  env.signature->getBoolSort();
+  env.signature->getIntSort();
+  env.signature->getRatSort();
+  env.signature->getRealSort();
+}
+
+
+
 static void build(const std::vector<std::string> &names,
                   const std::vector<uint32_t> &code)
 {
+  registerBuiltinSorts();
   std::vector<TermList> sorts;      // sort slot -> Vampire sort
   std::vector<unsigned> funs;       // function slot -> functor
   std::vector<unsigned> preds;      // predicate slot -> predicate number
@@ -216,6 +396,41 @@ static void build(const std::vector<std::string> &names,
       case OP_VAR_SORT: {
         unsigned v = next();
         varSorts.set(v, sortAt(next()));
+        break;
+      }
+      case OP_DECL_SORT_NUM: {
+        sorts.push_back(numSort(next()));
+        break;
+      }
+      case OP_NUM: {
+        const std::string &lit = name(next());
+        uint32_t kind = next();
+        pushTerm(TermList(numeral(lit, kind)));
+        break;
+      }
+      case OP_INTERP_FUN: {
+        uint32_t aop = next();
+        uint32_t kind = next();
+        unsigned arity = next();
+        unsigned f = env.signature->getInterpretingSymbol(fnInterp(aop, kind));
+        require(env.signature->functionArity(f) == arity,
+                "arity disagrees with the interpreted function");
+        std::vector<TermList> args(arity);
+        for (unsigned i = 0; i < arity; i++) args[arity - 1 - i] = popTerm();
+        pushTerm(TermList(Term::create(f, arity, args.data())));
+        break;
+      }
+      case OP_INTERP_PRED: {
+        uint32_t aop = next();
+        uint32_t kind = next();
+        bool polarity = next() != 0;
+        unsigned arity = next();
+        unsigned p = env.signature->getInterpretingSymbol(predInterp(aop, kind));
+        require(env.signature->predicateArity(p) == arity,
+                "arity disagrees with the interpreted predicate");
+        std::vector<TermList> args(arity);
+        for (unsigned i = 0; i < arity; i++) args[arity - 1 - i] = popTerm();
+        pushFormula(new AtomicFormula(Literal::create(p, arity, polarity, args.data())));
         break;
       }
       case OP_VAR: {

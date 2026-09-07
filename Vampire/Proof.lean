@@ -76,6 +76,15 @@ inductive Handler where
   | avatarRefutation
   /-- `EVALUATION`, with the `norm_num1` script. -/
   | evaluation
+  /-- An axiom of the arithmetic Vampire introduced for itself: no premises, and a
+  statement that is true in Lean and provable by its arithmetic tactics. -/
+  | theoryAxiom
+  /-- An arithmetic rewrite of a formula: same numbers, different shape. -/
+  | arithNorm
+  /-- A *generating* arithmetic inference -- constrained resolution and superposition,
+  Fourier-Motzkin, the ALASCA factorings. Premises instantiated as for resolution, and
+  the arithmetic cascade behind the propositional bridge. -/
+  | arithInfer
   /-- `definitionUnfolding`: rewrite with each defining equation, then `grind only`. -/
   | definitionUnfolding
   /-- `skolemize`. -/
@@ -109,6 +118,9 @@ def Handler.ofCode : Nat → Handler
   | 20 => .predicateDefinition
   | 21 => .functionDefinition
   | 22 => .definitionFoldingPred
+  | 23 => .theoryAxiom
+  | 24 => .arithNorm
+  | 25 => .arithInfer
   | _ => .unsupported
 
 /-- A function symbol, as Vampire has it. -/
