@@ -317,9 +317,32 @@ def normTactics : List String :=
    -- time went. Split, each goal is two comparisons over the same numbers and `linarith`
    -- settles it outright, while the quantifier prefix, the junction tree and the
    -- reassociation are the bridge's own rules and cost a walk.
-   "vampire_bridge_arith h0 <;> linarith",
-   -- `nlinarith` behind it for the NRA problems, where a normalised atom can differ by a
-   -- product of unknowns and the goal is no longer linear.
+   -- `linarith only [hb]`, and the restriction is the whole cost of this line.
+   --
+   -- Each goal `vampire_bridge_arith` hands back is one comparison implying another, and
+   -- `Poly` has already decided they are the same comparison -- so the *only* hypothesis
+   -- that can matter is the antecedent, which is what `rename_i hb` names. Left
+   -- unrestricted, `linarith` collects every hypothesis in scope, and at a leaf that scope
+   -- is everything `transport` opened on the way down: the premise, one hypothesis per
+   -- `Exists.elim`, and the enclosing quantified formulas themselves. It preprocesses all
+   -- of them, per leaf, to prove something that needs one.
+   --
+   -- Measured on `NRA_intersection-example-simple_proof-node715350` step 2, a `theory
+   -- normalization` over a formula wide enough to have a great many leaves.
+   -- The fallback is *inside* the `<;>`, per goal, and that placement is the point.
+   --
+   -- As a separate alternative behind this one it is a pessimisation: `proveBy` wraps each
+   -- line in `<;> done`, so one leaf needing more than its antecedent fails the whole line,
+   -- and the next line then walks the formula again and re-runs `linarith` on every leaf --
+   -- including the ones already closed. Measured that way, `LRA_formula_071` went from 7.2s
+   -- to over the 15s wall. Per goal, an awkward leaf costs one extra `linarith` on itself
+   -- and nothing anywhere else.
+   --
+   -- `first` also covers `rename_i` failing outright on a goal with no inaccessible name to
+   -- rename, which would otherwise take the whole line down with it.
+   "vampire_bridge_arith h0 <;> (first | (rename_i hb; linarith only [hb]) | linarith)",
+   -- `nlinarith` behind those for the NRA problems, where a normalised atom can differ by
+   -- a product of unknowns and the goal is no longer linear.
    "vampire_bridge_arith h0 <;> nlinarith",
    -- `grind` before `tauto`, and the order is measured rather than a preference. On
    -- `NRA_intersection-example-simple_proof-node9729`'s `theory normalization` step the
