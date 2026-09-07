@@ -302,6 +302,25 @@ def normTactics : List String :=
    -- no premise has no `h0`, the alternative fails to elaborate, and the cascade moves
    -- on, which is the same fallback every other line here relies on.
    "vampire_bridge h0",
+   -- The same walk, with the atoms `Vampire/Bridge/Poly.lean` recognised as the *same*
+   -- comparison left as goals for `linarith`.
+   --
+   -- This is the line a normalisation that is not purely structural needs, which is most
+   -- of them: `theory normalization` restates `A ≥ 0` as `¬ A < 0` and reassociates the
+   -- sum inside it, so premise and conclusion agree formula-for-formula and disagree in
+   -- every atom. `vampire_bridge h0` above walks the shape and misses at the first such
+   -- atom; this one hands each one over on its own, already decided to be provable.
+   --
+   -- Why the goals being small is the whole point. On `LRA_formula_040` the step-2
+   -- obligation is a 200-atom `∃∀∃`-quantified tree, and the lines below ask `ring_nf at
+   -- *` and `grind` to take it whole -- which is both why the step failed and where the
+   -- time went. Split, each goal is two comparisons over the same numbers and `linarith`
+   -- settles it outright, while the quantifier prefix, the junction tree and the
+   -- reassociation are the bridge's own rules and cost a walk.
+   "vampire_bridge_arith h0 <;> linarith",
+   -- `nlinarith` behind it for the NRA problems, where a normalised atom can differ by a
+   -- product of unknowns and the goal is no longer linear.
+   "vampire_bridge_arith h0 <;> nlinarith",
    -- `grind` before `tauto`, and the order is measured rather than a preference. On
    -- `NRA_intersection-example-simple_proof-node9729`'s `theory normalization` step the
    -- `tauto` line spends 3197ms and *fails*; the `grind` line that follows it closes the

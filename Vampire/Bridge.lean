@@ -1,4 +1,5 @@
 import Lean
+import Vampire.Bridge.Poly
 
 /-!
 # Bridging two renderings of the same formula
@@ -189,6 +190,19 @@ private partial def existsPrefixLen (e : Expr) : Nat :=
     | .lam _ _ b _ => 1 + existsPrefixLen b
     | _ => 1
   else 0
+
+/-- The option the arithmetic leaf rule reads. Not registered: it is set for the duration
+of one `vampire_bridge_arith` and never comes from the user, so a `register_option` would
+only put a name in `set_option` completion that means nothing on its own. -/
+private def arithLeavesOpt : Name := `vampire.internal.bridgeArithLeaves
+
+/-- Whether `transport` may discharge a pair of comparisons through `Poly`.
+
+Off unless `vampire_bridge_arith` turned it on. Plain `vampire_bridge` therefore keeps its
+old meaning exactly -- a complete proof or nothing -- which is what `bridgeInput` and the
+`clausify` scripts rely on. -/
+private def arithLeaves : MetaM Bool := do
+  return (← getOptions).getBool arithLeavesOpt false
 
 /-- The universe levels of a term's head constant. `@Eq α a b` and `@Exists α p` carry
 the level `α` lives at, so `Eq.symm` and the `Exists` eliminators can be built without
@@ -402,6 +416,43 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     let m ← mkFreshExprMVar hty.bindingDomain!
     return ← transport want (mkApp h m) (hty.bindingBody!.instantiate1 m) (depth + 1)
 
+  -- Two comparisons that `isDefEq` rejects and that no structural rule explains. Under
+  -- `vampire_bridge_arith`, ask `Poly` whether they are the same comparison; if they are,
+  -- the obligation becomes a goal of two atoms for the caller's arithmetic to close.
+  --
+  -- This is the rule `theory normalization` and the ALASCA normalisations need. They
+  -- restate a unit over the same numbers, so premise and conclusion agree
+  -- formula-for-formula and differ inside every atom: the walk above gets the shape and
+  -- then misses here, and `Vampire/Arith.lean` falls through to lines that ask `ring_nf
+  -- at *` and `grind` to take the formula whole. On `LRA_formula_040` step 2 that formula
+  -- is a 200-atom `∃∀∃`-quantified tree and nothing closes it.
+  --
+  -- **`Poly` decides rather than defers, and that is what makes this safe.** Handing every
+  -- irreconcilable comparison to the caller unconditionally was tried first and is wrong,
+  -- because the rules above use transport *failure* to choose between candidates: `pick`
+  -- and `conjLeaves` match a conclusion leaf to a premise leaf by trying a transport and
+  -- keeping the first that succeeds, and the `∃`/`∀` rules leave a witness as a
+  -- metavariable for a leaf `isDefEq` to pin down. A leaf that always succeeds makes the
+  -- first arbitrary -- it paired `2 * x + 3 * y ≤ 1` with `x - y ≤ 5` -- and starves the
+  -- second. Comparing normal forms fails on a wrong pairing, so both keep working.
+  -- `Test/Poly.lean` holds that pair as a regression test.
+  --
+  -- Neither side may hold an unassigned metavariable. `atomNF` would read one as an
+  -- opaque factor, so two atoms could compare equal without the metavariable being
+  -- *determined* -- which hands back a goal still carrying it and, worse, tells the `∃`
+  -- rule above that its witness was settled when nothing settled it. Refusing is right in
+  -- any case: an atom with a hole in it has not been decided. It also marks the shape this
+  -- rule does not reach, a normalisation that permutes a quantifier prefix *and* rewrites
+  -- the atoms under it, which needs the polynomials matched and the witnesses solved for
+  -- at the same time. That is theory unification and not what this file is.
+  if (← arithLeaves) && !want.hasExprMVar && !hty.hasExprMVar then
+    if let some a := atomNF want then
+      if let some b := atomNF hty then
+        if a.sameAs b then
+          let g ← mkFreshExprMVar (← mkArrow hty want) (kind := .syntheticOpaque)
+            (userName := `bridgeArith)
+          return mkApp g h
+
   throwError "bridge: cannot reconcile{indentD want}\nwith{indentD hty}"
 
 /-- Take `n` leading `∃`s off `h : hty` down to fvars, then let `k` prove `want` from
@@ -587,6 +638,40 @@ def tryTransport (want : Expr) (h : Expr) : MetaM (Expr ⊕ MessageData) := do
     st.restore
     return .inr (← e.toMessageData.toString)
 
+/-- `tryTransport`, but the comparisons `Poly` decided are the same come back as goals.
+
+The two kinds of leftover metavariable are told apart by their *type*, which needs no
+bookkeeping: an undetermined `∀` or `∃` instantiation is a metavariable at the domain of
+the quantifier — a term — and an arithmetic leaf is one at `hty → want`, a `Prop`. So a
+non-`Prop` hole still means "nothing determined the term this premise was used at" and is
+still a failure. -/
+def tryTransportArith (want : Expr) (h : Expr) :
+    MetaM ((Expr × Array MVarId) ⊕ MessageData) := do
+  let st ← saveState
+  try
+    let e ← withOptions (·.setBool arithLeavesOpt true) do
+      instantiateMVars (← transport want h (← inferType h) 0)
+    let mut goals : Array MVarId := #[]
+    for mv in (← getMVars e) do
+      if ← isProp (← mv.getType) then
+        unless goals.contains mv do
+          -- `intros` and not one `intro`. The goal is made as `hty → want`, so one would
+          -- be enough if that were the type that came back — but the leaf sits under
+          -- whatever binders `transport` opened to reach it, and `mkLambdaFVars`
+          -- abstracting those over a term still holding the metavariable turns it into a
+          -- *delayed* assignment: the metavariable left in the proof is the outer one, at
+          -- `∀ v1, hty → want`. `linarith` on that reports "failed to find a
+          -- contradiction" about a binder it cannot see past, which reads as the
+          -- arithmetic being beyond it.
+          goals := goals.push (← mv.intros).2
+      else
+        throwError "bridge: nothing determined the term a universally quantified premise \
+          was instantiated at"
+    return .inl (e, goals)
+  catch e =>
+    st.restore
+    return .inr (← e.toMessageData.toString)
+
 /-- Close the goal by bridging it from hypothesis `h` — the same reconciliation
 `bridgeInput` does, as a tactic, so a step script can reach it. -/
 syntax (name := vampireBridge) "vampire_bridge" ident : tactic
@@ -605,5 +690,27 @@ elab_rules : tactic
         -- trace is the one way to see which step missed and why.
         trace[vampire.bridge] "missed{indentD (← instantiateMVars (← g.getType))}\nfrom          {indentD (← inferType (.fvar fv))}\nbecause{indentD why}"
         throwError "vampire_bridge: {why}"
+
+/-- `vampire_bridge`, leaving the comparisons it reconciled through `Poly` as goals.
+
+For the normalisation rules, where the two formulas have the same shape and differ inside
+their atoms. The caller puts an arithmetic tactic behind it — see
+`Vampire.Arith.normTactics` — and gets one goal per atom that actually differs, of two
+comparisons over the same numbers, rather than one goal the size of the formula. -/
+syntax (name := vampireBridgeArith) "vampire_bridge_arith" ident : tactic
+
+open Lean.Elab.Tactic in
+elab_rules : tactic
+  | `(tactic| vampire_bridge_arith $h:ident) => do
+    let g ← getMainGoal
+    g.withContext do
+      let fv ← getFVarId h
+      match ← tryTransportArith (← instantiateMVars (← g.getType)) (.fvar fv) with
+      | .inl (e, goals) =>
+        g.assign e
+        replaceMainGoal goals.toList
+      | .inr why =>
+        trace[vampire.bridge] "missed (arith){indentD (← instantiateMVars (← g.getType))}\nfrom{indentD (← inferType (.fvar fv))}\nbecause{indentD why}"
+        throwError "vampire_bridge_arith: {why}"
 
 end Vampire.Bridge
