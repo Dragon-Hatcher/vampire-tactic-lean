@@ -697,6 +697,21 @@ def replayRefutation (built : Built) : TermElabM Expr := built.goal.withContext 
   | .ok refutation =>
     let t0 ← IO.monoMsNow
     trace[vampire.timing] "read the refutation back in {t0 - tExp}ms"
+    -- The proof exactly as it crossed, functor numbers and all, before anything resolves
+    -- a symbol to what it means in Lean. That resolution is what has to be bypassed when
+    -- a step's obligation comes out *invalid*: an interpreted symbol is keyed by number
+    -- and renamed on a clash, so two symbols the proof keeps apart can land on one Lean
+    -- constant, and a step that is valid over the two is invalid over the one.
+    if ← isTracingEnabledFor `vampire.export then
+      let syms := refutation.symbols
+      let fns := (syms.funs.toArray.qsort (fun a b => a.1 < b.1)).map fun (f, i) =>
+        s!"    fun #{f} = {i.name}/{i.arity} : {i.argSorts} → {i.resultSort}"
+      let prs := (syms.preds.toArray.qsort (fun a b => a.1 < b.1)).map fun (p, i) =>
+        s!"    pred #{p} = {i.name}/{i.arity} : {i.argSorts}"
+      trace[vampire.export] "symbols:\n{String.intercalate "\n" (fns ++ prs).toList}"
+      for st in refutation.steps do
+        trace[vampire.export] "unit {st.number} [{st.ruleName}] premises {st.premises} \
+          vars {st.vars}\n    {st.statement.raw syms}"
     let arith ← Arith.meanings refutation.symbols
     let e ← Replay.replay (interpOf built refutation.symbols arith) refutation
     trace[vampire.timing] "replayed {refutation.steps.size} steps in \

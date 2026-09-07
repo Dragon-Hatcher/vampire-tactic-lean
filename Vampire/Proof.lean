@@ -218,6 +218,46 @@ structure Symbols where
   preds : Std.HashMap Nat PredInfo := {}
   deriving Inhabited
 
+/-- The raw exported form of a term, with Vampire's functor *numbers* shown.
+
+For `trace.vampire.export`. Every other rendering resolves a functor to what it means in
+Lean, which is exactly what has to be bypassed when the question is whether two symbols
+the proof keeps apart are being collapsed onto one Lean constant -- an interpreted symbol
+is keyed by number and renamed on a clash, so `$sum` at two sorts comes back as `$sum` and
+`$sum0` in some order, and a proof step can be valid over the two and invalid over one. -/
+partial def FTerm.raw (syms : Symbols) : FTerm → String
+  | .var i => s!"v{i}"
+  | .app f args =>
+    let nm := (syms.funs[f]?).map (·.name) |>.getD "?"
+    let inner := args.map (FTerm.raw syms) |>.toList
+    if inner.isEmpty then s!"{nm}#{f}"
+    else s!"{nm}#{f}(" ++ String.intercalate ", " inner ++ ")"
+
+/-- The raw exported form of a formula, with functor and predicate numbers shown. -/
+partial def FForm.raw (syms : Symbols) : FForm → String
+  | .lit p pol args =>
+    let nm := (syms.preds[p]?).map (·.name) |>.getD "?"
+    let inner := args.map (FTerm.raw syms) |>.toList
+    let a := if inner.isEmpty then "" else "(" ++ String.intercalate ", " inner ++ ")"
+    (if pol then "" else "¬") ++ s!"{nm}#{p}{a}"
+  | .eq pol sort l r =>
+    s!"{FTerm.raw syms l} {if pol then "=" else "≠"}[sort {sort}] {FTerm.raw syms r}"
+  | .tru => "⊤"
+  | .fls => "⊥"
+  | .neg f => "¬(" ++ FForm.raw syms f ++ ")"
+  | .conj fs => "(" ++ String.intercalate " ∧ " (fs.map (FForm.raw syms)).toList ++ ")"
+  | .disj fs => "(" ++ String.intercalate " ∨ " (fs.map (FForm.raw syms)).toList ++ ")"
+  | .imp a b => "(" ++ FForm.raw syms a ++ " → " ++ FForm.raw syms b ++ ")"
+  | .iff a b => "(" ++ FForm.raw syms a ++ " ↔ " ++ FForm.raw syms b ++ ")"
+  | .xor a b => "(" ++ FForm.raw syms a ++ " ⊕ " ++ FForm.raw syms b ++ ")"
+  | .all vs f =>
+    "∀[" ++ String.intercalate "," ((vs.map (fun (v, s) => s!"v{v}:{s}")).toList) ++ "] "
+      ++ FForm.raw syms f
+  | .ex vs f =>
+    "∃[" ++ String.intercalate "," ((vs.map (fun (v, s) => s!"v{v}:{s}")).toList) ++ "] "
+      ++ FForm.raw syms f
+  | .split v => s!"sp{v}"
+
 /-- A decoded refutation. Steps are in ascending unit number, so a premise always
 precedes its conclusion. -/
 structure Refutation where
