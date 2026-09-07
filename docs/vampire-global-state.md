@@ -186,6 +186,43 @@ problems large enough to demodulate ever saw it, and why one such problem alone 
 fine: nothing read the wreckage until the next run. Both are file-scope now and
 `TermPartialOrdering::resetCache()` drops them.
 
+Two more of the same shape turned up when arithmetic started reaching the prover, and
+neither had ever been reachable before: nothing embedded used a numeric sort, so nothing
+filled them.
+
+`Kernel/NumTraits.hpp` caches an interpreted symbol's functor and the shared term for
+each of its special constants, once per process:
+
+```cpp
+static unsigned name##F() {
+  static const unsigned functor = env.signature->getInterpretingSymbol(name##I);
+  return functor;
+}
+static Term* name##T() {
+  static Term* trm = theory->representConstant(name##C());
+  return trm;
+}
+```
+
+A functor number belongs to one signature. After the second run these named a symbol in
+a signature that had been freed, and ALASCA built terms with them -- so
+`InequalityNormalizer` created a term whose functor indexed past the end of
+`Signature::_funs` and the crash landed in `Term::deBruijnIndex`, reading a garbage
+`Symbol*`. They are macro-generated inside template members, so there is no one place to
+reset them from; each now records `Lib::signatureGeneration()` and refills itself when it
+no longer matches.
+
+`Lib/Perfect.hpp`'s `static IdMap _ids` is the perfect-sharing memo, and the values it
+holds -- `Polynom`, `MonomFactors` -- keep `TermList`s from the term-sharing table.
+`Inferences::cancelAdd` asks it for a polynomial, denormalises it, and
+`Literal::createEquality` then asks `SortHelper` for the sort of a term from the previous
+run. Same fix, and dropping the map leaks what it owned, which is what perfect sharing
+did anyway.
+
+`Lib::signatureGeneration()` is the counter both use; `resetGlobalState` bumps it last,
+so a cache refilled during `env.reset()` still counts as belonging to the signature that
+reset produced.
+
 `PartialOrdering.cpp` has caches of the same shape but is indexed by `size_t` and holds
 no reference to the signature or the ordering, so it is stale rather than dangling.
 

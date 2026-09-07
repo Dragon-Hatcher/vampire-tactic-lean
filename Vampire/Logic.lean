@@ -35,7 +35,7 @@ set_option warningAsError false
 
 set_option maxHeartbeats 1000000000
 
-/- Everything below is in the `VampLean` namespace, and it has to be: this library
+/- Everything below is in the `Vampire` namespace, and it has to be: this library
 dropped its Mathlib dependency and re-proved what it needed, so at the root it declares
 a dozen names Mathlib also declares — `Xor'`, `xor_def`, `not_and_or`, `imp_iff_not_or`,
 `by_contradiction`, `forall_true_iff` and more, with the same statements. Two identical

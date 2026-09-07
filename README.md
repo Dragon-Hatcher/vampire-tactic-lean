@@ -172,8 +172,32 @@ is swept up from the context and reported when it is named as a hint. It is off 
 default because it changes what reaches the prover, and on a goal that is already
 first-order it is cost without benefit.
 
-Still not translated: arithmetic and other theories, `ite`, `let`, datatypes,
-higher-order arguments.
+**Arithmetic.** `ℤ`, `ℚ` and `ℝ` become Vampire's `$int`, `$rat` and `$real`; `+`, `-`,
+`*`, `/`, unary minus, `<`, `≤`, `>`, `≥` and the numerals become its interpreted
+symbols; `^` at a literal natural exponent is unfolded into multiplications, since
+Vampire has none.
+
+    theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
+      vampire [h, h₂]
+
+Vampire introduces the axioms of the arithmetic it needs — commutativity of `$sum`,
+`¬(X < X)`, transitivity — and those are *proved* on the way back rather than assumed:
+each is a true statement about `ℤ`, `ℚ` or `ℝ` and Mathlib's `ring`, `linarith`, `omega`
+and friends close them. So an arithmetic proof rests on nothing a first-order one does
+not; `#print axioms` still shows only `propext`, `Classical.choice` and `Quot.sound`.
+
+That is also the one place the tactic reaches outside its own dependencies. `ℝ` is
+Mathlib's, and so are those tactics, but this package does not depend on Mathlib — the
+cascade is parsed in the environment the *replay* is running in, so it resolves exactly
+when there is arithmetic to do. A goal with `ℝ` in it has imported Mathlib by
+construction. See `Vampire/Arith.lean`.
+
+`ℕ` is deliberately absent: Vampire has no natural sort and encoding it as `$int` is
+unsound without a non-negativity side condition per variable — `a - b + b = a` is false
+on `ℕ` and true on `$int`. A `ℕ` goal is reported rather than mistranslated.
+
+Still not translated: bit-vectors, arrays, datatypes, `ite`, `let`, higher-order
+arguments.
 
 ## What replays
 
@@ -191,10 +215,8 @@ AVATAR, in full: the definitions, the components, the split clauses, the contrad
 clauses, and the SAT refutation — replayed as this fork's explicit resolution steps
 rather than by re-solving the SAT problem in Lean.
 
-**Not replayed.** Theory axioms: the generated file emits a Lean `axiom` for each, which
-a tactic cannot do. Arithmetic evaluation, whose script needs `norm_num1` — which is
-Mathlib's, and this package does not depend on Mathlib; the translation produces no
-arithmetic either. `rectify`'s recorded renamings, which are not exported: `symm_match` and a
+**Not replayed.** The `bv_decide` encoding of the SAT refutation, which the generator
+falls back to when the solver's derivation is unavailable. `rectify`'s recorded renamings, which are not exported: `symm_match` and a
 permutation fallback cover the alpha-equivalent and reordered cases between them. And
 the `bv_decide` encoding of the SAT refutation, which the generator falls back to when
 the solver's derivation is unavailable.

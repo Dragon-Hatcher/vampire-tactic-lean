@@ -133,6 +133,23 @@ package vampire where
 require auto from git
   "https://github.com/leanprover-community/lean-auto.git" @ "v4.33.0"
 
+/-
+Mathlib, for the arithmetic fragment only.
+
+`ℝ` and `ℚ` are Mathlib's, and so are the tactics the arithmetic replay closes a theory
+axiom with (`ring`, `linarith`, `omega`, ...). Nothing in the first-order fragment needs
+any of it, and `Vampire/Arith.lean` still resolves those tactics in the environment the
+replay runs in rather than importing them here -- so a downstream project that only ever
+proves first-order goals pays for the *dependency* but not for the import.
+
+Pinned to the same `v4.33.0` the rest of the graph uses: `lean-smt` and `lean-auto` both
+pin it, and Lake resolves a shared dependency to whichever revision is required first, so
+disagreeing here would silently move Mathlib for anything that requires this package
+alongside them -- which `atp-playground/` does.
+-/
+require mathlib from git
+  "https://github.com/leanprover-community/mathlib4.git" @ "v4.33.0"
+
 
 @[default_target] lean_lib Vampire where
   globs := #[.one `Vampire, .submodules `Vampire]
