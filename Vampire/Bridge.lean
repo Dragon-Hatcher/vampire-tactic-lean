@@ -178,6 +178,18 @@ private def bySig (s : UInt64) (sigs : Array UInt64) (order : Array Nat) : Array
       if (sigs[k]?).getD 0 == s then good := good.push k else rest := rest.push k
     return good ++ rest
 
+/-- How many `∃`s a formula opens with.
+
+The `∃` rule below works on the whole prefix rather than one binder at a time, and this
+is the length it needs. Counting walks under the predicate's lambda, where the body has
+a loose bound variable — harmless, because nothing here inspects it. -/
+private partial def existsPrefixLen (e : Expr) : Nat :=
+  if e.isAppOfArity ``Exists 2 then
+    match e.appArg! with
+    | .lam _ _ b _ => 1 + existsPrefixLen b
+    | _ => 1
+  else 0
+
 /-- The universe levels of a term's head constant. `@Eq α a b` and `@Exists α p` carry
 the level `α` lives at, so `Eq.symm` and the `Exists` eliminators can be built without
 asking `getLevel` to work it out again. -/
@@ -302,17 +314,47 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
 
   if want.isAppOfArity ``Exists 2 then
     if hty.isAppOfArity ``Exists 2 then
-      let hp := hty.appArg!
-      let wp := want.appArg!
-      let hdom := hty.appFn!.appArg!
-      let wdom := want.appFn!.appArg!
-      let k ← withLocalDeclD `bx hdom fun x => do
-        let hxty := hp.beta #[x]
-        withLocalDeclD `bh hxty fun hx => do
-          let inner ← transport (wp.beta #[x]) hx hxty (depth + 1)
-          mkLambdaFVars #[x, hx]
-            (mkApp4 (.const ``Exists.intro (headLevels want)) wdom wp x inner)
-      return mkAppN (.const ``Exists.elim (headLevels hty)) #[hdom, hp, want, h, k]
+      -- Positionally first: the premise's `i`th witness is the conclusion's `i`th, which
+      -- is what a prenexing or a reassociation leaves and so is nearly all of them. It
+      -- costs one `transport` of the body and pins nothing down, so it is cheap to try.
+      let saved ← saveState
+      let positional ← try
+        let hp := hty.appArg!
+        let wp := want.appArg!
+        let hdom := hty.appFn!.appArg!
+        let wdom := want.appFn!.appArg!
+        let k ← withLocalDeclD `bx hdom fun x => do
+          let hxty := hp.beta #[x]
+          withLocalDeclD `bh hxty fun hx => do
+            let inner ← transport (wp.beta #[x]) hx hxty (depth + 1)
+            mkLambdaFVars #[x, hx]
+              (mkApp4 (.const ``Exists.intro (headLevels want)) wdom wp x inner)
+        pure (some (mkAppN (.const ``Exists.elim (headLevels hty)) #[hdom, hp, want, h, k]))
+      catch _ =>
+        -- The attempt may have assigned metavariables before it failed — the `∀`
+        -- instantiation rule makes them — so the state goes back, not just the result.
+        saved.restore
+        pure none
+      if let some e := positional then return e
+      -- Otherwise the prefix is *permuted*, and one binder at a time cannot see it.
+      --
+      -- `rectify` renames a clause's variables and the renaming need not preserve the
+      -- order the witnesses are used in: on `LRA_formula_058` step 22 the premise is
+      -- `∀ v1, ∃ v6 v7, …7 * v7 + -5 * v6…` and the conclusion `∀ v0, ∃ v1 v2, …7 * v1 +
+      -- -5 * v2…`, the same formula with the two swapped. Peeling one `∃` off each side
+      -- and reusing the premise's witness for the conclusion's — which is what the
+      -- positional rule above does — commits to `v1 := v6` before `v7` exists, and the
+      -- body then does not match.
+      --
+      -- So take the premise's whole prefix down to fvars *first*, and only then build the
+      -- conclusion's, with a metavariable for each witness. Every premise witness is in
+      -- scope by the time any conclusion witness is created, so the `isDefEq` at the leaf
+      -- can assign them in any order — the same device the `hty.isForall` rule below uses,
+      -- and it needs no search over permutations. `tryTransport` refuses a proof with an
+      -- unassigned metavariable left in it, so a prefix nothing determines is a failure
+      -- rather than a hole.
+      return ← elimExistsBlock want hty h (existsPrefixLen hty) #[] fun _ hx hxty =>
+        introExistsBlock want (existsPrefixLen want) hx hxty depth
 
   -- A conjunction: take `h` apart into its leaves, then put `want` together from them.
   -- No case-splitting, and no search for a leaf that occurs on both sides unchanged —
@@ -361,6 +403,43 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     return ← transport want (mkApp h m) (hty.bindingBody!.instantiate1 m) (depth + 1)
 
   throwError "bridge: cannot reconcile{indentD want}\nwith{indentD hty}"
+
+/-- Take `n` leading `∃`s off `h : hty` down to fvars, then let `k` prove `want` from
+the witnesses and the body.
+
+Each level is an `Exists.elim` whose motive is `want`, which is fixed and mentions none
+of the witnesses, so the nesting is sound at every depth. `k` receives the witnesses in
+prefix order — it does not currently need them, since the metavariables
+`introExistsBlock` makes are what actually selects among them, but the elimination has to
+name them for the scope to exist at all. -/
+private partial def elimExistsBlock (want : Expr) (hty h : Expr) (n : Nat)
+    (acc : Array Expr) (k : Array Expr → Expr → Expr → MetaM Expr) : MetaM Expr := do
+  if n == 0 || !hty.isAppOfArity ``Exists 2 then return ← k acc h hty
+  let hp := hty.appArg!
+  let hdom := hty.appFn!.appArg!
+  let body ← withLocalDeclD `bx hdom fun x => do
+    let hxty := hp.beta #[x]
+    withLocalDeclD `bh hxty fun hx => do
+      let inner ← elimExistsBlock want hxty hx (n - 1) (acc.push x) k
+      mkLambdaFVars #[x, hx] (← instantiateMVars inner)
+  return mkAppN (.const ``Exists.elim (headLevels hty)) #[hdom, hp, want, h, body]
+
+/-- Build `want`'s `n` leading `∃`s with a metavariable for each witness, then transport
+the body from `h : hty`.
+
+The metavariables are created here rather than passed in because they must belong to the
+local context `elimExistsBlock` has already opened — that is the whole point of splitting
+the two, and what lets a witness be assigned to any of the premise's, not just the one at
+the same position. -/
+private partial def introExistsBlock (want : Expr) (n : Nat) (h hty : Expr)
+    (depth : Nat) : MetaM Expr := do
+  if n == 0 || !want.isAppOfArity ``Exists 2 then
+    return ← transport want h hty (depth + 1)
+  let wdom := want.appFn!.appArg!
+  let wp := want.appArg!
+  let m ← mkFreshExprMVar wdom
+  let inner ← introExistsBlock (wp.beta #[m]) (n - 1) h hty depth
+  return mkApp4 (.const ``Exists.intro (headLevels want)) wdom wp m inner
 
 /-- Introduce `want`'s leading binder and carry `h` under it unchanged. -/
 private partial def introForall (want : Expr) (h : Expr) (hty : Expr) (depth : Nat) :

@@ -952,19 +952,30 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     let holes ← prefixVars.mapM (fun _ => do return (← `(_) : Term))
     let steps := (← intros binders).push (← `(tactic| exact $h $holes*))
     let byPermutation ← `(tacticSeq| $steps*)
-    -- The bridge was tried here, before `symm_match`, because a rectification that
+    -- The bridge was tried here *before* `symm_match`, because a rectification that
     -- permutes the binder prefix is `transport`'s own forall rule and one that reorients
-    -- an equation is its `Eq.symm` rule. Measured, it is not worth it: over the
+    -- an equation is its `Eq.symm` rule. In that position it is not worth it: over the
     -- benchmark's paired problems it took 0.23s more than it saved. Nearly every
     -- rectification is alpha-equivalent, which makes the two formulas the *same* `Expr`
     -- and `exact h` free, so the steps that reach past it are too few to pay for an
     -- attempt on all of them.
+    --
+    -- It is last instead, which costs nothing on any of those steps and is not the same
+    -- measurement. `byPermutation` only introduces the conclusion's leading *universal*
+    -- prefix and lets `exact` unify the rest, so a rectification that permutes binders
+    -- under an `∃` is beyond it: on `LRA_formula_058` step 22 the premise is
+    -- `∀ v1, ∃ v6 v7, …7 * v7 + -5 * v6…` and the conclusion `∀ v0, ∃ v1 v2, …7 * v1 +
+    -- -5 * v2…`, the same formula with the two witnesses swapped, and `exact h _` cannot
+    -- swap them. `transport`'s `Exists.elim`/`Exists.intro` rule can, by unification at
+    -- the leaf. Arithmetic problems reach this far more often than the untyped corpus
+    -- the 0.23s was measured on, whose quantifier prefixes are short.
     return #[← `(tactic| intro $h:ident),
              ← `(tactic| try simp only [forall_const, exists_const, -iff_self, -eq_self] at $h:ident),
              ← `(tactic| first
                    | exact $h
                    | symm_match using $h
-                   | $byPermutation)]
+                   | $byPermutation
+                   | vampire_bridge $h)]
   | .clausify =>
     let reorder ← clausifyReorder s
     if s.cnfCount <= 1 then
