@@ -257,6 +257,39 @@ def portfolioSchedule (slices : Array Ffi.Slice) (budget cap : UInt32) : Array A
     let want := if cap == 0 then want else min want cap
     { limit := min want budget, strategy := s.strategy }
 
+/--
+ALASCA configurations, run after the schedule's own slices.
+
+Relating `f (x + 2)` to `f (y + 1)` needs unification with abstraction: the two are not
+syntactically unifiable, so a search that cannot abstract will not find the step however
+long it is given. `uwa=auto` already becomes `alasca_main` wherever ALASCA applies, so
+the *option* is not what is missing -- but which search finds the proof still matters,
+and the schedule `getCasc2025Schedule` picks for a UF-plus-arithmetic problem need not
+contain a line that does.
+
+`uf_step` -- `∀ y, f (y + 1) = f y + 2 ⊢ f (x + 2) = f x + 4` -- is that case. The
+default strategy does not refute it in 30s and neither does the whole schedule chosen
+for it, while `lrs+10_1:1_alasca=on:uwa=alasca_main` refutes it in **10ms**, with an
+8-step proof that replays. What was missing was the line, not the time.
+
+They go *first* in the portfolio, and that ordering is forced. Behind the schedule they
+are unreachable: a slice further down the schedule for `uf_step` runs far past the limit
+it is given -- with the portfolio stage off the goal is settled in 16s, with it on the
+tactic was still going at 240s -- so anything after that slice never runs. Putting the
+arithmetic lines in front also puts them where they are cheapest: the fast half of the
+corpus is settled in the probe stage and never runs a portfolio slice at all, and a goal
+that does reach the portfolio pays three slices that answer in tens of milliseconds.
+
+A mode this build cannot run is refused by `configure` and skipped like any other bad
+strategy, so listing one costs nothing.
+-/
+def alascaSchedule (budget cap : UInt32) : Array Attempt :=
+  #["lrs+10_1:1_alasca=on:uwa=alasca_main:si=on:rtra=on_0",
+    "dis+10_1:1_alasca=on:uwa=alasca_can_abstract:si=on:rtra=on_0",
+    -- For mixed integer/real goals, where `alasca_main` does not abstract the floor.
+    "ott+10_1:1_alasca=on:uwa=alasca_main_floor:si=on:rtra=on_0"].map fun st =>
+    { limit := if cap == 0 then budget else min budget cap, strategy := st }
+
 /-- How the tactic is configured, as `vampire +mono [h]` and friends. Follows `smt`'s
 `Smt.Config`, which is where the `+mono` spelling comes from. -/
 structure Config where
@@ -635,7 +668,7 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
       -- So arithmetic gets the whole budget -- which is where the measured waste was --
       -- at the same slice as everything else. See `vampire.arithPortfolio`.
       let cap := (opts.get `vampire.portfolioSlice (20 : Nat)).toUInt32
-      let attempts := portfolioSchedule slices budget cap
+      let attempts := alascaSchedule budget cap ++ portfolioSchedule slices budget cap
       let deadline := (← IO.monoMsNow) + 100 * budget.toNat
       let (st', r') ← runAttempts built attempts (some deadline) false use st
         (headline := false)
