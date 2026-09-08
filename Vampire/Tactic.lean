@@ -792,6 +792,7 @@ elab_rules : tactic
       -- The replay is what the schedule has to get past, not just the search: a
       -- refutation found under a probe's budget is a different proof, and it can use a
       -- rule this port does not replay. `searchWith` escalates on either failure.
+      let tEnter ← IO.monoMsNow
       let (built, winner, r) ←
         searchWith cfg g hs all (← timeoutDeciseconds) replayRefutation
       match r with
@@ -800,8 +801,15 @@ elab_rules : tactic
       -- goes with it — or the replay's account of the step it could not do.
       | .error why => throwError "vampire: {why}"
       | .ok proof =>
+        -- Phase timing for the *whole* tactic, not just the replay. About a third of a
+        -- fast arithmetic problem's time is outside the per-step numbers -- preprocessing
+        -- on the way in, and the kernel checking the assembled term on the way out -- and
+        -- nothing measured either.
+        let tAssign ← IO.monoMsNow
         built.goal.assign proof
         g.assign (.mvar built.root)
+        trace[vampire.timing] "assigned in {(← IO.monoMsNow) - tAssign}ms; \
+          tactic total {(← IO.monoMsNow) - tEnter}ms"
         suggestStrategy winner cfg hints
 
   | `(tactic| vampire? $cfg:optConfig $hints:hintList) => do

@@ -449,6 +449,11 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     if let some a := atomNF want then
       if let some b := atomNF hty then
         if a.sameAs b then
+          -- Which kind of leaf this is decides what can close it: a relation flip is one
+          -- lemma application, a reassociation needs ring reasoning. Pure data only --
+          -- an earlier version of this line built a term to compare and threw inside
+          -- `transport`, which made the rule fail rather than measuring it.
+          trace[vampire.bridge] "arith leaf: relFlip={a.rel != b.rel} polyEq={a.poly == b.poly}"
           let g ← mkFreshExprMVar (← mkArrow hty want) (kind := .syntheticOpaque)
             (userName := `bridgeArith)
           return mkApp g h
@@ -705,8 +710,31 @@ elab_rules : tactic
     let g ← getMainGoal
     g.withContext do
       let fv ← getFVarId h
+      let t0 ← IO.monoMsNow
       match ← tryTransportArith (← instantiateMVars (← g.getType)) (.fvar fv) with
       | .inl (e, goals) =>
+        -- How much of a normalisation step is the walk and how much is the arithmetic the
+        -- caller then runs on each leaf. The two are very different things to optimise and
+        -- the step timing alone cannot separate them.
+        -- Leaf counts, and the distinct count with them, because the gap between the
+        -- two is a standing temptation. A normalisation step restates a formula atom by
+        -- atom and the same atom recurs, so the walk hands back the same `hty → want`
+        -- more than once -- 26 goals over 18 distinct types on
+        -- `NRA_intersection-example-simple_proof-node1766` step 2, and each duplicate
+        -- costs its own `linarith` at the ~5ms per-goal floor.
+        --
+        -- Sharing them by assigning a duplicate from the first goal of its type was tried
+        -- and shares *nothing*: the duplicates sit under different binders, so `?dup :=
+        -- ?first` is ill scoped every time and a scope check rejects all of them. Doing it
+        -- properly means generalising the obligation over its free variables, proving that
+        -- once, and instantiating it per site. Worth about 40ms of a 420ms problem, so it
+        -- is a real optimisation and not a large one.
+        let mut tys : Array Expr := #[]
+        for mv in goals do
+          let ty ← instantiateMVars (← mv.getType)
+          unless tys.any (· == ty) do tys := tys.push ty
+        trace[vampire.bridge] "arith: walked in {(← IO.monoMsNow) - t0}ms, \
+          {goals.size} leaf goal(s) for the caller, {tys.size} distinct"
         g.assign e
         replaceMainGoal goals.toList
       | .inr why =>
