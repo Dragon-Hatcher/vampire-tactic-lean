@@ -1030,7 +1030,16 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
         tacs := tacs.push (← `(tactic| rewrite (occs := [1]) [$eq:ident] at $i0:ident))
       else
         tacs := tacs.push (← `(tactic| rewrite (occs := [1]) [← $eq:ident] at $i0:ident))
-    tacs := tacs.push (← `(tactic| grind only))
+    -- Once the defining equations are rewritten in, the instantiated premise usually
+    -- *is* the conclusion, and `grind only` is being asked to rediscover that: it was
+    -- 47ms of a 110ms replay on the `NRA_intersection` proofs, the single largest line
+    -- in them. The cheap closers go in front of it. This is not the trade that made the
+    -- `not_lt` cascade a regression -- there the added line was itself an expensive
+    -- elaboration paid by every step that did not need it, where `exact` on a local
+    -- hypothesis costs microseconds to fail.
+    let i0 := derived 0
+    tacs := tacs.push
+      (← `(tactic| first | exact $i0:ident | vampire_resolve $i0:ident | grind only))
     return tacs
   | .evaluation =>
     -- `LeanChecker` proves this with `norm_num1` and `our_int_not_lt`. Those are
