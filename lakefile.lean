@@ -290,9 +290,22 @@ extern_lib libvampireffi pkg := do
   let out := pkg.staticLibDir / nameToStaticLib "vampireffi"
   IO.FS.createDirAll pkg.staticLibDir
   let mri := pkg.buildDir / "ffi" / "combine.mri"
-  IO.FS.writeFile mri <| String.intercalate "\n"
-    [s!"CREATE {out}", s!"ADDLIB {archive}",
-     s!"ADDMOD {ffiO} {buildO} {proofO}", "SAVE", "END", ""]
-  -- `ar -M` reads its script on stdin, so this goes through a shell.
-  run "sh" #["-c", s!"ar -M < {mri}"]
+  -- One `ADDMOD` per object, and that is not a formatting choice. GNU `ar` takes a
+  -- space-separated list on one `ADDMOD` line; `llvm-ar` reads the whole rest of the line
+  -- as a single filename and fails with `b.o c.o: No such file or directory`.
+  IO.FS.writeFile mri <| String.intercalate "\n" <|
+    [s!"CREATE {out}", s!"ADDLIB {archive}"]
+      ++ [ffiO, buildO, proofO].map (fun o => s!"ADDMOD {o}")
+      ++ ["SAVE", "END", ""]
+  -- Lean's bundled `llvm-ar`, not the system `ar`: Apple's `ar` has no `-M` at all, so on
+  -- macOS the system one cannot run an MRI script in the first place. Taking the archiver
+  -- from the toolchain also means one tool with one MRI dialect on both platforms, rather
+  -- than depending on whichever `ar` is first on the path.
+  --
+  -- `-M` reads its script on stdin only -- there is no flag to hand it a file -- so this
+  -- goes through a shell for the redirect. The paths are quoted for that redirect; note
+  -- that MRI itself has no quoting, so a build directory whose path contains a space would
+  -- break the `ADDMOD` lines regardless of what happens here.
+  let ar ← getLeanAr
+  run "sh" #["-c", s!"'{ar}' -M < '{mri}'"]
   return pure out
