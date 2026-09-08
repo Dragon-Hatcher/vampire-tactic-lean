@@ -375,8 +375,45 @@ def scriptFrom (tactics : List String) : MetaM (Array (TSyntax `tactic)) := do
   tactics.toArray.mapM fun t =>
     parseTactic s!"try (set_option maxHeartbeats {arithHeartbeats} in (({t}) <;> done))"
 
+/-- The bridge's lines, for any rule whose conclusion *restates* its premise.
+
+`theory normalization` is the obvious such rule and `normTactics` puts these first, but
+`evaluation` is one too: its conclusion is its premise with the arithmetic worked out, so
+premise and conclusion agree formula-for-formula and differ inside the atoms, which is what
+the bridge walks and `Vampire/Bridge/Poly.lean` decides.
+
+Shared rather than repeated because `evaluation` did *not* have them, and the cost of that
+was not a slow step but a **discarded refutation**. On
+
+    theorem int_bound (n m : ℤ) (h : 2 * n ≤ m) (h₂ : 0 < n) : 2 ≤ m := by vampire [*]
+
+the probe finds a refutation in 968ms whose step 11655 asks for
+
+    (∀ v0 : ℤ, 0 < v0 + -0 ∨ ¬n < v0) → ∀ v0 : ℤ, ¬n < v0 ∨ 0 < v0
+
+-- a reordered disjunction over an atom that lost a `+ -0`. Nothing in `arithTactics`
+closes it, and it cannot: the conclusion is *false* on its own (`v0 = -5`, `n = -10`), so
+it has to be got from the premise, and neither `omega` nor `linarith` instantiates a
+premise's `∀`. The bridge introduces the conclusion's binder, instantiates the premise's at
+it, matches the disjuncts by permutation and the atoms by normal form. Without these two
+lines the whole refutation was thrown away and the tactic escalated through 42 portfolio
+strategies to find another -- 5.7s of a 7.2s run spent on proofs it had already found. -/
+def bridgeTactics : List String :=
+  ["vampire_bridge h0",
+   "vampire_bridge_arith h0 <;> (first | (rename_i hb; linarith only [hb]) | linarith)"]
+
 /-- The script for a theory axiom or an evaluation. -/
 def arithScript : MetaM (Array (TSyntax `tactic)) := scriptFrom arithTactics
+
+/-- The script for an `evaluation`: the bridge first, then the theory-axiom cascade.
+
+The bridge lines go first because an evaluation's conclusion restates its premise, and the
+cascade stays behind them because an evaluation that really is a *computation* -- `2 * 3`
+becoming `6` with no premise to walk from -- is what that cascade is ordered for. A theory
+axiom keeps `arithScript` unchanged: it has no premise, so `h0` does not exist and the
+bridge lines could only fail to elaborate. -/
+def evalScript : MetaM (Array (TSyntax `tactic)) :=
+  scriptFrom (bridgeTactics ++ arithTactics)
 
 /-- The script for a formula-level arithmetic rewrite. -/
 def normScript : MetaM (Array (TSyntax `tactic)) := scriptFrom normTactics

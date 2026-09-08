@@ -1043,7 +1043,7 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- own. Keeping the premise in scope costs nothing and lets `linarith` use it where
     -- the conclusion is *not* free-standing.
     let ids := (Array.range premises.size).map (fun k => mkIdent (Name.mkSimple s!"h{k}"))
-    return (← intros ids) ++ (← Arith.arithScript)
+    return (← intros ids) ++ (← Arith.evalScript)
   | .arithNorm =>
     -- A formula rewrite. Its premise is introduced and its conclusion is reached by
     -- normalising both the same way; `Arith.normTactics` is ordered for that, which is
