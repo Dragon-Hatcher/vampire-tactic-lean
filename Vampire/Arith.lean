@@ -166,8 +166,21 @@ private def funMeaning? (syms : Symbols) (info : FunInfo) : MetaM (Option Expr) 
     | _, _ => return none
   | nm =>
     -- Otherwise a numeral, whose sort is its result sort.
+    --
+    -- ALASCA also writes scalar multiplication as the numeral applied to the term it
+    -- scales -- `-1/1(x)` for `-1 * x` -- so the *arity* decides which of the two a
+    -- numeral-named symbol is. Reading the unary one as the numeral itself hands the
+    -- replay `(-1 : ℝ)` applied to an argument, which is how the `alasca
+    -- normalization` step of `3 * x + 1 ≤ 7 ⊢ x ≤ 2` came out unprovable.
     match resKind, parseNumeral? nm with
-    | some k, some (n, d) => return some (← numeralExpr k n d)
+    | some k, some (n, d) => do
+      let c ← numeralExpr k n d
+      if info.arity == 1 then
+        let ty ← checkKindType k
+        let e ← withLocalDeclD `a ty fun a => do
+          mkLambdaFVars #[a] (← mkAppM ``HMul.hMul #[c, a])
+        return some e
+      return some c
     | _, _ => return none
 where
   opAt (k : Option Kind) (f : Name) : MetaM (Option Expr) := do

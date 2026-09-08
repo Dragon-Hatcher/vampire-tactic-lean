@@ -1043,7 +1043,19 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- own. Keeping the premise in scope costs nothing and lets `linarith` use it where
     -- the conclusion is *not* free-standing.
     let ids := (Array.range premises.size).map (fun k => mkIdent (Name.mkSimple s!"h{k}"))
-    return (← intros ids) ++ (← Arith.evalScript)
+    -- The bridge only where the conclusion *restates* the premise, decided from the
+    -- exported forms before any tactic runs.
+    --
+    -- An evaluation that works the arithmetic out inside an atom leaves the formula's
+    -- skeleton alone, and that is the bridge's case -- it is what makes `int_bound`'s
+    -- `0 < v0 + -0 ∨ ¬n < v0` reachable from `¬n < v0 ∨ 0 < v0`. An evaluation that
+    -- collapses a disjunct, or turns a comparison into `$true`, changes the skeleton, and
+    -- the bridge can only fail on it. Handing those the bridge anyway costs two tactic
+    -- blocks each, which is most of what routing every evaluation through `evalScript`
+    -- cost: 74 problems rather than 73, but the net median 0.126s rather than 0.070s.
+    let restates := premises.size == 1
+      && s.statement.sameSkeleton premises[0]!.statement
+    return (← intros ids) ++ (← if restates then Arith.evalScript else Arith.arithScript)
   | .arithNorm =>
     -- A formula rewrite. Its premise is introduced and its conclusion is reached by
     -- normalising both the same way; `Arith.normTactics` is ordered for that, which is

@@ -218,6 +218,38 @@ structure Symbols where
   preds : Std.HashMap Nat PredInfo := {}
   deriving Inhabited
 
+/-- Whether two formulas have the same logical skeleton: the same connectives, in the
+same places, with the same widths and the same binder counts, ignoring what the atoms
+inside them say.
+
+This answers "does this step's conclusion *restate* its premise", which is what decides
+whether the structural bridge is worth trying on it. A rule that restates a unit -- the
+normalisations, and an `evaluation` that works arithmetic out inside an atom -- leaves the
+skeleton alone and changes the atoms, which is precisely what the bridge walks. A rule that
+collapses a disjunct or turns a comparison into `$true` changes the skeleton, and the
+bridge could only fail on it.
+
+Cheap on purpose: it is a walk over the exported form with no `Expr`, no elaboration and no
+metavariables, so a step that is not worth bridging costs a traversal rather than two
+failed tactic blocks. -/
+partial def FForm.sameSkeleton : FForm → FForm → Bool
+  | .lit .., .lit .. => true
+  | .eq .., .eq .. => true
+  | .tru, .tru => true
+  | .fls, .fls => true
+  | .neg a, .neg b => a.sameSkeleton b
+  | .conj as, .conj bs =>
+    as.size == bs.size && (as.zip bs).all (fun (a, b) => a.sameSkeleton b)
+  | .disj as, .disj bs =>
+    as.size == bs.size && (as.zip bs).all (fun (a, b) => a.sameSkeleton b)
+  | .imp a b, .imp c d => a.sameSkeleton c && b.sameSkeleton d
+  | .iff a b, .iff c d => a.sameSkeleton c && b.sameSkeleton d
+  | .xor a b, .xor c d => a.sameSkeleton c && b.sameSkeleton d
+  | .all vs a, .all ws b => vs.size == ws.size && a.sameSkeleton b
+  | .ex vs a, .ex ws b => vs.size == ws.size && a.sameSkeleton b
+  | .split _, .split _ => true
+  | _, _ => false
+
 /-- The raw exported form of a term, with Vampire's functor *numbers* shown.
 
 For `trace.vampire.export`. Every other rendering resolves a functor to what it means in
