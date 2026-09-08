@@ -196,6 +196,71 @@ of one `vampire_bridge_arith` and never comes from the user, so a `register_opti
 only put a name in `set_option` completion that means nothing on its own. -/
 private def arithLeavesOpt : Name := `vampire.internal.bridgeArithLeaves
 
+/-- A pair of comparisons that differ only by a negation -- `0 ≤ A` against `¬ A < 0` --
+proved by the order lemma that says so, with no goal handed back and no tactic run.
+
+This is what a `theory normalization` step's leaves overwhelmingly are: over a linear
+order `¬ a < b` *is* `b ≤ a`, and restating one as the other is the rule's favourite move.
+`Poly` already decided the two atoms are the same comparison, so all that is left is to
+name the lemma, and `Iff.mp`/`Iff.mpr` on `not_lt`/`not_le` covers every direction.
+
+**Choosing the lemma here rather than trying them in the caller's cascade is the whole
+point.** Offering `exact not_lt.mpr hb` and three siblings ahead of `linarith` in
+`Vampire.Arith.normTactics` is *slower overall*, measured over the whole benchmark: it wins
+on a step whose leaves are all flips (154ms to 45ms) and loses on every leaf that is a
+reassociation, which then pays four failed elaborations -- instance synthesis included --
+before reaching the tactic that works. 52 of 73 problems got slower and the cactus figure
+at 60 problems went from 25.5s to 47.3s. Deciding in `MetaM`, where a wrong guess costs an
+`isDefEq` rather than a tactic block, has no such cost.
+
+`none` when the lemmas are absent, so a project without Mathlib falls back to the side
+goal exactly as before. -/
+private def flipProof (want hty h : Expr) : MetaM (Option Expr) := do
+  -- One side negated and the other not. Without this the rule is attempted at *every*
+  -- comparison leaf, and a reassociation leaf -- which is negated on both sides or on
+  -- neither -- pays four constructions that cannot succeed before falling through to the
+  -- side goal. That is the same mistake as offering the lemmas in the caller's cascade,
+  -- just cheaper per attempt, and it showed up the same way: broadly slower.
+  unless want.consumeMData.isAppOfArity ``Not 1 != hty.consumeMData.isAppOfArity ``Not 1 do
+    return none
+  let env ← getEnv
+  -- Name literals, not `` ``not_lt ``: this module imports only `Lean`, so the resolving
+  -- form would not compile. Looked up in the environment the *replay* runs in, which is
+  -- the same device `Vampire/Arith.lean` uses for the tactics it names.
+  -- Name literals, not `` ``not_lt ``: this module imports only `Lean`, so the resolving
+  -- form would not compile. Looked up in the environment the *replay* runs in, which is
+  -- the same device `Vampire/Arith.lean` uses for the tactics it names.
+  for nm in [`not_lt, `not_le] do
+    unless env.contains nm do continue
+    -- Built by hand rather than with `mkAppM`/`mkAppOptM`: those refuse to return a term
+    -- that still holds metavariables, and every implicit of `not_lt` -- the type, its
+    -- order instance, and both sides -- is exactly what unification against `h` and `want`
+    -- is supposed to determine.
+    let st ← saveState
+    let r ← try
+      let c ← mkConstWithFreshMVarLevels nm
+      let (args, _, _) ← forallMetaTelescope (← inferType c)
+      let iff := mkAppN c args
+      match (← whnf (← inferType iff)).app2? ``Iff with
+      | some (lhs, rhs) =>
+        let hty' ← inferType h
+        -- `Iff.mpr : (a ↔ b) → b → a`, so it turns a proof of the right side into the
+        -- left; `Iff.mp` goes the other way. One of the two matches.
+        if (← isDefEq hty' rhs) && (← isDefEq lhs want) then
+          pure (some (mkApp4 (mkConst ``Iff.mpr) lhs rhs iff h))
+        else if (← isDefEq hty' lhs) && (← isDefEq rhs want) then
+          pure (some (mkApp4 (mkConst ``Iff.mp) lhs rhs iff h))
+        else pure none
+      | none => pure none
+    catch _ => pure none
+    match r with
+    | some t =>
+      let t ← instantiateMVars t
+      unless t.hasExprMVar do return t
+      st.restore
+    | none => st.restore
+  return none
+
 /-- Whether `transport` may discharge a pair of comparisons through `Poly`.
 
 Off unless `vampire_bridge_arith` turned it on. Plain `vampire_bridge` therefore keeps its
@@ -449,6 +514,8 @@ private partial def transport (want : Expr) (h : Expr) (hty : Expr) (depth : Nat
     if let some a := atomNF want then
       if let some b := atomNF hty then
         if a.sameAs b then
+          -- The negation-only case needs no goal and no tactic; see `flipProof`.
+          if let some t ← flipProof want hty h then return t
           -- Which kind of leaf this is decides what can close it: a relation flip is one
           -- lemma application, a reassociation needs ring reasoning. Pure data only --
           -- an earlier version of this line built a term to compare and threw inside
@@ -729,12 +796,17 @@ elab_rules : tactic
         -- properly means generalising the obligation over its free variables, proving that
         -- once, and instantiating it per site. Worth about 40ms of a 420ms problem, so it
         -- is a real optimisation and not a large one.
-        let mut tys : Array Expr := #[]
-        for mv in goals do
-          let ty ← instantiateMVars (← mv.getType)
-          unless tys.any (· == ty) do tys := tys.push ty
-        trace[vampire.bridge] "arith: walked in {(← IO.monoMsNow) - t0}ms, \
-          {goals.size} leaf goal(s) for the caller, {tys.size} distinct"
+        -- Behind the trace check, not just reported behind it: counting distinct types is
+        -- quadratic in the number of leaves and it is diagnostics, not work the proof needs.
+        if ← isTracingEnabledFor `vampire.bridge then
+          let mut tys : Array Expr := #[]
+          for mv in goals do
+            let ty ← instantiateMVars (← mv.getType)
+            unless tys.any (· == ty) do tys := tys.push ty
+          trace[vampire.bridge] "arith: walked in {(← IO.monoMsNow) - t0}ms, \
+            {goals.size} leaf goal(s) for the caller, {tys.size} distinct"
+          for ty in tys.toList.take 4 do
+            trace[vampire.bridge] "LEAF {ty}"
         g.assign e
         replaceMainGoal goals.toList
       | .inr why =>
