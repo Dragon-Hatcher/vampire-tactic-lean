@@ -25,8 +25,15 @@ def vampireUrl : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of that fork. The shim calls into Vampire's internals, which are not a
-stable interface, so this is a hard pin rather than a branch. -/
-def vampireRev : String := "b86421484"
+stable interface, so this is a hard pin rather than a branch.
+
+**Bump this together with anything that needs a fork change.** `b86421484` was left here
+after the arithmetic support landed on the Lean side, and `3d194af87` is the commit that
+drops the process-global caches which outlive a signature -- `NumTraits`'s functor and
+constant caches and `Perfect`'s sharing memo, all of which `docs/vampire-global-state.md`
+records as reached only once arithmetic gets as far as the prover. A downstream project
+would have had the arithmetic tactic against a Vampire without them. -/
+def vampireRev : String := "3d194af87"
 
 /-- Include paths for compiling the shim against a Vampire checkout. -/
 def vampireIncludes (src : FilePath) : Array String := #[

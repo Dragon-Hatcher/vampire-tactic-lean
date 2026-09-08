@@ -131,6 +131,15 @@ tactic embeds and runs its CMake build itself.
 You need `cmake`, `git` and a C++20 compiler. Vampire takes some minutes to build the
 first time and is then cached like any other Lake target.
 
+**It pulls Mathlib.** The arithmetic fragment is the reason — `ℝ` and `ℚ` are Mathlib's,
+and so are the tactics the arithmetic replay closes a theory axiom with — so requiring
+this package requires Mathlib at `v4.33.0` whether or not you prove anything numeric, and
+a first build pays for that too. If your project already requires Mathlib, note that Lake
+resolves a shared dependency to whichever revision is required first: pinning a different
+one means one of the two silently moves. `Vampire/Arith.lean` resolves the tactics it needs
+in the environment the *replay* runs in rather than importing them, so a project that only
+proves first-order goals pays for the dependency but not the import.
+
 **Two build jobs by default.** Vampire is around 350 translation units of template-heavy
 C++ and the compiler peaks over a gigabyte on several of them, so a job per core will ask
 more of a 16GB machine than it has — and it swaps rather than failing cleanly. Raise it
