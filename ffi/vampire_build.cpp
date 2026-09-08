@@ -671,6 +671,52 @@ static std::string sanitiseStrategy(const std::string &code)
 /// it is run inside this shim rather than the executable. Skipped rather than fixed,
 /// because there is nothing to gain by fixing it — the slice it would occupy is better
 /// spent on a strategy that could produce a proof.
+/// The value a strategy gives an option, or empty if it does not set one.
+static std::string optionValue(const std::string &code, const std::string &name)
+{
+  std::string head, options, tail;
+  if (!splitStrategy(code, head, options, tail)) return "";
+  size_t at = 0;
+  while (at <= options.size()) {
+    size_t colon = options.find(':', at);
+    std::string one = options.substr(at, colon == std::string::npos
+                                           ? std::string::npos : colon - at);
+    size_t eq = one.find('=');
+    if (eq != std::string::npos && one.substr(0, eq) == name)
+      return one.substr(eq + 1);
+    if (colon == std::string::npos) break;
+    at = colon + 1;
+  }
+  return "";
+}
+
+/// True for the option combination that lets Vampire derive `$false` from consistent
+/// premises: an ALASCA unification-with-abstraction mode with the ALASCA calculus off.
+///
+/// `uwa=alasca_*` unifies modulo arithmetic and is meant to emit the leftover equalities
+/// as constraints on the conclusion; with `alasca=off` there is no ALASCA machinery to
+/// carry them, and the constraints are dropped instead. The inference then applies a
+/// unifier that does not exist. On `uf_step` -- `f (y + 1) = f y + 2 |- f (x + 2) = f x
+/// + 4` -- `dis+21_1:64_alasca=off:...:uwa=alasca_can_abstract` closed the branch with
+///
+///     950   $sum(X0,X1) != $sum(1,$sum(X0,$sum(1,X1)))     (i.e. n != n + 2, valid)
+///     7018  $false [equality resolution 950]
+///
+/// where the two sides do not unify: `X0 =? 1` and `X1 =? X0 + (1 + X1)` fails the
+/// occurs check. The whole derivation uses no input clause, so it is `$false` from the
+/// linear-arithmetic theory axioms alone. Upstream has this reported against 5.1.0.
+///
+/// These slices cannot be replayed -- the step is invalid, so no Lean proof of it exists
+/// -- and a slice that can only produce an unusable refutation is worse than no slice:
+/// the driver escalates on a replay failure, so each one costs its own budget and then
+/// the budget of the escalation. Skipping them is what makes `uf_step` reachable, since
+/// the sound ALASCA proof is 8 steps and needs only a slice that gets to run.
+static bool unsoundAbstraction(const std::string &strategy)
+{
+  return optionValue(strategy, "alasca") == "off" &&
+         optionValue(strategy, "uwa").rfind("alasca", 0) == 0;
+}
+
 static bool buildsModels(const std::string &strategy)
 {
   return strategy.compare(0, 3, "fmb") == 0;
@@ -682,6 +728,11 @@ static void configure(const std::string &strategy, uint32_t deciseconds)
     if (buildsModels(strategy))
       throw Lib::UserErrorException(std::string(
         "it builds finite models, so it has no refutation to give"));
+    if (unsoundAbstraction(strategy))
+      throw Lib::UserErrorException(std::string(
+        "it abstracts arithmetic into constraints (uwa=alasca_*) with the calculus that "
+        "carries them turned off (alasca=off), which can derive $false from consistent "
+        "premises; set alasca=on to use this uwa mode"));
     env.options->readFromEncodedOptions(sanitiseStrategy(strategy));
     // The portfolio normalises the problem once in the parent and each worker inherits
     // it; nothing here does, and a strategy that asked would renumber the units the
@@ -891,6 +942,9 @@ uint32_t lean_vampire_schedule(b_lean_obj_arg names, b_lean_obj_arg code, lean_o
       // Dropped here as well as refused in `configure`, so that a model builder does
       // not occupy a slice of a budget that is being spent looking for a proof.
       if (buildsModels(one)) continue;
+      // Likewise: a slice whose refutations are invalid cannot be replayed, and costs
+      // its own budget plus the escalation its failure triggers.
+      if (unsoundAbstraction(one)) continue;
       t_scheduleTimes.push_back(sliceDeciseconds(one));
       t_scheduleCodes.push_back(sanitiseStrategy(one));
     }
