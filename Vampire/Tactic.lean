@@ -47,6 +47,12 @@ register_option vampire.timeout : Nat := {
   descr := "seconds Vampire may spend searching, across all stages"
 }
 
+/-- The default for `vampire.probeShare`, named so that the registered default and
+the fallback `Options.get` is given cannot drift apart: `get` takes its own default
+and ignores the registered one, so writing `20` at the call site kept the probe alive
+after `defValue` had been set to 0. -/
+def probeShareDefault : Nat := 20
+
 /--
 Percent of `vampire.timeout` for the probe: Vampire's default strategy, first, briefly.
 
@@ -57,17 +63,58 @@ harder and can reach a refutation sooner: `MGT035+2` is 14.9s given 30s and 1.6s
 2s, `MGT035-2` 6.6s against 1.2s, `HEN009-5` 3.3s against 0.5s. The probe is also what
 keeps a goal that refutes instantly from paying for anything else.
 
-`0` skips it and hands its share to the fallback.
+`0` skips it and hands its share to the fallback, **which is the default**. The stage
+above describes what the probe is for; what it is worth was then measured, and it does
+not pay for itself. Vampire's binary, sequential (`--cores 1`), 10s, default mode
+against `--mode portfolio --schedule casc`:
 
-A note on what was lost in making this a fraction. The probes used to be *absolute* --
-20 and 80 deciseconds, included only while small relative to the budget -- on the
-reasoning that what makes a probe worth trying is being small in itself rather than
-small relative to what the caller allowed. At the default 10s that reasoning and this
-one agree, since 20% of it is the 2s probe that was measured; they diverge as the budget
-grows, and at `timeout 60` a 20% "probe" is 12s and not really a probe. Set this lower
-when the budget is large. -/
+|                                      | SMT-LIB arithmetic | TPTP |
+| ------------------------------------ | -----------------: | ---: |
+| default refutes                      |             77/100 | 29/100 |
+| the schedule refutes                 |             93/100 | 32/100 |
+| problems only the default gets       |                  0 |    1 |
+| time saved where both get it         |            -0.78s  | +0.35s |
+| problems the schedule rescues        |                 16 |    4 |
+| ... each delayed by the probe's share |             32.0s |  8.0s |
+
+So the probe buys *coverage*, not speed, and only on TPTP, for one problem in a hundred
+(`NUM506+3`). Its time effect is negative on both corpora and badly negative on the one
+this tactic is for. The largest single case in either corpus runs the other way:
+`SEU417+1` is 1.63s under the default and 0.03s under the schedule.
+
+And the coverage it buys is not lost by skipping it, because the *fallback* is the same
+default strategy with a larger share. A tight limit is a different search, so the
+fallback is not the same search -- but in each case the paragraph above cites, the
+longer search still finds the proof, only slower.
+
+What it cost to keep was the whole probe share on every goal the schedule has to rescue:
+16% of the arithmetic corpus, and every one of `uf_step`, `bounds`, `int_bound` and
+`3 * x + 1 <= 7 |- x <= 2`, each of which spent ~2.1s of a 10s budget on a default
+strategy that cannot refute them in 20s.
+
+**It is nonetheless still 20, because removing it is blocked.** Setting it to 0 sends
+every goal to the schedule first, and a slice of the schedule can run without bound:
+`Test/Numbers.lean` went from 13s to 1191s and was OOM-killed at 9.8GB, and `p08_UFLRA`
+alone from 1.0s to over 200s. The default strategy is not what saves those --
+
+    probeShare 20 (probe, then schedule)          1.0s
+    probeShare 0, portfolioShare 0 (default only) 2.1s
+    probeShare 0, portfolioShare 30 (schedule)    > 200s
+
+-- so what the probe was really buying was not being in the schedule when a slice hangs.
+`dis+1002_1:1_alasca=off:asg=cautious:bd=off:canc=force:doe=on:flr=on:to=lpo` given 1
+decisecond ran for over 170s in-process; the same slice in the binary stops at its limit,
+because a forked worker is killed by its timer and an embedded one is only asked to stop
+at a cooperative check it may never reach. Bound the slices and this can go to 0; until
+then the probe is load-bearing for a reason that has nothing to do with probing.
+
+A budget much larger than the default is the other case to reconsider it in: at
+`timeout 60` a 20% probe is 12s and not a probe at all.
+(The probes used to be *absolute* -- 20 and 80 deciseconds -- on the reasoning that what
+makes a probe worth trying is being small in itself rather than small relative to what
+the caller allowed. At 10s the two agree; they diverge as the budget grows.) -/
 register_option vampire.probeShare : Nat := {
-  defValue := 20
+  defValue := probeShareDefault
   descr := "percent of `vampire.timeout` for the initial tight probe; 0 to skip it"
 }
 
@@ -599,10 +646,10 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
       -- the measured waste is -- on `LRA_formula_040` it spends its whole 2.1s reaching
       -- its time limit without refuting -- and moving only that is the largest change
       -- that arithmetic goals survive. See `vampire.arithPortfolio`.
-      let probeShare := opts.get `vampire.probeShare (20 : Nat)
+      let probeShare := opts.get `vampire.probeShare probeShareDefault
       let portfolioShare := opts.get `vampire.portfolioShare (30 : Nat)
       stageBudgets deciseconds 0 (min 100 (probeShare + portfolioShare))
-    else stageBudgets deciseconds (opts.get `vampire.probeShare (20 : Nat))
+    else stageBudgets deciseconds (opts.get `vampire.probeShare probeShareDefault)
       (opts.get `vampire.portfolioShare (30 : Nat))
   trace[vampire.timing] "budget {deciseconds}ds: probe {probe}, portfolio {portfolio}, \
     fallback {fallback}{if arith then " (arithmetic: the whole budget to the schedule)" else ""}"
