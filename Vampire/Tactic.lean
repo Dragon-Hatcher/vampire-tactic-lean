@@ -378,10 +378,10 @@ def buildProblem (cfg : Config) (mv : MVarId) (hs : Array Expr) (all : Bool) :
   let steps :=
     if cfg.mono then #[Preprocess.mono]
     else #[Preprocess.pushHintsToCtx, Preprocess.intros, Preprocess.negateGoal]
-  let ⟨_, hs₁, mv₁⟩ ← Preprocess.applySteps mv₀ hs steps
+  let ⟨_, hs₁, mv₁, goal₁⟩ ← Preprocess.applySteps mv₀ hs steps
   mv₁.withContext do
     let (fvNames, _) ← genUniqueFVarNames
-    let q ← Query.generateQuery hs₁.toList fvNames
+    let q ← Query.generateQuery hs₁.toList fvNames goal₁
     let rendered := MessageData.joinSep (q.commands.map toMessageData) Format.line
     trace[vampire] "problem:{indentD rendered}"
     let (names, code, sources, hasArith) ← compile q.commands

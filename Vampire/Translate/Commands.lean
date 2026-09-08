@@ -31,8 +31,8 @@ inductive Command where
   | defineFun (nm : String) (ps : List (String × Term)) (cod : Term) (tm : Term) (isRec : Bool)
   /-- A type abbreviation. Not supported yet; `Build.lean` reports it. -/
   | defineSort (nm : String) (ps : List Term) (tm : Term)
-  /-- An assertion. -/
-  | assert (tm : Term)
+  /-- An assertion. `conjecture` marks the one that is the negated goal. -/
+  | assert (tm : Term) (conjecture : Bool := false)
   deriving Inhabited
 
 namespace Command
@@ -44,7 +44,7 @@ protected def toString : Command → String
     let ps := String.intercalate " " (ps.map fun (n, s) => s!"({n} : {s})")
     s!"{nm} {ps} : {cod} := {tm}"
   | .defineSort nm _ tm => s!"sort {nm} := {tm}"
-  | .assert tm => s!"assert {tm}"
+  | .assert tm conj => s!"{if conj then "assert-goal" else "assert"} {tm}"
 
 instance : ToString Command := ⟨Command.toString⟩
 

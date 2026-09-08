@@ -199,7 +199,7 @@ def symbolTable (cmds : List Command) (commands : Std.HashMap Expr Command) :
     | .declare nm _ => some nm
     | .defineFun nm _ _ _ _ => some nm
     | .defineSort nm _ _ => some nm
-    | .assert _ => none
+    | .assert _ _ => none
   let emitted := cmds.filterMap named
   commands.fold (init := {}) fun m e c =>
     match named c with
@@ -219,8 +219,8 @@ structure Query where
 
 /-- Turn a list of hypotheses into the declarations and assertions Vampire is given,
 together with what each declared symbol means in Lean. -/
-def generateQuery (hs : List Expr) (fvNames : Std.HashMap FVarId String) :
-    MetaM Query := do
+def generateQuery (hs : List Expr) (fvNames : Std.HashMap FVarId String)
+    (goal : Option Expr := none) : MetaM Query := do
   trace[vampire.translate.query] "hypotheses: {hs}"
   -- A constant that is not a theorem carries content in its body, so define it rather
   -- than leaving it uninterpreted; the same goes for a `let` bound to a non-proof.
@@ -239,9 +239,25 @@ def generateQuery (hs : List Expr) (fvNames : Std.HashMap FVarId String) :
   trace[vampire.translate.query] "dependency graph: {st.graph}"
   let (_, emitted) ← StateT.run (st.graph.orderedDfs hs (emitVertex st.commands)) []
   let emitted := emitted.reverse
+  -- Mark the negated goal, which is what Vampire's goal-directed heuristics key on.
+  -- It is done here rather than where the command is built because the builder walks a
+  -- dependency graph and does not know which hypothesis the goal was; here each command
+  -- still carries the `Expr` it came from.
+  --
+  -- Leaving it unmarked is not a neutral default. Selecting axioms by relevance to the
+  -- goal, `sos`, `spb=goal` and the `gtg` family all read the input type, and with no
+  -- goal to key on they have nothing to select: of the 21 slices Vampire's own schedule
+  -- offers for `uf_step`, 12 are goal-directed, and the one that refutes it in the
+  -- binary gave up here in a millisecond. The same strategy on the same problem, with
+  -- the goal an `axiom` rather than a `conjecture`, is the whole difference between
+  -- "Refutation in 0.005s" and "Refutation not found, incomplete strategy".
+  let emitted := emitted.map fun (e, c) =>
+    match c, goal with
+    | .assert tm _, some g => (e, Command.assert tm (e == g))
+    | _, _ => (e, c)
   let cmds := emitted.map (·.2)
   let asserted := emitted.filterMap fun (e, c) =>
-    match c with | .assert _ => some e | _ => none
+    match c with | .assert _ _ => some e | _ => none
   return { commands := cmds, symbols := symbolTable cmds st.commands,
            asserted := asserted.toArray }
 

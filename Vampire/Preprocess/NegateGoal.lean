@@ -19,6 +19,7 @@ def negateGoal (mv : MVarId) (hs : Array Expr) : MetaM Result := do
   let [mv] ← mv.applyConst ``Classical.byContradiction
     | throwError "vampire: unexpected result after applying {``Classical.byContradiction}"
   let (fv, mv) ← mv.intro1
-  return { map := Std.HashMap.insert {} (.fvar fv) #[.fvar fv], hs := hs.push (.fvar fv), mv }
+  return { map := Std.HashMap.insert {} (.fvar fv) #[.fvar fv], hs := hs.push (.fvar fv), mv,
+           goal := some (.fvar fv) }
 
 end Vampire.Preprocess

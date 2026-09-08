@@ -25,6 +25,12 @@ structure Result where
   hs : Array Expr
   /-- The goal after this step. -/
   mv : MVarId
+  /-- The hypothesis that is the *negated goal*, where a step made one.
+
+  Vampire's goal-directed heuristics need to know which unit is the goal, and there is
+  no way to recover that downstream: by the time the problem is built, the negated goal
+  is just another hypothesis. See `Translate/Build.lean`'s `assert`. -/
+  goal : Option Expr := none
 
 /-- Every proposition in the local context. `Nonempty` hypotheses are skipped: they say
 something about Lean's type theory, not about the first-order problem. -/
@@ -46,15 +52,16 @@ where
 def applySteps (mv : MVarId) (hs : Array Expr)
     (steps : Array (MVarId → Array Expr → MetaM Result)) : MetaM Result := do
   if h : 0 < steps.size then
-    let mut { map, hs, mv } ← steps[0] mv hs
+    let mut { map, hs, mv, goal } ← steps[0] mv hs
     for step in steps[1:] do
-      let ⟨map', hs', mv'⟩ ← step mv hs
+      let ⟨map', hs', mv', goal'⟩ ← step mv hs
       map := compose map map'
       hs := hs'
       mv := mv'
-    return { map, hs, mv }
+      goal := goal' <|> goal
+    return { map, hs, mv, goal }
   else
-    return Result.mk {} #[] mv
+    return { map := {}, hs := #[], mv }
 where
   compose (m₁ m₂ : Std.HashMap Expr (Array Expr)) : Std.HashMap Expr (Array Expr) :=
     m₂.fold (init := m₁) fun map k v =>

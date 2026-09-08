@@ -351,8 +351,8 @@ private def compileCommand (c : Command) : BuildM Unit := do
   match c with
   | .declareSort nm arity => declareSort nm arity
   | .declare nm st => declareSymbol nm st
-  | .assert tm =>
-    compileForm tm; emitOp .assert; emitNat 0
+  | .assert tm conjecture =>
+    compileForm tm; emitOp .assert; emitNat (if conjecture then 1 else 0)
     modify fun s => { s with asserts := s.asserts.push .hypothesis }
   | .defineSort nm _ _ =>
     throwError "vampire: the type abbreviation '{nm}' is not translated yet; \
