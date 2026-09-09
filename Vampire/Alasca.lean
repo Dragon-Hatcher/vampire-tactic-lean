@@ -195,6 +195,14 @@ private def ratExpr (ty : Expr) (r : Rat) : MetaM Expr := do
   if r.den == 1 then return n
   return ← mkAppM ``HDiv.hDiv #[n, ← mkNumeral ty r.den]
 
+/-- A rational as the source `linear_combination` reads it back.
+
+Parenthesised, and a quotient rather than a decimal: the numeral is elaborated at the
+goal's type, so `(1/3)` is a genuine third at `ℝ` -- and at `ℤ` it would be integer
+division, which is why `certProof` refuses a non-integral coefficient there. -/
+private def ratStr (r : Rat) : String :=
+  if r.den == 1 then s!"({r.num})" else s!"({r.num}/{r.den})"
+
 /--
 Rational `k⃗` with `Σ kᵢ · rowsᵢ = target`, by Gaussian elimination over the monomials.
 
@@ -204,13 +212,18 @@ taken to be zero, and the answer is *verified* against `target` with exact `Poly
 arithmetic before it is returned -- so an under-determined or degenerate system costs a
 `none` rather than a wrong certificate.
 -/
-private def solveCoeffs (target : Poly) (rows : Array Poly) : Option (Array Rat) := Id.run do
+private def solveCoeffs (target : Poly) (rows : Array Poly) (slack : Bool) :
+    Option (Array Rat) := Id.run do
+  -- With `slack`, the constant monomial is left out of both the system and the check.
+  -- An inequality tolerates one: `Ring.proveLT` closes `-1 < 0`, which is what the `ℤ`
+  -- strengthening `l ≤ r ⟹ l < r + 1` leaves behind. An equality tolerates none.
+  let keep (m : Mono) : Bool := !slack || !m.isEmpty
   let mut monos : Array Mono := #[]
   for (m, _) in target do
-    unless monos.contains m do monos := monos.push m
+    if keep m then unless monos.contains m do monos := monos.push m
   for r in rows do
     for (m, _) in r do
-      unless monos.contains m do monos := monos.push m
+      if keep m then unless monos.contains m do monos := monos.push m
   let n := rows.size
   let coeff (p : Poly) (m : Mono) : Rat :=
     (p.find? (fun q => q.1 == m)).map (·.2) |>.getD 0
@@ -243,30 +256,52 @@ private def solveCoeffs (target : Poly) (rows : Array Poly) : Option (Array Rat)
   let mut sum : Poly := Poly.zero
   for i in [0:n] do
     sum := sum.add (rows[i]!.scale k[i]!)
-  if sum == target then some k else none
+  if sum.filter (fun t => keep t.1) == target.filter (fun t => keep t.1) then some k
+  else none
 
 /--
-A proof of `goal` from `hyps`, all being equalities with the negation already stripped.
+A proof of `goal` from `hyps`, the negations already stripped and turned round.
 
-See the header: this computes `k⃗`, the congruences and `F`, and returns `A.trans (B.trans
-C)`. `mⱼ` is `Σ kᵢ γᵢⱼ`, where `γᵢⱼ` is the coefficient premise `i` gave the atom that was
-rewritten -- substituting the representative for it moves exactly that much from one atom
-to the other, so that is what the congruence has to put back.
+`goal` may be any of `=`, `≤`, `<`, `≥`, `>`; the hypotheses likewise. The certificate is
+the same either way -- rationals `kᵢ` with `Σ kᵢ · premiseᵢ = goal` over the monomials,
+plus the congruences that identify atoms `normalizeUninterpreted` rewrote -- and only the
+*proof* differs.
+
+For an equality goal from equality hypotheses the proof is built, as the header describes:
+`F`, two `ring1`s and a `congrArg`/`congr` chain composed by `Eq.trans`.
+
+For an inequality the same term does not work, because `F` is a function and `congrArg`
+carries an equality through a function, not an order. Carrying `≤` through needs `F`
+monotone and `kᵢ` nonnegative, which is a stack of order lemmas rather than a congruence,
+so the certificate goes to `linear_combination` instead -- one tactic call with the
+coefficients already solved, checked by `Ring.proveLE`/`proveLT`, which is the same thing
+`ring1` is in the equality branch: a checker handed an answer, not a search.
+
+The hypotheses are bound as `a0 … aₙ` and the proof is applied to them afterwards, so the
+tactic is a plain string over identifiers and numerals. That matters: `linear_combination`
+is Mathlib's and this package does not import it, so there is no quotation to splice an
+`Expr` into.
 -/
-def certProof (goal : Expr) (hyps : Array (Expr × Expr)) : TermElabM (Option Expr) := do
+partial def certProof (goal : Expr) (hyps : Array (Expr × Expr)) :
+    TermElabM (Option Expr) := do
   let some (grel, gty, gl, gr) := relOf goal | return none
-  unless grel == .eq do return none
   let px := (polyOf gl).sub (polyOf gr)
   -- No premise enters the proof: the literal is an identity, which is what the step
   -- closing a refutation on `0 ≠ 0` needs.
-  if px.isEmpty && hyps.isEmpty then return ← ringEq gl gr
+  if grel == .eq && px.isEmpty && hyps.isEmpty then return ← ringEq gl gr
+  let mut rels : Array Rel := #[]
   let mut sides : Array (Expr × Expr) := #[]
   let mut pys : Array Poly := #[]
   for (_, hty) in hyps do
     let some (hrel, hsort, hl, hr) := relOf hty | return none
-    unless hrel == .eq && hsort == gty do return none
+    unless hsort == gty do return none
+    -- An equality is not provable from inequalities, and this is where that is decided
+    -- rather than discovered: `linear_combination` would refuse it one tactic call later.
+    if grel == .eq && hrel != .eq then return none
+    rels := rels.push hrel
     sides := sides.push (hl, hr)
     pys := pys.push ((polyOf hl).sub (polyOf hr))
+  if pys.isEmpty then return none
   -- Congruence classes. The goal's atoms are representatives, then each premise's in
   -- turn: an atom that is not already one either joins a class or becomes a new
   -- representative itself, which is what lets two premises agree on an atom the goal
@@ -281,7 +316,7 @@ def certProof (goal : Expr) (hyps : Array (Expr × Expr)) : TermElabM (Option Ex
         | none => reps := reps.push q
   -- The substitution has to be linear, so a rewritten atom may only occur on its own:
   -- `f (x+1)` becoming `f (1+x)` inside `f (x+1) * y` would need the product's coefficient
-  -- split between two congruences, which `F` cannot express.
+  -- split between two congruences, which the certificate cannot express.
   for (_, q) in pairs do
     for py in pys do
       for (m, _) in py do
@@ -290,26 +325,74 @@ def certProof (goal : Expr) (hyps : Array (Expr × Expr)) : TermElabM (Option Ex
   let substituted (p : Poly) : Poly :=
     p.foldl (init := Poly.zero) fun acc (m, c) =>
       acc.add ((m.foldl (init := Poly.const 1) fun t a => t.mul (Poly.atom (rep a))).scale c)
-  let some ks := solveCoeffs px (pys.map substituted) | return none
-  -- The congruence coefficients, and then everything with a zero coefficient dropped:
-  -- an unused premise or an atom whose contributions cancelled costs a `ring1` otherwise.
-  let mut used : Array (Expr × Expr × Expr × Rat) := #[]
+  let rows := pys.map substituted
+  let slack := grel != .eq
+  let mut ks? := solveCoeffs px rows slack
+  -- A strict conclusion has to be *witnessed*: `Σ kᵢ · premiseᵢ = goal` is satisfied by
+  -- taking every `kᵢ` to be zero whenever the system is degenerate or under-determined,
+  -- and zero coefficients prove nothing. Fourier-Motzkin is exactly that case -- from
+  -- `-12 + y > 0` and `12 - y ≥ 0` the two polynomials cancel, so the equation holds for
+  -- any `k₁ = k₂`, and the one solution that is also a proof is the one that uses the
+  -- strict premise. So pin a strict premise at 1 and solve for the rest.
+  if grel == .lt then
+    let witnessed := match ks? with
+      | some ks => (Array.range rels.size).any fun i => rels[i]! == Rel.lt && ks[i]! > 0
+      | none => false
+    unless witnessed do
+      ks? := none
+      for i in [0:rels.size] do
+        if ks?.isNone && rels[i]! == Rel.lt then
+          -- A zero column is never a pivot, so the solver leaves `i` at zero and this
+          -- puts the pinned 1 back.
+          match solveCoeffs (px.sub rows[i]!) (rows.set! i Poly.zero) slack with
+          | some k => ks? := some (k.set! i 1)
+          | none => pure ()
+  let some ks := ks? | return none
+  -- Scaling an inequality by a negative number reverses it, so a negative coefficient on
+  -- one is not a certificate at all. An equality takes either sign.
+  for i in [0:ks.size] do
+    if rels[i]! != .eq && ks[i]! < 0 then return none
+  -- Everything with a zero coefficient dropped: an unused premise, or an atom whose
+  -- contributions cancelled, costs a `ring1` otherwise.
+  let mut used : Array (Expr × Expr × Rat) := #[]
+  let mut lefts : Array Expr := #[]
+  let mut rights : Array Expr := #[]
   for i in [0:hyps.size] do
     if ks[i]! != 0 then
-      used := used.push (hyps[i]!.1, sides[i]!.1, sides[i]!.2, ks[i]!)
+      used := used.push (hyps[i]!.1, hyps[i]!.2, ks[i]!)
+      lefts := lefts.push sides[i]!.1
+      rights := rights.push sides[i]!.2
   for (p, q) in pairs do
     let mut m : Rat := 0
     for i in [0:pys.size] do
       m := m + ks[i]! * ((pys[i]!.find? (fun t => t.1 == #[q])).map (·.2) |>.getD 0)
     if m != 0 then
       let some cg ← congrProof p q | return none
-      used := used.push (cg, p, q, m)
-  if used.isEmpty then return ← ringEq gl gr
+      used := used.push (cg, ← mkEq p q, m)
+      lefts := lefts.push p
+      rights := rights.push q
+  if used.isEmpty then
+    return ← if grel == .eq then ringEq gl gr else pure none
+  -- The conclusion *is* the premise: `¬ (t < 0)` normalises to `t ≥ 0`, and once
+  -- `le_of_not_gt` has turned it round there is nothing left to prove. One `isDefEq`
+  -- rather than a tactic, and it is the commonest normalisation of all.
+  if used.size == 1 && used[0]!.2.2 == 1 then
+    if ← isDefEq goal used[0]!.2.1 then return some used[0]!.1
   -- `normalizeFactors` divides by a gcd, which over `ℤ` and `ℕ` is a division and not a
-  -- scaling: `t = 0` from `gcd * t = 0` is `mul_eq_zero`, not a ring identity.
+  -- scaling: `t = 0` from `gcd * t = 0` is `mul_eq_zero`, not a ring identity, and `1/3`
+  -- written as a coefficient there is integer division.
   if gty.isConstOf ``Int || gty.isConstOf ``Nat then
-    if used.any (fun u => u.2.2.2.den != 1) then return none
-  let coeffs ← used.mapM fun u => ratExpr gty u.2.2.2
+    if used.any (fun u => u.2.2.den != 1) then return none
+  if grel != .eq then
+    -- `linear_combination k₀ * a0 + k₁ * a1 + …`, over hypotheses bound as `a0 …`.
+    let tac := "linear_combination " ++ String.intercalate " + "
+      (used.toList.zipIdx.map fun ((_, _, k), j) => s!"{ratStr k} * a{j}")
+    let decls := used.mapIdx fun j u => (Name.mkSimple s!"a{j}", fun _ => pure u.2.1)
+    return ← withLocalDeclsD decls fun as => do
+      let some pf ← byTactic goal (← Arith.parseTactic tac) | return none
+      return some (mkAppN (← mkLambdaFVars as pf) (used.map (·.1)))
+  -- The equality branch: `F`, two ring identities and a congruence chain.
+  let coeffs ← used.mapM fun u => ratExpr gty u.2.2
   let sum (args : Array Expr) : MetaM Expr := do
     let mut e : Option Expr := none
     for (c, w) in coeffs.zip args do
@@ -318,8 +401,6 @@ def certProof (goal : Expr) (hyps : Array (Expr × Expr)) : TermElabM (Option Ex
         | none => pure t
         | some acc => mkAppM ``HAdd.hAdd #[acc, t])
     return e.getD (← mkNumeral gty 0)
-  let lefts := used.map fun u => u.2.1
-  let rights := used.map fun u => u.2.2.1
   let const ← mkAppM ``HSub.hSub #[gr, ← sum rights]
   let full (args : Array Expr) : MetaM Expr := do mkAppM ``HAdd.hAdd #[← sum args, const]
   let some a ← ringEq gl (← full lefts) | return none
@@ -331,24 +412,77 @@ def certProof (goal : Expr) (hyps : Array (Expr × Expr)) : TermElabM (Option Ex
     b ← mkCongr b u.1
   return some (← mkEqTrans a (← mkEqTrans b c))
 
-/-- A proof of the conclusion's literal `tc` from `hp : tp`, with `eqs` available. -/
+/-- A premise literal as a comparison a linear certificate can use.
+
+ALASCA's step 2 takes the negation off an inequality -- `¬ (l ≥ r)` is `r < l` -- so a
+premise and its normalisation routinely disagree in polarity, and this does on the Lean
+side what `tryNormalizeInterpreted` does on Vampire's. `le_of_not_gt` and `lt_of_not_ge`
+are `Mathlib/Order/Defs/LinearOrder.lean`'s, resolved in the environment the replay runs
+in for the reason `Vampire/Arith.lean` resolves its tactics there.
+
+A negated *equality* is not one: a disequality bounds nothing, so it can only be the thing
+a contradiction contradicts, never a term in a combination. -/
+def usable (h ty : Expr) : TermElabM (Option (Expr × Expr)) := do
+  let (neg, core) := stripNot ty
+  let some (rel, _, _, _) := relOf core | return none
+  unless neg do return some (h, core)
+  let name := match rel with
+    | .eq => Name.anonymous
+    | .lt => Name.mkSimple "le_of_not_gt"
+    | _   => Name.mkSimple "lt_of_not_ge"
+  if name.isAnonymous then return none
+  try
+    let p ← mkAppM name #[h]
+    return some (p, ← inferType p)
+  catch _ => return none
+
+/-- `False` from comparisons that cannot all hold: a nonnegative combination of them
+proving `0 < 0`, which `lt_irrefl` refutes.
+
+This is what closes an ALASCA refutation whose last literal is an inequality -- the step
+whose whole content is `-12 + 12 > 0 → False`. -/
+def contradiction (hyps : Array (Expr × Expr)) : TermElabM (Option Expr) := do
+  let some (_, ty, _, _) := hyps[0]?.bind (fun h => relOf h.2) | return none
+  let zero ← mkNumeral ty 0
+  let some pf ← certProof (← mkAppM ``LT.lt #[zero, zero]) hyps | return none
+  try return some (mkApp (← mkAppM (Name.mkSimple "lt_irrefl") #[zero]) pf)
+  catch _ => return none
+
+/-- A proof of the conclusion's literal `tc` from `hp : tp`, with `eqs` available.
+
+Three shapes, and the polarity decides which. A positive conclusion is proved from the
+premise read as a comparison. A negated one is introduced and the premises made to
+contradict it. The empty clause is the same with nothing to introduce -- either the
+premise is a disequality whose core the rest prove, which is the equality case, or the
+comparisons are jointly unsatisfiable, which is the inequality one. -/
 def litProof (hp : Expr) (tp tc : Expr) (eqs : Array (Expr × Expr)) :
     TermElabM (Option Expr) := do
   let (np, cp) := stripNot tp
-  if tc.consumeMData.isConstOf ``False then
-    -- The empty clause. The premise's literal is a negation whose core the equations give.
+  let main ← usable hp tp
+  let asArray : Option (Expr × Expr) → Array (Expr × Expr) := fun o => o.toArray
+  -- `¬ (a = b)` in hand, and `extra` proving `a = b`.
+  let byDisequality (extra : Array (Expr × Expr)) : TermElabM (Option Expr) := do
     unless np do return none
-    let some cert ← certProof cp eqs | return none
-    return some (mkApp hp cert)
+    match relOf cp with
+    | some (.eq, _, _, _) =>
+      match ← certProof cp extra with
+      | some cert => return some (mkApp hp cert)
+      | none => return none
+    | _ => return none
+  if tc.consumeMData.isConstOf ``False then
+    if let some pr ← byDisequality eqs then return some pr
+    return ← contradiction (asArray main ++ eqs)
   let (nc, cc) := stripNot tc
-  unless np == nc do return none
-  if np then
-    -- `¬ cp → ¬ cc` is `fun hc => hp (cert hc)`, and the certificate runs the other way.
-    withLocalDeclD `hc cc fun hc => do
-      let some cert ← certProof cp (#[(hc, cc)] ++ eqs) | return none
-      return some (← mkLambdaFVars #[hc] (mkApp hp cert))
-  else
-    certProof cc (#[(hp, cp)] ++ eqs)
+  if !nc then
+    let some (mh, mt) := main | return none
+    return ← certProof cc (#[(mh, mt)] ++ eqs)
+  withLocalDeclD `hc cc fun hc => do
+    let inner := #[(hc, cc)] ++ eqs
+    let some pr ← (do
+      if let some pr ← byDisequality inner then return some pr
+      contradiction (asArray main ++ inner))
+      | return none
+    return some (← mkLambdaFVars #[hc] pr)
 
 /-- `⋁ es`, right-nested, as a clause is built. -/
 private def foldOr (es : Array Expr) : Expr := Id.run do
@@ -458,7 +592,7 @@ where
         let (h', t', ms') ← openPrefix h (← inferType h)
         opened := opened.push (h', t')
         ms := ms ++ ms'
-      -- The rule names its rewriting equations first and the clause it rewrites last:
+      -- The rule names the premises it uses first and the clause it rewrites last:
       -- `GeneratingInference2(rule, lhs.clause(), rhs.clause())`.
       let some (mainH, mainT) := opened.back? | return none
       let eqPrems := opened.pop
@@ -473,14 +607,13 @@ where
         for (h, t) in eqPrems do
           let t ← instantiateMVars t
           if t.hasExprMVar then return none
-          -- A rewriting premise is one positive equality; anything else is a rule this
-          -- does not know, and the cascade can have it.
+          -- A premise other than the last is one unit comparison the certificate may use:
+          -- superposition's rewriting equality, or Fourier-Motzkin's second inequality.
+          -- `usable` turns a negated one round and refuses a disequality. Anything else is
+          -- a rule this does not know, and the cascade can have it.
           let #[lit] := orParts t | return none
-          let (neg, core) := stripNot lit
-          if neg then return none
-          let some (rel, _, _, _) := relOf core | return none
-          unless rel == .eq do return none
-          eqs := eqs.push (← instantiateMVars h, core)
+          let some u ← usable (← instantiateMVars h) lit | return none
+          eqs := eqs.push u
         if mainT.hasExprMVar then return none
         let ps := orParts mainT
         let cs := if bc.consumeMData.isConstOf ``False then #[] else orParts bc
