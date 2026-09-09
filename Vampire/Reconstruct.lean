@@ -916,8 +916,16 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- disjuncts, and they do not always: `p → q` becomes `q ∨ ¬p` on one side and
     -- `¬p ∨ q` on the other. The `first | exact h | grind` the other three already use
     -- covers it.
+    --
+    -- Split rather than chained with `<;>`, which is the same thing on one goal and makes
+    -- `trace.vampire.timing.tactic` say which half costs what. It says all of it: on an
+    -- NRA formula `ennf_transformation at h` is 13ms and `first | exact h | grind` is 0ms,
+    -- so there is no cascade here to reorder -- the cost is one `simp only` over a large
+    -- formula, and the only way past it is to build the transformation instead of simping
+    -- it, the way `Bridge` builds a flattening.
     return #[← `(tactic| intro $h:ident),
-             ← `(tactic| ennf_transformation at $h:ident <;> first | exact $h | grind)]
+             ← `(tactic| ennf_transformation at $h:ident),
+             ← `(tactic| first | exact $h | grind)]
   | .flatten =>
     -- Flattening *is* reassociation — `and_assoc`, `or_assoc` and `Classical.not_not` —
     -- and reassociation is what the bridge does by construction, so it gets first
