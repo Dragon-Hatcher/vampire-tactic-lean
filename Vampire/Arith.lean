@@ -308,15 +308,18 @@ rewrite sat seventeenth and every step paid for sixteen failures first -- on
 8537ms of an 8677ms replay. Ordering the same alternatives for what this rule actually is
 is the whole fix; nothing here is new machinery. -/
 def normTactics : List String :=
-  [-- The structural bridge first, exactly as `.flatten` uses it: where a normalisation
-   -- is only a reassociation or a reorientation -- which many of them are -- it walks the
-   -- premise and the conclusion together and builds the proof from the correspondence,
-   -- in a fraction of a millisecond. `h0` is what `intros` named the premise; a step with
-   -- no premise has no `h0`, the alternative fails to elaborate, and the cascade moves
-   -- on, which is the same fallback every other line here relies on.
-   "vampire_bridge h0",
-   -- The same walk, with the atoms `Vampire/Bridge/Poly.lean` recognised as the *same*
-   -- comparison left as goals for `linarith`.
+  [-- The structural bridge, with the atoms `Vampire/Bridge/Poly.lean` recognises as the
+   -- *same* comparison left as goals for `linarith`. `h0` is what `intros` named the
+   -- premise; a step with no premise has no `h0`, the alternative fails to elaborate, and
+   -- the cascade moves on, which is the same fallback every other line here relies on.
+   --
+   -- **Plain `vampire_bridge h0` used to come first and has been dropped.** It is the same
+   -- walk with one leaf rule switched off, so it proves a strict subset -- and when it
+   -- fails it fails at the *end* of the walk, having done all of it. On
+   -- `LRA_formula_071` step 2 that cost 20ms of a 22ms `theory normalization`, and the
+   -- line below then walked the same formula again and closed it in 1ms. A first
+   -- alternative that cannot succeed where the second fails, and costs the whole walk to
+   -- find out, is not a cheap first alternative.
    --
    -- This is the line a normalisation that is not purely structural needs, which is most
    -- of them: `theory normalization` restates `A ≥ 0` as `¬ A < 0` and reassociates the
