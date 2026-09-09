@@ -118,6 +118,11 @@ register_option vampire.probeShare : Nat := {
   descr := "percent of `vampire.timeout` for the initial tight probe; 0 to skip it"
 }
 
+/-- The default for `vampire.portfolioShare`. Named for the reason
+`probeShareDefault` is: `Options.get` takes its own fallback and ignores the registered
+`defValue`, so a bare literal at the call site silently wins. -/
+def portfolioShareDefault : Nat := 20
+
 /--
 Percent of `vampire.timeout` for Vampire's own portfolio.
 
@@ -131,33 +136,54 @@ What is missing is not time and not a better strategy but *diversity*; see
 `0` skips it and hands its share to the fallback, which is the old behaviour of
 `vampire.portfolio false`.
 
-**Why the portfolio is in the middle and not last.** It used to run only after the
-default strategy had had the whole budget, so that a goal the default refutes never paid
-for it. Under a deadline that is the wrong way round, because what matters is not what
-the default costs when it succeeds but what it costs when it *fails*, and that is
-everything -- the run is killed inside the default phase and the portfolio never
-happens. Measured over the 100 problems of `bench-100/` under a 10s wall: portfolio last
-proves 58, portfolio in the middle on a share of its own proves 60 and loses nothing.
-The two it gains, `SET351+4` and `SEU417+1`, are ones where the default burned the whole
-wall and the first portfolio slice then refuted in tens of milliseconds.
+**Why the portfolio is first.** It ran last, then in the middle, and now in front, each
+move for the same reason: what matters is not what the default costs when it succeeds but
+what it costs when it *fails*, and when it fails it costs its whole share before anything
+else is tried.
 
-Both halves of that mattered. Moving the portfolio without giving it its own share
-proves 59 and gives up `NUM506+3`, because it then takes the budget out of the
-default's; and 40% rather than 30% gives `NUM506+3` up again. The useful window is
-narrow.
+Measured through the tactic, timing the tactic rather than the process. On the 100
+SMT-LIB arithmetic problems the schedule alone at 2s refutes everything the old order
+refuted at 10s, and faster at every point of the curve:
 
-**What this arrangement actually proves is 59, not the 60 above**, and the one it gives
-back is `NUM506+3` again. The 60 was measured with the fallback holding a *nominal*
-`vampire.timeout` and being cut off by the wall, where dividing the budget strictly
-hands it its share and no more -- a nominal 5s rather than a nominal 10s truncated to
-about 3.5s. Those are not the same search: the limited-resource strategy reads that
+                          solved   n=40    n=50    n=60    n=70
+      probe first, 10s       75    3.75s   4.93s   6.50s   9.16s
+      schedule only, 2s      75    2.99s   3.90s   4.84s   5.92s
+
+On the 100 TPTP problems the schedule alone at 2s refutes 59 where the old order refutes
+66, but six of those seven are budget and not the missing default: given 10s the schedule
+alone refutes them too. The seventh is `NUM506+3`, which the schedule does not refute at
+any budget tried and the default refutes in 915ms. That one problem is what the default
+stage is still here for.
+
+So the schedule leads, on a share of its own, and the default follows. `30` was tuned
+when the default led and the window was narrow; at `20` the schedule settles the
+arithmetic corpus inside its own share, and what is left goes to the fallback rather than
+to a stage that has already had its turn.
+
+What the order costs is the goals the default used to refute before the schedule was
+reached: `GRP767-1` and `GEO564+1` are about 1s under the old order and about 10s under
+the schedule alone. Both are still refuted; the order decides which stage pays.
+
+**Measured again once the replay work landed**, `bench_tactic.py` over both corpora at
+10s: 77 of the 100 SMT-LIB arithmetic problems and 64 of the 100 TPTP ones. The
+arithmetic figure is up from 75 because the *replay* got faster and two problems that
+used to run out of budget now finish, not because the search changed. The TPTP figure is
+against the 66 above; which two it gives back is not known, because that comparison was
+made before this file changed and the old order's per-problem results were not kept.
+`NUM506+3`, `GRP767-1` and `GEO564+1` -- the three the reorder was expected to cost --
+are all still refuted, at 5.1s, 3.0s and 4.1s.
+
+**A note on why the last stage's share is not the same as a shorter wall.** Dividing the
+budget strictly hands the fallback its share and no more -- a nominal 5s -- where holding
+a nominal `vampire.timeout` and being cut off by the wall gives it a nominal 10s truncated
+to about 3.5s. Those are not the same search: the limited-resource strategy reads that
 number to decide what to discard, so a smaller one prunes differently rather than merely
-stopping sooner (`vampire.probeShare` has the measurements). Recovering the problem would
-mean letting the fallback search under the whole budget while spending only its share of
-the clock, and then `vampire.timeout` would no longer bound the search, which is worth
-more than one marginal problem -- it flips between three of the configurations tried. -/
+stopping sooner (`vampire.probeShare` has the measurements). Letting a stage search under
+the whole budget while spending only its share of the clock would recover the difference,
+and would also mean `vampire.timeout` no longer bounds the search -- which is worth more
+than a marginal problem, since it flips between three of the configurations tried. -/
 register_option vampire.portfolioShare : Nat := {
-  defValue := 30
+  defValue := portfolioShareDefault
   descr := "percent of `vampire.timeout` for Vampire's own portfolio; 0 to skip it"
 }
 
@@ -647,10 +673,10 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
       -- its time limit without refuting -- and moving only that is the largest change
       -- that arithmetic goals survive. See `vampire.arithPortfolio`.
       let probeShare := opts.get `vampire.probeShare probeShareDefault
-      let portfolioShare := opts.get `vampire.portfolioShare (30 : Nat)
+      let portfolioShare := opts.get `vampire.portfolioShare portfolioShareDefault
       stageBudgets deciseconds 0 (min 100 (probeShare + portfolioShare))
     else stageBudgets deciseconds (opts.get `vampire.probeShare probeShareDefault)
-      (opts.get `vampire.portfolioShare (30 : Nat))
+      (opts.get `vampire.portfolioShare portfolioShareDefault)
   trace[vampire.timing] "budget {deciseconds}ds: probe {probe}, portfolio {portfolio}, \
     fallback {fallback}{if arith then " (arithmetic: the whole budget to the schedule)" else ""}"
 
@@ -662,7 +688,7 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
     -- said something about the problem, and running another is asking the same question.
     if st.settled || limit == 0 then return (st, none)
     runAttempts built #[{ limit }] none more use st
-  let runPortfolio (budget : UInt32) (st : Progress) :
+  let runPortfolio (budget : UInt32) (more : Bool) (st : Progress) :
       TermElabM (Progress × Option α) := do
     if st.settled || budget == 0 then return (st, none)
     match ← Ffi.schedule built.names built.code with
@@ -684,7 +710,7 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
       let cap := (opts.get `vampire.portfolioSlice (20 : Nat)).toUInt32
       let attempts := portfolioSchedule slices budget cap
       let deadline := (← IO.monoMsNow) + 100 * budget.toNat
-      let (st', r') ← runAttempts built attempts (some deadline) false use st
+      let (st', r') ← runAttempts built attempts (some deadline) more use st
         (headline := false)
       trace[vampire.timing] "portfolio: {st'.tried} of {attempts.size} strategies run"
       return (st', r')
@@ -701,7 +727,28 @@ def searchWith {α : Type} (cfg : Config) (mv : MVarId) (hs : Array Expr) (all :
     let (st', r') ← runAttempts built #[{ limit, strategy := cfg.strategy }] none true use st
     st := st'
     if let some a := r' then return (built, st.winner, .ok a)
-  for stage in [runDefault probe true, runPortfolio portfolio,
+  -- The schedule first, then the default strategy.
+  --
+  -- Measured over both suites, through the tactic, timing the tactic rather than the
+  -- process. On the 100 SMT-LIB arithmetic problems the schedule alone at 2s refutes
+  -- everything the old order refuted at 10s, and faster:
+  --
+  --                        solved   n=40    n=50    n=60    n=70
+  --     probe first, 10s      75    3.75s   4.93s   6.50s   9.16s
+  --     schedule only, 2s     75    2.99s   3.90s   4.84s   5.92s
+  --
+  -- On the 100 TPTP problems the schedule alone at 2s refutes 59 where the old order
+  -- refutes 66. Six of those seven are budget rather than the missing default: given
+  -- 10s the schedule alone gets them too. The seventh, `NUM506+3`, the schedule does
+  -- not refute at any budget tried -- which is what the default strategy is still here
+  -- for, and it takes 915ms.
+  --
+  -- So the schedule goes first, where it settles the arithmetic corpus in its own 2s,
+  -- and the default follows to pick up what only it can do. What this costs is the
+  -- goals the default used to refute quickly before the schedule was ever reached:
+  -- `GRP767-1` and `GEO564+1` are ~1s under the old order and ~10s under the schedule
+  -- alone. They are refuted either way; the order decides which pays.
+  for stage in [runPortfolio portfolio true, runDefault probe true,
                 runDefault fallback false] do
     let (st', r) ← stage st
     st := st'
