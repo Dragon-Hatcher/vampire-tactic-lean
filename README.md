@@ -3,10 +3,10 @@
 A Lean tactic that discharges goals using the Vampire theorem prover.
 
 ```lean
-    /-- Every group of exponent 2 is abelian. -/
-    theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
-        ∀ a b : G, a * b = b * a := by
-      vampire +mono [h, mul_assoc, one_mul]
+/-- Every group of exponent 2 is abelian. -/
+theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
+    ∀ a b : G, a * b = b * a := by
+  vampire +mono [h, mul_assoc, one_mul]
 ```
 
 ## Theories
@@ -47,10 +47,10 @@ Vampire's logic is monomorphic, so a goal that quantifies over a type or carries
 [lean-smt](https://github.com/ufmg-smite/lean-smt) tactic.
 
 ```lean
-    variable [Group G]
+variable [Group G]
 
-    theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
-      vampire +mono [mul_assoc, one_mul, inv_mul_cancel]
+theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
+  vampire +mono [mul_assoc, one_mul, inv_mul_cancel]
 ```
 
 `G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols.
@@ -60,8 +60,8 @@ Vampire's logic is monomorphic, so a goal that quantifies over a type or carries
 at a literal natural exponent is unfolded into multiplications.
 
 ```lean
-    theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
-      vampire [h, h₂]
+theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
+  vampire [h, h₂]
 ```
 
 Vampire relies heavily on portfolios. This means it tries the same problem under
@@ -71,13 +71,13 @@ skip directly there in future runs. This tends to happen especially with
 arithmetic where the default strategies tend not to work as well.
 
 ```lean
-    -- slower
-    theorem real_lin (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
-      vampire [h, h₂]
+-- slower
+theorem real_lin (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
+  vampire [h, h₂]
 
-    -- faster
-    theorem real_lin' (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
-      vampire (strategy := "lrs+10_1:1_alasca=on:sp=occurrence:ss=axioms:st=3.0:to=lakbo:si=on:rtra=on_0") [h, h₂]
+-- faster
+theorem real_lin' (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
+  vampire (strategy := "lrs+10_1:1_alasca=on:sp=occurrence:ss=axioms:st=3.0:to=lakbo:si=on:rtra=on_0") [h, h₂]
 ```
 
 ## If a goal fails
