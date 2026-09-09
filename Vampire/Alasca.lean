@@ -1,5 +1,6 @@
 import Vampire.Arith
 import Vampire.Bridge.Poly
+import Vampire.Rewrite
 
 /-!
 # Vampire's arithmetic rules, replayed as terms
@@ -110,7 +111,7 @@ set_option autoImplicit false
 
 namespace Vampire.Alasca
 
-open Lean Meta Elab Term Vampire.Bridge
+open Lean Meta Elab Term Vampire.Bridge Vampire.Rewrite
 
 /-- Run one tactic on a goal of type `ty` and return the proof, or `none` if it fails.
 
@@ -581,22 +582,6 @@ private partial def orMap (h : Expr) (ps cs : Array Expr) (i : Nat)
       return some (← mkLambdaFVars #[hr] (← mkAppOptM ``Or.inr #[cs[i]!, restC, pr])))
     | return none
   return some (← mkAppM ``Or.elim #[h, left, right])
-
-/-- Peel a clause's `∀` prefix. A clause binds its variables at *sorts*, so a `Prop`
-domain is a `¬` or an implication inside a literal and the prefix has ended -- which is
-why this is a syntactic walk and not `forallTelescope`, whose `whnf` would unfold `Not`
-and take the literal apart. -/
-private partial def clauseBinders (e : Expr) (acc : Array Expr)
-    (k : Array Expr → Expr → TermElabM (Option Expr)) : TermElabM (Option Expr) := do
-  match e with
-  | .forallE n d b _ =>
-    -- `←` inside `&&` is hoisted out of it by the `do` elaborator, so the `Prop` test
-    -- has to be its own statement.
-    if ← isProp d then k acc e
-    else withLocalDeclD n d fun x => do
-      let some r ← clauseBinders (b.instantiate1 x) (acc.push x) k | return none
-      return some r
-  | _ => k acc e
 
 /-- Open a premise's `∀` prefix with metavariables, for the unifier `σ`. -/
 private partial def openPrefix (h ty : Expr) : MetaM (Expr × Expr × Array MVarId) := do

@@ -1,6 +1,7 @@
 import Lean
 import Vampire.Logic
 import Vampire.Alasca
+import Vampire.Rewrite
 import Vampire.Arith
 import Vampire.Avatar
 import Vampire.Bridge
@@ -1417,6 +1418,16 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
       trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
         certificate {tEnd - tTac}ms"
       return ← mkExpectedTypeHint e ty
+  -- A demodulation is a rewrite, and `genericSubs`'s script is not one: `vampire_resolve`
+  -- cannot see `L[l]` and `L[r]` as the same literal and `grind` rediscovers the rewrite
+  -- by search, at 40ms a step. `Vampire/Rewrite.lean` performs it instead.
+  if s.ruleName == "forward demodulation" || s.ruleName == "backward demodulation" then
+    if premises.size == 2 then
+      if let some e ← Rewrite.demodProof ty then
+        let tEnd ← IO.monoMsNow
+        trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
+          rewrite {tEnd - tTac}ms"
+        return ← mkExpectedTypeHint e ty
   let tacs ← script i syms s premises
   let tRun ← IO.monoMsNow
   let e ← proveBy ty tacs m!"step {s.number} ({s.ruleName})" (restrict := true) opaqueLets
