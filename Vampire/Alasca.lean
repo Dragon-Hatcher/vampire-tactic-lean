@@ -2,9 +2,9 @@ import Vampire.Arith
 import Vampire.Bridge.Poly
 
 /-!
-# The ALASCA rules, replayed as terms
+# Vampire's arithmetic rules, replayed as terms
 
-Two of Vampire's arithmetic rules are *functions*, not searches, and this is those
+Four of Vampire's arithmetic rules are *functions*, not searches, and this is those
 functions read backwards.
 
 **`alasca normalization`.** `InequalityNormalizer::tryNormalizeInterpreted`
@@ -36,32 +36,72 @@ divided by the selected atom's coefficient; and replacing `s2σ` by `tσ` inside
 adds a multiple of that polynomial to `L`'s. So the conclusion is again a linear
 combination -- of two literals rather than one -- over the same atoms.
 
-That is why both rules go through `certProof`. Given the literal to prove and a list of
-equations, it computes the rational coefficients `kᵢ` with `Σ kᵢ · premiseᵢ = goal`, the
-congruences that identify atoms step 7 rewrote, and then *builds* the proof: with
+**`alasca fourier motzkin`.** From `p > 0` and `q ≥ 0` it derives `k₁p + k₂q ⋈ 0` with
+`kᵢ > 0`: a nonnegative linear combination, which is the same thing again.
+
+**`evaluation`.** `PolynomialEvaluationRule::simplifyLiteral`
+(`Inferences/PolynomialEvaluation.cpp`) normalises each of a literal's term arguments to
+polynomial normal form and then asks `tryEvalPredicate` to decide the predicate outright.
+So its conclusion is either the premise over ring-equal terms -- one more `kᵢ = 1`
+combination -- or, when the predicate came out false, the empty clause.
+
+That last case is what the rule costs in practice, and it is not a combination at all:
+`1 = 2 → False`, `0 = 2 → False`, `¬ 20 < 0 + (-3 * -18 + (15 * 0 + -18 * 0)) → False`.
+There are no atoms to combine, only a ground numeric fact to decide, so `litProof` decides
+it with `norm_num` -- 1.8ms, where the cascade spent 14 to 21.
+
+So all four go through `certProof`. It solves `Σ kᵢ · premiseᵢ = goal` by Gaussian
+elimination over the monomials -- verified against the target with exact `Poly` arithmetic,
+so a degenerate system costs a `none` and never a wrong certificate -- computes the
+congruences that identify the atoms step 7 rewrote, and then builds the proof.
+
+For an **equality** goal from equality premises the proof is a term. With
 
     F z₁ … zₙ w₁ … wₘ  :=  Σ kᵢ zᵢ + Σ mⱼ wⱼ + (gr - (Σ kᵢ hrᵢ + Σ mⱼ qⱼ))
 
 `gl = F hl⃗ p⃗` and `F hr⃗ q⃗ = gr` are ring identities by construction, and
-`F hl⃗ p⃗ = F hr⃗ q⃗` is `congrArg`/`congr` on the premises and the congruences. Three steps
-composed by `Eq.trans`.
+`F hl⃗ p⃗ = F hr⃗ q⃗` is `congrArg`/`congr` on the premises and the congruences; the three
+compose by `Eq.trans`. Two `ring1` calls per literal and one per congruence.
+
+For an **inequality** that term does not work: `F` is a function, and `congrArg` carries an
+equality through a function, not an order. Carrying `≤` through needs `F` monotone and every
+`kᵢ` nonnegative, which is a stack of order lemmas rather than a congruence -- so the
+certificate goes to `linear_combination` instead, one call with the coefficients already
+solved, checked by `Ring.proveLE`/`proveLT`. That is the same role `ring1` plays in the
+equality branch: a checker handed an answer, not a search.
+
+Three things the inequality branch has to get right that the equality one does not.
+
+* **Polarity.** Step 2 takes the negation off, so a premise and its normalisation routinely
+  disagree: `¬ (t < 0)` becomes `t ≥ 0`. `usable` turns such a premise round with
+  `le_of_not_gt`/`lt_of_not_ge`. A negated *equality* is not turned round -- a disequality
+  bounds nothing -- and stays what it always was, the thing a contradiction contradicts.
+* **Witnessing.** `Σ kᵢ · premiseᵢ = goal` is satisfied by taking every `kᵢ` to be zero
+  whenever the system is degenerate or under-determined, and zero coefficients prove
+  nothing. Fourier-Motzkin is exactly that: from `-12 + y > 0` and `12 - y ≥ 0` the
+  polynomials cancel, the equation holds for any `k₁ = k₂`, and the solution that is also a
+  proof is the one that uses the strict premise. So a strict conclusion is re-solved with a
+  strict premise pinned at 1.
+* **Slack.** An inequality tolerates a constant residual -- `Ring.proveLT` closes `-1 < 0`
+  -- so the constant monomial is left out of the system and of the check. An equality
+  tolerates none. This is also what the `ℤ` strengthening of step 3 leaves behind.
+
+Two short-circuits earn their place ahead of all of it, because the commonest thing a
+normalisation does is nothing: if the conclusion's literal is the premise's, `isDefEq`
+settles it, and if the premise's variables are the conclusion's in order, that assignment
+is tried before `matchOpen` searches for one. Without the first, `LRA_formula_071` step 25
+-- a four-variable clause restated unchanged -- cost 64ms for a proof that is the premise.
 
 The clause structure -- the `∀` prefix, the disjunction, the `¬` on a negative literal --
-is built as `Expr`s. The only tactic is `ring1`, and only on an equation between two
-arithmetic expressions that `Vampire/Bridge/Poly.lean` has already decided are the same
-polynomial: two per literal, one per congruence. No tactic is ever run to find out whether
-a step has some shape.
+is built as `Expr`s throughout. No tactic is run to find out whether a step has some shape;
+the shape is decided first, from `Vampire/Bridge/Poly.lean`'s normal form.
 
 What this does **not** cover, and hands back to `Vampire/Arith.lean`'s cascade by
 returning `none`:
 
-* an inequality. `F` is a *function*, so `congrArg` carries an equality through it;
-  carrying `≤` through needs `F` monotone and `k` positive, which is an order lemma and
-  not a congruence. That rules out `alasca fourier motzkin` and the negative-inequality
-  normalisations along with it.
-* the `ℤ` strengthening of step 3, which changes the relation and is not a scaling;
 * an `ℤ` or `ℕ` goal whose coefficients are not integers -- `normalizeFactors` divides by
-  the gcd, and recovering `t = 0` from `gcd * t = 0` is `mul_eq_zero`, not a ring identity;
+  the gcd, and recovering `t = 0` from `gcd * t = 0` is `mul_eq_zero` and not a ring
+  identity, while `1/3` written as a coefficient there is integer division;
 * a step whose premises and conclusion disagree in the number of literals, which is what a
   superposition between two non-unit clauses does.
 -/
@@ -457,9 +497,38 @@ premise is a disequality whose core the rest prove, which is the equality case, 
 comparisons are jointly unsatisfiable, which is the inequality one. -/
 def litProof (hp : Expr) (tp tc : Expr) (eqs : Array (Expr × Expr)) :
     TermElabM (Option Expr) := do
+  -- The conclusion's literal *is* the premise's. `evaluation` does this whenever a
+  -- literal's arguments were already in normal form and its predicate could not be
+  -- decided, and it is the whole of the rule on a problem where nothing evaluates: on
+  -- `LRA_formula_071` step 25 restates a four-variable clause unchanged, and reaching it
+  -- through the certificate cost 64ms for a proof that is the premise.
+  if ← isDefEq tp tc then return some hp
   let (np, cp) := stripNot tp
   let main ← usable hp tp
   let asArray : Option (Expr × Expr) → Array (Expr × Expr) := fun o => o.toArray
+  -- The premise's literal is ground and false on its own.
+  --
+  -- This is what `evaluation` mostly *is*. `PolynomialEvaluationRule::simplifyLiteral`
+  -- normalises a literal's arguments and then asks `tryEvalPredicate` to decide the
+  -- predicate outright; when it can, the literal becomes `$false` and its unit clause
+  -- becomes the empty one. Over the SMT-LIB arithmetic problems the steps that cost
+  -- anything are all of that shape -- `1 = 2 → False` four times, `0 = 2 → False`,
+  -- `¬ 20 < 0 + (-3 * -18 + (15 * 0 + -18 * 0)) → False` -- and there is nothing to
+  -- combine, because there are no atoms. `norm_num` decides a ground numeric fact, which
+  -- is the same thing the rule did, and it costs 1.8ms where the cascade cost 14 to 21.
+  --
+  -- `hasFVar` is the test rather than "the polynomial has no atoms": a skolem constant is
+  -- an atom that cancels but is not a numeral, and `norm_num` would have nothing to say
+  -- about it.
+  let ground : TermElabM (Option Expr) := do
+    if (relOf cp).isNone || cp.hasFVar || cp.hasExprMVar then return none
+    let tac ← Arith.parseTactic "norm_num"
+    if np then
+      -- `¬ A` in hand and `A` true.
+      return (← byTactic cp tac).map (mkApp hp)
+    else
+      -- `A` in hand and `A` false.
+      return (← byTactic (mkApp (.const ``Not []) cp) tac).map (fun n => mkApp n hp)
   -- `¬ (a = b)` in hand, and `extra` proving `a = b`.
   let byDisequality (extra : Array (Expr × Expr)) : TermElabM (Option Expr) := do
     unless np do return none
@@ -470,6 +539,7 @@ def litProof (hp : Expr) (tp tc : Expr) (eqs : Array (Expr × Expr)) :
       | none => return none
     | _ => return none
   if tc.consumeMData.isConstOf ``False then
+    if let some pr ← ground then return some pr
     if let some pr ← byDisequality eqs then return some pr
     return ← contradiction (asArray main ++ eqs)
   let (nc, cc) := stripNot tc
@@ -479,6 +549,7 @@ def litProof (hp : Expr) (tp tc : Expr) (eqs : Array (Expr × Expr)) :
   withLocalDeclD `hc cc fun hc => do
     let inner := #[(hc, cc)] ++ eqs
     let some pr ← (do
+      if let some pr ← ground then return some pr
       if let some pr ← byDisequality inner then return some pr
       contradiction (asArray main ++ inner))
       | return none
@@ -601,7 +672,7 @@ where
           if t.hasExprMVar then acc else acc ++ clauseAtoms t
       let opens := opened.foldl (init := #[]) fun acc (_, t) =>
         if t.hasExprMVar then acc ++ (clauseAtoms t).filter (·.hasExprMVar) else acc
-      matchOpen opens candidates 0 ms do
+      let attempt : TermElabM (Option Expr) := do
         let mainT ← instantiateMVars mainT
         let mut eqs : Array (Expr × Expr) := #[]
         for (h, t) in eqPrems do
@@ -625,6 +696,19 @@ where
         unless ps.size == cs.size do return none
         let some pr ← orMap mainH ps cs 0 eqs | return none
         return some (← mkLambdaFVars vs pr)
+      -- A normalisation's premise binds the conclusion's own variables, in order. Trying
+      -- that before matching atoms costs one `isDefEq` each and saves `matchOpen` from
+      -- running the builder -- tactics and all -- on assignments the algebra only rejects
+      -- afterwards.
+      if !ms.isEmpty && ms.size == vs.size then
+        let st ← saveState
+        let mut positional := true
+        for (m, v) in ms.zip vs do
+          unless ← isDefEq (mkMVar m) v do positional := false
+        if positional then
+          if let some e ← attempt then return some e
+        st.restore
+      matchOpen opens candidates 0 ms attempt
 
 /--
 The step, as a term: `premise₁ → … → premiseₙ → conclusion` for `alasca normalization` or

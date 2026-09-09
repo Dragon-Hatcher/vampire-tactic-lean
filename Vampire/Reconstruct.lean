@@ -1387,7 +1387,11 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
   -- functions, and `Vampire/Alasca.lean` computes their inverse as a certificate rather
   -- than looking for a proof of it. All three are the same certificate: Fourier-Motzkin
   -- is a *nonnegative* linear combination of two inequalities, which is what solving
-  -- `Σ kᵢ · premiseᵢ = conclusion` already produces. Where that succeeds there is no script and no `proveBy`: the term is
+  -- `Σ kᵢ · premiseᵢ = conclusion` already produces. `evaluation` joins them for the same
+  -- reason: `PolynomialEvaluationRule` normalises a literal's arguments and then decides
+  -- the predicate if it can, so its conclusion is either the premise over ring-equal terms
+  -- or the empty clause -- and the empty-clause case, which is the whole of its cost here,
+  -- is a ground numeric fact rather than a combination at all. Where that succeeds there is no script and no `proveBy`: the term is
   -- built, and the cascade below is only what a declined step falls back to.
   --
   -- Dispatched on the *rule*, not the handler, and that is not a detail. `handlerFor` in
@@ -1399,7 +1403,7 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
   -- +31ms a goal for work that could not have succeeded. Two rules are claimed and two
   -- are taken.
   if s.ruleName == "alasca normalization" || s.ruleName == "alasca superposition"
-      || s.ruleName == "alasca fourier motzkin" then
+      || s.ruleName == "alasca fourier motzkin" || s.ruleName == "evaluation" then
     if let some e ← Alasca.stepProof ty premises.size then
       let tEnd ← IO.monoMsNow
       trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
