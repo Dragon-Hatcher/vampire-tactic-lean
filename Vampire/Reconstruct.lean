@@ -1,5 +1,6 @@
 import Lean
 import Vampire.Logic
+import Vampire.Alasca
 import Vampire.Arith
 import Vampire.Avatar
 import Vampire.Bridge
@@ -1069,7 +1070,11 @@ def script (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step) :
     -- A formula rewrite. Its premise is introduced and its conclusion is reached by
     -- normalising both the same way; `Arith.normTactics` is ordered for that, which is
     -- the difference between a step costing a millisecond and costing 8.5 seconds.
-    let ids := (Array.range premises.size).map (fun k => mkIdent (Name.mkSimple s!"h{k}"))
+    --
+    -- What is left for the cascade is the shapes `Vampire/Alasca.lean` declines --
+    -- inequalities, and the `ℤ` gcd division -- because `stepLemma` gives every step of
+    -- this rule to that first and only reaches here when it hands the step back.
+    let ids := (Array.range premises.size).map hyp
     return (← intros ids) ++ (← Arith.normScript)
   | .theoryAxiom =>
     -- An axiom Vampire introduced for its own arithmetic: no premises, and a statement
@@ -1376,7 +1381,27 @@ def stepLemma (i : Interp) (syms : Symbols) (s : Step) (premises : Array Step)
       throwError "vampire: could not state step {s.number} ({s.ruleName}, handler \
         {repr s.handler})\
         {indentD (← e.toMessageData.toString)}"
+  trace[vampire.replay] "step {s.number} {s.ruleName} goal: {ty}"
   let tTac ← IO.monoMsNow
+  -- `alasca normalization` and `alasca superposition` are functions, and
+  -- `Vampire/Alasca.lean` computes their inverse as a certificate rather than looking for
+  -- a proof of it. Where that succeeds there is no script and no `proveBy`: the term is
+  -- built, and the cascade below is only what a declined step falls back to.
+  --
+  -- Dispatched on the *rule*, not the handler, and that is not a detail. `handlerFor` in
+  -- `ffi/vampire_proof.cpp` sends six rules to `arithNorm` -- `theory normalization`
+  -- among them -- and seventeen to `arithInfer`, including `constrained superposition`
+  -- and every ALASCA rule this knows nothing about. Keyed on the handler, an NRA proof
+  -- containing no ALASCA step at all still ran every one of its steps through the
+  -- certificate and declined: measured over the 100 SMT-LIB arithmetic problems, up to
+  -- +31ms a goal for work that could not have succeeded. Two rules are claimed and two
+  -- are taken.
+  if s.ruleName == "alasca normalization" || s.ruleName == "alasca superposition" then
+    if let some e ← Alasca.stepProof ty premises.size then
+      let tEnd ← IO.monoMsNow
+      trace[vampire.timing] "step {s.number} {s.ruleName}: type {tTac - tTy}ms, \
+        certificate {tEnd - tTac}ms"
+      return ← mkExpectedTypeHint e ty
   let tacs ← script i syms s premises
   let tRun ← IO.monoMsNow
   let e ← proveBy ty tacs m!"step {s.number} ({s.ruleName})" (restrict := true) opaqueLets
