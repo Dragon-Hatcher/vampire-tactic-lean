@@ -6,6 +6,7 @@ import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
 import Vampire.Reconstruct.Rules.Input
 import Vampire.Reconstruct.Rules.Resolution
+import Vampire.Reconstruct.Rules.Rewrite
 import Vampire.Reconstruct.Rules.Skolem
 import Vampire.Reconstruct.Rules.Subsumption
 
@@ -32,6 +33,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .input => Input.input step
   | .resolution => Resolution.resolution step
   | .forwardSubsumptionResolution => Subsumption.subsumptionResolution step
+  | .forwardDemodulation => Rewrite.demodulation step
   | .backwardSubsumptionResolution => Subsumption.subsumptionResolution step
   | .removeDuplicateLiterals => Clause.literals step
   | .trivialInequalityRemoval => Clause.literals step
@@ -60,7 +62,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .reorderLiterals => unimplemented step
   | .equalityResolutionWithDeletion => unimplemented step
   | .subsumptionEqualityResolution => unimplemented step
-  | .forwardDemodulation => unimplemented step
   | .backwardDemodulation => unimplemented step
   | .alascaFwdDemodulation => unimplemented step
   | .alascaBwdDemodulation => unimplemented step
