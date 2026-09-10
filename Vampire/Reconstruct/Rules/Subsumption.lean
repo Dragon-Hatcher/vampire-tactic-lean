@@ -35,8 +35,8 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
   -- Which premise is which is read off the record rather than assumed: it is
   -- the main premise that loses a literal, so it is the one with a literal
   -- recorded against it.
-  let mainUse ← step.useOf mainParent.number
-  let sideUse ← step.useOf sideParent.number
+  let mainUse ← step.useAt 0
+  let sideUse ← step.useAt 1
   let some resolved := mainUse.literal
     | throwError "subsumption resolution did not record the literal it removed"
   unless sideUse.literal.isNone do

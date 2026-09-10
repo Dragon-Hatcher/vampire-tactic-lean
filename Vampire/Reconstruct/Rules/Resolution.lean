@@ -21,8 +21,8 @@ def resolution (step : Step) : ReconstructM Expr := do
     | throwError "resolution should have two premises, got {step.premises.size}"
   let #[parent₁, parent₂] := step.unit.parents
     | throwError "resolution should have two premises"
-  let use₁ ← step.useOf parent₁.number
-  let use₂ ← step.useOf parent₂.number
+  let use₁ ← step.useAt 0
+  let use₂ ← step.useAt 1
   let some resolved₁ := use₁.literal
     | throwError "resolution did not record the literal it resolved on in step \
       {parent₁.number}"

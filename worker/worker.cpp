@@ -42,7 +42,7 @@
  *   varSorts  {variable, sort} pairs, giving the sorts a unit's free
  *             variables take -- a clause is implicitly universally quantified
  *             over them, so rebuilding it needs their sorts
- *   uses      {premise, literal, term, firstBinding, numBindings}: how a
+ *   uses      {premise, literal, term, flags, firstBinding, numBindings}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
  *             inference acted on or `NONE`, and `term` the index of the term it
@@ -51,6 +51,9 @@
  *             inference discards the unifier it computes, so without this a
  *             reconstruction would have to recover it by matching the
  *             conclusion against the premises.
+ *             flags: 1 = the term was rewritten throughout the premise rather
+ *             than only in that literal, which is what simultaneous
+ *             superposition does
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
  *   skolems   {variable, term} pairs: the existential variable a skolemisation
@@ -99,7 +102,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 6;
+const uint32_t VERSION = 7;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
@@ -375,7 +378,7 @@ struct Encoder {
       InferenceStore::instance()->recoverSubsumptionResolutionUses(u);
     }
 
-    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 5);
+    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 6);
     uint32_t numUses = 0;
     if (const Stack<InferenceStore::PremiseUse>* recorded =
           InferenceStore::instance()->premiseUses(u)) {
@@ -389,6 +392,7 @@ struct Encoder {
         uses.push_back(use.literal == InferenceStore::literalNone ? NONE
                                                                   : use.literal);
         uses.push_back(use.term.isEmpty() ? NONE : encodeTerm(use.term));
+        uses.push_back(use.flags);
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
         uses.push_back(static_cast<uint32_t>(use.bindings.size()));
         numUses++;
@@ -445,7 +449,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.skolems.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 5));
+  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 6));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
   putWord(buf, static_cast<uint32_t>(enc.proofText.size()));

@@ -103,7 +103,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 6
+private def version : UInt32 := 7
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -153,7 +153,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
   let uses := skolems + numSkolems * 2 * 4
-  let bindings := uses + numUses * 5 * 4
+  let bindings := uses + numUses * 6 * 4
   let strings := bindings + numBindings * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
@@ -243,6 +243,12 @@ structure PremiseUse where
   doing the rewriting in the premise that one comes from.
   -/
   term : Option Term
+  /--
+  Whether the inference rewrote that term throughout the premise rather than
+  only in the literal recorded against it, which is what simultaneous
+  superposition does.
+  -/
+  rewritesWholePremise : Bool
   bindings : Array (UInt32 × Term)
 
 /-- A step in the derivation: a clause or formula, and how it was inferred. -/
@@ -545,14 +551,16 @@ def premiseUses (u : Unit) : Array PremiseUse :=
   let first := u.field 13
   let count := u.field 14
   Array.ofFn (n := count.toNat) fun i =>
-    let base := p.layout.uses + (first.toNat + i.val) * 5 * 4
+    let base := p.layout.uses + (first.toNat + i.val) * 6 * 4
     let literal := readU32 p.data (base + 4)
     let term := readU32 p.data (base + 8)
-    let firstBinding := readU32 p.data (base + 12)
-    let numBindings := readU32 p.data (base + 16)
+    let flags := readU32 p.data (base + 12)
+    let firstBinding := readU32 p.data (base + 16)
+    let numBindings := readU32 p.data (base + 20)
     { premise := readU32 p.data base
       literal := if literal == none32 then none else some literal
       term := if term == none32 then none else some ⟨p, term⟩
+      rewritesWholePremise := flags &&& 1 != 0
       bindings := Array.ofFn (n := numBindings.toNat) fun j =>
         let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
         (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩) }

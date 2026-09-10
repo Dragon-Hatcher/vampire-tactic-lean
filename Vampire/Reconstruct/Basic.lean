@@ -678,6 +678,20 @@ def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   return (mkAppN proof args, ← instantiateForall stated args)
 
 /--
+What each of a premise's variables stands for under the substitution recorded
+against it.
+
+A term of the premise -- the subterm an inference rewrote, say -- is recorded
+as the premise states it, so reading it back needs the premise's own variables
+rather than the conclusion's.
+-/
+def substitutedVars (use : PremiseUse) (vars : Vars) : ReconstructM Vars := do
+  let mut out : Vars := {}
+  for (v, image) in use.bindings do
+    out := out.insert v (← term vars image)
+  return out
+
+/--
 Something of the right sort for each of a premise's variables the conclusion
 did not keep.
 
@@ -735,10 +749,21 @@ structure Step where
 /-- The step's conclusion, as a Lean proposition. -/
 def Step.conclusion (step : Step) : ReconstructM Expr := conclusionOf step.unit
 
-/-- How a step used the premise numbered `number`. -/
-def Step.useOf (step : Step) (number : UInt32) : ReconstructM PremiseUse := do
-  let some use := step.unit.premiseUses.find? (·.premise == number)
-    | throwError "step {step.unit.number} did not record how it used step {number}"
+/--
+How a step used the premise in position `i` among its parents.
+
+A premise can be used twice -- an inference can take a clause as both of its
+premises -- so a use is found by position rather than by which premise it is,
+counting the uses of that premise in the order they were recorded.
+-/
+def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
+  let some parent := step.unit.parents[i]?
+    | throwError "step {step.unit.number} has no premise in position {i}"
+  let earlier := (step.unit.parents.extract 0 i).countP (·.number == parent.number)
+  let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+  let some use := uses[earlier]?
+    | throwError "step {step.unit.number} did not record how it used step \
+      {parent.number}"
   return use
 
 /--
