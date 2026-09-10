@@ -1,14 +1,11 @@
 import Lean
+import Vampire.Worker
 
 namespace Vampire
 
 open Lean Elab Tactic Meta
 
-structure Config where
-  timeout : Nat := 30
-  deriving Inhabited, Repr
-
-def run (goal : MVarId) (_cfg : Config) : MetaM Unit := do
+def run (goal : MVarId) (_cfg : Config) : MetaM _root_.Unit := do
   goal.admit (synthetic := false)
 
 namespace Frontend

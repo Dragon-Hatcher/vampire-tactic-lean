@@ -1,2 +1,3 @@
-import Vampire.Basic
+import Vampire.Wire
+import Vampire.Worker
 import Vampire.Frontend

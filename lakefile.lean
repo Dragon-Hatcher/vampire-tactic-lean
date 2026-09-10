@@ -49,43 +49,33 @@ def cmakeParallelLevel : BaseIO String := do
   | none => return toString (min cores 4)
 
 /--
-Builds `ffi/ffi.cpp` together with vampire's own object files into a shared
-library. `cmake` handles incrementality, so this runs on every build and reports
-a trace over the resulting library.
-
-This is deliberately not an `extern_lib`: Lake would derive the shared library
-from a static one using `leanc`, whose link flags force `-lc++ -lc++abi` and so
-re-export LLVM's unwinder. See the comment in `ffi/CMakeLists.txt`.
+Builds the `vampire-worker` executable. `cmake` handles incrementality, so this
+runs on every build and reports a trace over the resulting binary.
 -/
-target libvampire pkg : Dynlib := Job.async do
+target «vampire-worker» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg.dir
   let cmakeDir := pkg.buildDir / "cmake"
-  let lib := cmakeDir / nameToSharedLib "vampire"
-  let env := #[("VAMPIRE_SOURCE_DIR", some vampireDir.toString)]
+  let exe := cmakeDir / "vampire-worker"
   proc (quiet := true) {
     cmd := "cmake"
     args := #[
-      "-S", (pkg.dir / "ffi").toString,
+      "-S", (pkg.dir / "worker").toString,
       "-B", cmakeDir.toString,
       s!"-DVAMPIRE_SOURCE_DIR={vampireDir}",
-      s!"-DLEAN_INCLUDE_DIR={← getLeanIncludeDir}",
       s!"-DCMAKE_BUILD_TYPE={vampireBuildType}"
     ]
-    env
   }
   proc {
     cmd := "cmake"
-    args := #["--build", cmakeDir.toString, "--target", "vampire_shared",
+    args := #["--build", cmakeDir.toString, "--target", "vampire-worker",
               "--parallel", ← cmakeParallelLevel]
-    env
   }
-  addTrace <| .ofHash (← computeFileHash lib)
-  return {path := lib, name := "vampire"}
+  addTrace <| .ofHash (← computeFileHash exe)
+  return exe
 
 @[default_target]
 lean_lib Vampire where
-  precompileModules := true
-  moreLinkLibs := #[libvampire]
+  needs := #[«vampire-worker»]
 
 @[test_driver]
 lean_lib test where
