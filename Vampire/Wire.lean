@@ -33,6 +33,9 @@ private structure Layout where
   satPremises : Nat
   namings : Nat
   namingArgs : Nat
+  genStates : Nat
+  genLits : Nat
+  choices : Nat
   uses : Nat
   bindings : Nat
   strings : Nat
@@ -118,11 +121,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 12
+private def version : UInt32 := 14
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 31 * 4 then
+  if data.size < 34 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -130,7 +133,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 29
+  let numRules := word 32
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -155,11 +158,14 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numSatPremises := word 22
   let numNamings := word 23
   let numNamingArgs := word 24
-  let numUses := word 25
-  let numBindings := word 26
-  let stringsLen := word 27
-  let proofTextLen := word 28
-  let functions := 31 * 4
+  let numGenStates := word 25
+  let numGenLits := word 26
+  let numChoices := word 27
+  let numUses := word 28
+  let numBindings := word 29
+  let stringsLen := word 30
+  let proofTextLen := word 31
+  let functions := 34 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -169,7 +175,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 20 * 4
+  let unitLits := units + numUnits * 23 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -179,7 +185,10 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let satPremises := satLits + numSatLits * 4
   let namings := satPremises + numSatPremises * 4
   let namingArgs := namings + numNamings * 4 * 4
-  let uses := namingArgs + numNamingArgs * 4
+  let genStates := namingArgs + numNamingArgs * 4
+  let genLits := genStates + numGenStates * 8 * 4
+  let choices := genLits + numGenLits * 2 * 4
+  let uses := choices + numChoices * 2 * 4
   let bindings := uses + numUses * 6 * 4
   let strings := bindings + numBindings * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
@@ -193,12 +202,12 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     (readU32 data 8) "termination reason"
   return {
     data, terminationReason := reason
-    polarityFlipBoundary := readU32 data (30 * 4)
+    polarityFlipBoundary := readU32 data (33 * 4)
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
-      satPremises, namings, namingArgs, uses, bindings, strings, proofText,
-      numFunctions,
+      satPremises, namings, namingArgs, genStates, genLits, choices, uses,
+      bindings, strings, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -286,6 +295,22 @@ structure PremiseUse where
   bindings : Array (UInt32 × Term)
 
 /--
+One state of one of clausification's generalised clauses: a disjunction of
+signed subformulas, together with what the variables it quantifies have been
+bound to.
+
+Clausification starts from the formula itself and replaces one signed
+subformula at a time until nothing but literals is left; each replacement is a
+step that holds on its own, and the clauses that come out are the states with
+nothing left to replace. Which conjunct a clause came from, which way round an
+equivalence was taken and what a quantifier was skolemised at are all here.
+-/
+structure GenClause where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/--
 A clause of the propositional problem splitting hands to a SAT solver, and how
 the solver came by it.
 -/
@@ -293,6 +318,10 @@ structure SatClause where
   private mk ::
   private proof : Proof
   private idx : UInt32
+
+/-- Two formulas are the same when they are the same one: they are shared. -/
+instance : BEq Formula where
+  beq a b := a.idx == b.idx
 
 /-- A step in the derivation: a clause or formula, and how it was inferred. -/
 structure Unit where
@@ -430,8 +459,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 20 c.idx.toNat 4
-  let count := p.field p.layout.units 20 c.idx.toNat 5
+  let first := p.field p.layout.units 23 c.idx.toNat 4
+  let count := p.field p.layout.units 23 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -524,7 +553,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 20 u.idx.toNat off
+  u.proof.field u.proof.layout.units 23 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -626,6 +655,26 @@ def namings (u : Unit) : Array (String × Array UInt32 × Formula) :=
      ⟨p, readU32 p.data (base + 12)⟩)
 
 /--
+Which argument of each conjunction the clausification of this clause went into.
+
+The other clausifier walks a formula in negation normal form, taking every
+disjunct into the clause it is building and each conjunct into a clause of its
+own, so a clause is one path through the conjunctions and this is that path.
+-/
+def conjunctChoices (u : Unit) : Array (Formula × UInt32) :=
+  let p := u.proof
+  let first := u.field 21
+  let count := u.field 22
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.choices + (first.toNat + i.val) * 2 * 4
+    (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4))
+
+/-- The generalised clause this clause came out of, if clausification made it. -/
+def genClause? (u : Unit) : Option GenClause :=
+  let idx := u.field 20
+  if idx == none32 then none else some ⟨u.proof, idx⟩
+
+/--
 The propositional clause a step derived by SAT solving stands on, and `none`
 for anything else.
 -/
@@ -668,6 +717,46 @@ instance : ToString Unit where
     | none => (u.formula?.map toString).getD "<missing formula>"
 
 end Unit
+
+namespace GenClause
+
+@[inline] private def field (c : GenClause) (off : Nat) : UInt32 :=
+  c.proof.field c.proof.layout.genStates 8 c.idx.toNat off
+
+private def lits (p : Proof) (first count : UInt32) :
+    Array (Formula × Bool) :=
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.genLits + (first.toNat + i.val) * 2 * 4
+    (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4) != 0)
+
+/-- The state this one was reached from, `none` for one clausification began at. -/
+def parent? (c : GenClause) : Option GenClause :=
+  let idx := c.field 0
+  if idx == none32 then none else some ⟨c.proof, idx⟩
+
+/-- The position replaced in the state this one was reached from. -/
+def position? (c : GenClause) : Option UInt32 :=
+  let position := c.field 1
+  if position == none32 then none else some position
+
+/-- The signed subformulas of the clause as it stands. -/
+def literals (c : GenClause) : Array (Formula × Bool) :=
+  lits c.proof (c.field 2) (c.field 3)
+
+/-- What was put in the replaced position. -/
+def replacement (c : GenClause) : Array (Formula × Bool) :=
+  lits c.proof (c.field 4) (c.field 5)
+
+/-- What each variable the clause quantifies has been bound to. -/
+def bindings (c : GenClause) : Array (UInt32 × Term) :=
+  let p := c.proof
+  let first := c.field 6
+  let count := c.field 7
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.bindings + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+end GenClause
 
 namespace SatClause
 

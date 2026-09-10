@@ -233,16 +233,22 @@ def splitClause (step : Step) : ReconstructM Expr := do
   let target ← step.conclusion
   -- Which definition says what each component name means, and how it was
   -- renamed to name this clause's literals.
-  let mut definitions : Std.HashMap String (Vampire.Unit × PremiseUse) := {}
+  -- Two components of one clause can be variants of each other, and then they
+  -- are the same component and share its name: the clause names it twice, and
+  -- each occurrence has its own renaming recorded.
+  let mut definitions : Std.HashMap String (Vampire.Unit × Array PremiseUse) := {}
   for parent in step.unit.parents.extract 1 do
     let some definition := parent.formula?
       | continue
     let some name := (← definition.subformulas.findSomeM? fun g => do
         return if (← connectiveOf g) matches .name then g.name? else none)
       | continue
-    let some use := step.unit.premiseUses.find? (·.premise == parent.number)
-      | continue
-    definitions := definitions.insert name (parent, use)
+    let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+    if uses.isEmpty then
+      -- The definitions of the names the clause holds under are premises too,
+      -- and it is the components that have a renaming recorded against them.
+      continue
+    definitions := definitions.insert name (parent, uses)
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
     let refuted (i : Nat) (of : Expr) : ReconstructM Expr :=
       withLocalDeclD `d of fun d => do
@@ -265,13 +271,20 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- Each component's name failing gives a way of making that component
     -- fail, and with it the negation of each of its literals.
     let mut arguments : Std.HashMap UInt32 Expr := {}
+    -- How many times each name has been met, so that a component named twice
+    -- takes its two renamings in turn.
+    let mut met : Std.HashMap String Nat := {}
     let mut negations : Array (Expr × Expr) := #[]
     for (name, i) in disjuncts.zipIdx do
       if (parent.splits.contains (flippedName name)) then
         continue
       let key := if name.startsWith "~" then (name.drop 1).toString else name
-      let some (definition, use) := definitions[key]?
+      let some (definition, uses) := definitions[key]?
         | throwError "nothing says what `{name}` means"
+      let seen := met.getD key 0
+      met := met.insert key (seen + 1)
+      let some use := uses[seen]?
+        | throwError "`{name}` names more components of this clause than it has renamings recorded"
       let mut against ← refuted i (← namedFormula name)
       let some body := definition.formula?
         | throwError "the definition of `{name}` states no formula"
@@ -328,19 +341,19 @@ def splitClause (step : Step) : ReconstructM Expr := do
     let instance_ := mkAppN proof arguments'
     let instantiated ← instantiateForall stated arguments'
     let contradiction ← elimParts instantiated 0 (fun _ hl => do
-      let literal ← instantiateMVars (← inferType hl)
-      -- A named subformula stands for what it names, so a literal over one
-      -- rebuilds to that formula rather than to something atomic; comparing
-      -- them is a matter of definitional equality.
-      let mut found := none
-      for (part, negation) in negations do
-        if ← isDefEq part literal then
-          found := some negation
-          break
-      let some negation := found
-        | throwError "nothing refutes{indentExpr literal}"
-      mkAppOptM ``absurd
-        #[some literal, some (mkConst ``False), some hl, some negation]) instance_
+      -- A named component and the clause's own literal over it can meet with a
+      -- double negation between them: which of a name and its negation carries
+      -- one is up to which of the two splitting introduced, and polarity
+      -- flipping can add another.
+      for candidate in #[hl] ++ (← doubleNegations hl) do
+        let literal ← instantiateMVars (← inferType candidate)
+        for (part, negation) in negations do
+          if ← isDefEq part literal then
+            return ← mkAppOptM ``absurd
+              #[some literal, some (mkConst ``False), some candidate,
+                some negation]
+      throwError "nothing refutes{indentExpr (← instantiateMVars (← inferType hl))}\
+        \nof the clause {parent}, whose components are {disjuncts}") instance_
     mkAppM ``Iff.mp
       #[← mkAppOptM ``Classical.not_not #[some target],
         ← mkLambdaFVars #[h] contradiction]

@@ -360,15 +360,30 @@ A witness is chosen from this, so it has to come from the premise: a conclusion
 states the block in terms of the skolem that choosing the witness is what
 introduces.
 -/
-partial def existsProp (sorts : Array (UInt32 × String))
+partial def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
     (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
     ReconstructM Expr := do
   match bound with
-  | [] => formula sorts vars body
+  | [] =>
+    let inner ← formula sorts vars body
+    return if positive then inner else mkApp (mkConst ``Not) inner
   | (v, sortName) :: rest =>
     withLocalDeclD (Name.mkSimple s!"X{v}") (← sortType sortName) fun x => do
-      let inner ← existsProp sorts rest (vars.insert v x) body
-      mkAppM ``Exists #[← mkLambdaFVars #[x] inner]
+      let inner ← blockProp positive sorts rest (vars.insert v x) body
+      if positive then
+        mkAppM ``Exists #[← mkLambdaFVars #[x] inner]
+      else
+        -- A universal block is skolemised through its failing, so the negation
+        -- stays outermost and the quantifier goes inside it.
+        let some quantified := inner.not?
+          | throwError "a universal block did not come back negated"
+        return mkApp (mkConst ``Not) (← mkForallFVars #[x] quantified)
+
+/-- `⟦∃ vs, body⟧`: what a premise says a block of existentials means. -/
+partial def existsProp (sorts : Array (UInt32 × String))
+    (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
+    ReconstructM Expr :=
+  blockProp true sorts bound vars body
 
 
 /--
@@ -498,6 +513,56 @@ partial def elimParts (chain : Expr) (offset : Nat)
       mkAppM ``Or.elim #[h,
         ← mkLambdaFVars #[a] (← elimParts left offset handler a),
         ← mkLambdaFVars #[b] (← elimParts right (offset + n) handler b)]
+
+/-!
+The helpers above take a junction apart by its shape, which is right for a
+formula, whose shape is what it says. A generalised clause is different: its
+parts are subformulas, and a part can be a junction in its own right, so its
+parts have to be given rather than found.
+-/
+
+/-- A proof of `junction fn unit parts` from a proof of its `i`th part. -/
+partial def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
+    ReconstructM Expr := do
+  if parts.size <= 1 then return h
+  let rest := parts.extract 1 parts.size
+  if i == 0 then
+    mkAppOptM ``Or.inl #[none, some (junction ``Or ``False rest), some h]
+  else
+    mkAppOptM ``Or.inr
+      #[some parts[0]!, none, some (← injectGiven rest (i - 1) h)]
+
+/-- Eliminates a disjunction of the given parts, sending the `i`th to `handler i`. -/
+partial def elimGiven (parts : Array Expr)
+    (handler : Nat → Expr → ReconstructM Expr) (h : Expr) (offset : Nat := 0) :
+    ReconstructM Expr := do
+  if parts.size <= 1 then return ← handler offset h
+  let rest := parts.extract 1 parts.size
+  let tail := junction ``Or ``False rest
+  withLocalDeclD `a parts[0]! fun a =>
+    withLocalDeclD `b tail fun b => do
+      mkAppM ``Or.elim #[h,
+        ← mkLambdaFVars #[a] (← handler offset a),
+        ← mkLambdaFVars #[b] (← elimGiven rest handler b (offset + 1))]
+
+/-- The `i`th part of a conjunction of the given parts, from a proof of the whole. -/
+partial def projectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
+    ReconstructM Expr := do
+  if parts.size <= 1 then return h
+  if i == 0 then
+    mkAppM ``And.left #[h]
+  else
+    projectGiven (parts.extract 1 parts.size) (i - 1) (← mkAppM ``And.right #[h])
+
+/-- A conjunction of the given parts, from a proof of each. -/
+partial def introGiven (parts : Array Expr)
+    (component : Nat → ReconstructM Expr) (offset : Nat := 0) :
+    ReconstructM Expr := do
+  if parts.size == 0 then return mkConst ``True.intro
+  if parts.size == 1 then return ← component offset
+  mkAppM ``And.intro
+    #[← component offset,
+      ← introGiven (parts.extract 1 parts.size) component (offset + 1)]
 
 /-- Builds a conjunction from a proof of each of its parts. -/
 partial def introParts (chain : Expr) (offset : Nat)

@@ -112,7 +112,11 @@ private partial def bindIntroduced : ReconstructM PUnit := do
           mkLambdaFVars locals (← formula sorts vars named)
         modify fun s =>
           { s with introduced := s.introduced.insert name definition }
-    unless u.skolems.isEmpty do
+    -- Clausification records the steps it took, which say where each of its
+    -- skolemisations happened; anything else is looked for in the formula.
+    if u.genClause?.isSome then
+      Clausify.registerSkolemsOf u
+    else unless u.skolems.isEmpty do
       let some (owner, f) := skolemSource u
         | throwError "step {u.number} records skolems but states no formula"
       registerSkolems (owner.varSorts ++ u.varSorts)
@@ -120,6 +124,7 @@ private partial def bindIntroduced : ReconstructM PUnit := do
   let mut pending := proof.units.filter fun u =>
     (u.rule?.map Definition.introducesName).getD false || !u.skolems.isEmpty
       || !u.namings.isEmpty
+      || (u.genClause?.isSome && u.parents.any fun p => !p.skolems.isEmpty)
   repeat
     let mut progressed := false
     let mut again := #[]

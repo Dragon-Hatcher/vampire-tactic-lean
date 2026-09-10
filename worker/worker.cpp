@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    31 words, see `write`
+ *   header    34 words, see `write`
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
  *             flags: 1 = polarity flipping flipped this predicate, so that
@@ -34,7 +34,10 @@
  *   units     {number, rule, inputType, flags, payload, numLits,
  *              firstParent, numParents, firstVarSort, numVarSorts,
  *              firstSkolem, numSkolems, name, firstUse, numUses,
- *              firstSplit, numSplits, satPremise, firstNaming, numNamings}
+ *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
+ *              genState, firstChoice, numChoices}
+ *             `genState` is the generalised clause a clause came out of, and
+ *             the choices are the conjuncts its clausification went into
  *             `satPremise` is the propositional clause a step derived by SAT
  *             solving stands on, and `NONE` for anything else
  *             `name` is the string offset of the name the input gave this
@@ -62,6 +65,24 @@
  *             superposition does
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
+ *   choices   {formula, argument} pairs: which argument of each conjunction
+ *             the clausification of a clause went into. The other clausifier
+ *             walks a formula in negation normal form, taking every disjunct
+ *             into the clause it is building and each conjunct into a clause of
+ *             its own, so a clause is one path through the conjunctions and
+ *             this is that path
+ *   genStates {parent, position, firstLit, numLits, firstReplacement,
+ *              numReplacements, firstBinding, numBindings}: one state of one of
+ *             clausification's generalised clauses -- a disjunction of signed
+ *             subformulas, together with what the variables it quantifies have
+ *             been bound to. `parent` is the state this one was reached from
+ *             and `position` the position replaced in it, both `NONE` for a
+ *             clause clausification started from. Which conjunct a clause came
+ *             from, which way round an equivalence was taken and what a
+ *             quantifier was skolemised at are all here, and would otherwise
+ *             have to be searched for
+ *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
+ *             clause and of what replaced a position in one
  *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
  *             clausification introduced to name a subformula, the variables it
  *             was applied to, and the formula it names. The clauses saying
@@ -133,19 +154,21 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 12;
+const uint32_t VERSION = 14;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
-      bindings, splits, satClauses, satLits, satPremises, namings, namingArgs;
+      bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
+      genStates, genLits, choices;
   std::string strings;
   std::string proofText;
 
   std::unordered_map<uint64_t, uint32_t> termSeen, sortSeen;
   std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen,
       satSeen;
+  std::unordered_map<uint32_t, uint32_t> genSeen;
 
   uint32_t addString(const std::string& s)
   {
@@ -320,6 +343,54 @@ struct Encoder {
     return idx;
   }
 
+  /** One state of a generalised clause, and the state it was reached from. */
+  uint32_t encodeGenClauseState(unsigned id)
+  {
+    if (id == InferenceStore::stateNone)
+      return NONE;
+    auto seen = genSeen.find(id);
+    if (seen != genSeen.end())
+      return seen->second;
+    const InferenceStore::GenClauseState* state =
+      InferenceStore::instance()->genClauseState(id);
+    if (!state)
+      return NONE;
+
+    uint32_t idx = static_cast<uint32_t>(genStates.size() / 8);
+    genStates.resize(genStates.size() + 8, 0);
+    genSeen.emplace(id, idx);
+
+    uint32_t parent = encodeGenClauseState(state->parent);
+
+    auto encodeLits = [&](const Stack<std::pair<Formula*, bool>>& lits) {
+      uint32_t first = static_cast<uint32_t>(genLits.size() / 2);
+      for (const auto& [f, sign] : lits) {
+        genLits.push_back(encodeFormula(f));
+        genLits.push_back(sign ? 1 : 0);
+      }
+      return first;
+    };
+    uint32_t firstLit = encodeLits(state->literals);
+    uint32_t firstReplacement = encodeLits(state->replacement);
+    uint32_t firstBinding = static_cast<uint32_t>(bindings.size() / 2);
+    for (const auto& [var, term] : state->bindings) {
+      bindings.push_back(var);
+      bindings.push_back(encodeTerm(term));
+    }
+
+    genStates[8 * idx + 0] = parent;
+    genStates[8 * idx + 1] =
+      state->position == InferenceStore::positionNone ? NONE : state->position;
+    genStates[8 * idx + 2] = state->literals.isEmpty() ? NONE : firstLit;
+    genStates[8 * idx + 3] = static_cast<uint32_t>(state->literals.size());
+    genStates[8 * idx + 4] =
+      state->replacement.isEmpty() ? NONE : firstReplacement;
+    genStates[8 * idx + 5] = static_cast<uint32_t>(state->replacement.size());
+    genStates[8 * idx + 6] = state->bindings.isEmpty() ? NONE : firstBinding;
+    genStates[8 * idx + 7] = static_cast<uint32_t>(state->bindings.size());
+    return idx;
+  }
+
   /** A clause of the propositional problem, and how the solver derived it. */
   uint32_t encodeSatClause(SATClause* cl)
   {
@@ -367,8 +438,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 20);
-    units.resize(units.size() + 20, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 23);
+    units.resize(units.size() + 23, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -442,19 +513,19 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[20 * idx + 0] = u->number();
-    units[20 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[20 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[20 * idx + 3] = flags;
-    units[20 * idx + 4] = payload;
-    units[20 * idx + 5] = numLits;
-    units[20 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[20 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[20 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[20 * idx + 9] = numVarSorts;
-    units[20 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[20 * idx + 11] = numSkolems;
-    units[20 * idx + 12] = nameOff;
+    units[23 * idx + 0] = u->number();
+    units[23 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[23 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[23 * idx + 3] = flags;
+    units[23 * idx + 4] = payload;
+    units[23 * idx + 5] = numLits;
+    units[23 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[23 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[23 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[23 * idx + 9] = numVarSorts;
+    units[23 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[23 * idx + 11] = numSkolems;
+    units[23 * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -483,11 +554,11 @@ struct Encoder {
         numUses++;
       }
     }
-    units[20 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[20 * idx + 14] = numUses;
-    units[20 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[20 * idx + 16] = numSplits;
-    units[20 * idx + 17] =
+    units[23 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[23 * idx + 14] = numUses;
+    units[23 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[23 * idx + 16] = numSplits;
+    units[23 * idx + 17] =
       inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
 
     uint32_t firstNaming = static_cast<uint32_t>(namings.size() / 4);
@@ -505,8 +576,23 @@ struct Encoder {
         numNamings++;
       }
     }
-    units[20 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
-    units[20 * idx + 19] = numNamings;
+    units[23 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
+    units[23 * idx + 19] = numNamings;
+    units[23 * idx + 20] =
+      encodeGenClauseState(InferenceStore::instance()->genClauseOfClause(u));
+
+    uint32_t firstChoice = static_cast<uint32_t>(choices.size() / 2);
+    uint32_t numChoices = 0;
+    if (const Stack<std::pair<Formula*, unsigned>>* chosen =
+          InferenceStore::instance()->conjunctChoices(u)) {
+      for (const auto& [f, argument] : *chosen) {
+        choices.push_back(encodeFormula(f));
+        choices.push_back(argument);
+        numChoices++;
+      }
+    }
+    units[23 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
+    units[23 * idx + 22] = numChoices;
     return idx;
   }
 };
@@ -551,7 +637,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 20));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 23));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
@@ -562,6 +648,9 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.satPremises.size()));
   putWord(buf, static_cast<uint32_t>(enc.namings.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.namingArgs.size()));
+  putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 8));
+  putWord(buf, static_cast<uint32_t>(enc.genLits.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.uses.size() / 6));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
@@ -591,6 +680,9 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.satPremises);
   putWords(buf, enc.namings);
   putWords(buf, enc.namingArgs);
+  putWords(buf, enc.genStates);
+  putWords(buf, enc.genLits);
+  putWords(buf, enc.choices);
   putWords(buf, enc.uses);
   putWords(buf, enc.bindings);
   putBlob(buf, enc.strings);
