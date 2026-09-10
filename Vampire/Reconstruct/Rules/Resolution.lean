@@ -50,10 +50,23 @@ def resolution (step : Step) : ReconstructM Expr := do
       elimParts t₂ 0 (fun j h₂ => do
         unless j == resolved₂.toNat do
           return ← place h₂
+        -- Which of the two is the negation of the other is settled by
+        -- comparing them, and an equality can be stated either way round, so
+        -- one of them may have to be turned about first.
         let (positive, negative) ←
           if (asNegation (← instantiateMVars (← inferType h₁))).isSome then
             pure (h₂, h₁)
           else pure (h₁, h₂)
+        let stated ← instantiateMVars (← inferType positive)
+        let some refuted := asNegation (← instantiateMVars (← inferType negative))
+          | throwError "the literals resolved on are not complementary"
+        let positive ←
+          if ← isDefEq refuted stated then pure positive
+          else
+            let some flipped ← flipEquality positive
+              | throwError "the literals resolved on{indentExpr stated}\nand\
+                  {indentExpr refuted}\nare not complementary"
+            pure flipped
         mkAppOptM ``absurd
           #[some (← inferType positive), some target, some positive, some negative])
         p₂) p₁

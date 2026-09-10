@@ -41,6 +41,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .clausify => Clausify.clausify step
   | .input => Input.input step
   | .resolution => Resolution.resolution step
+  | .extensionalityResolution => Resolution.resolution step
   | .factoring => Resolution.factoring step
   | .equalityResolutionWithDeletion =>
     Resolution.equalityResolutionWithDeletion step
@@ -122,7 +123,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .functionDefinitionRewriting => unimplemented step
   | .constrainedSuperposition => unimplemented step
   | .equalityFactoring => unimplemented step
-  | .extensionalityResolution => unimplemented step
   | .termAlgebraInjectivityGenerating => unimplemented step
   | .termAlgebraAcyclicity => unimplemented step
   | .foolParamodulation => unimplemented step
