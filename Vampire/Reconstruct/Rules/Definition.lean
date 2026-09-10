@@ -165,6 +165,135 @@ def byDefinition (conclusion : Expr) : ReconstructM Expr :=
           got{indentExpr body}"
     mkLambdaFVars xs proof
 
+/--
+The equations `definition_unfolding` unfolds with, by the symbol each defines.
+
+`FunctionDefinition::applyDefinitions` takes the definitions it used as
+premises of the step, one per use, and each is a unit equation whose left-hand
+side applies the defined symbol to distinct variables.
+-/
+private def definitions (step : Step) :
+    ReconstructM (Std.HashMap String (Vampire.Unit × Array UInt32 × Term × Expr)) := do
+  let mut out := {}
+  for (parent, (proof, _)) in (step.unit.parents.zip step.premises).extract 1 do
+    let some clause := parent.clause?
+      | throwError "a definition premise of definition_unfolding is not a clause"
+    let some l := clause.literals[0]?
+      | throwError "a definition premise of definition_unfolding states no literal"
+    unless clause.literals.size == 1 && l.isEquality && l.polarity do
+      throwError "a definition premise of definition_unfolding is not an equation"
+    let #[lhs, rhs] := l.args
+      | throwError "equality with {l.args.size} arguments"
+    let some symbol := lhs.symbol?
+      | throwError "the left-hand side of a definition is not an applied symbol"
+    let args ← lhs.args.mapM fun arg => do
+      unless arg.isVar do
+        throwError "the definition of {symbol.name} applies it to {arg}, \
+          not a variable"
+      return arg.var
+    out := out.insert symbol.name (parent, args, rhs, proof)
+  return out
+
+/--
+`t` at the unfolded definitions, with a proof that it equals what unfolding
+makes of it.
+
+The definition's right-hand side is not unfolded again -- the definitions were
+unfolded in dependency order before any clause was -- but the arguments the
+symbol was applied to are.
+-/
+private partial def unfold
+    (defs : Std.HashMap String (Vampire.Unit × Array UInt32 × Term × Expr))
+    (vars : Vars) (t : Term) : ReconstructM (Expr × Expr) := do
+  if t.isVar then
+    let e ← term vars t
+    return (e, ← mkEqRefl e)
+  let some symbol := t.symbol?
+    | throwError "term has unknown functor {t.functor}"
+  let head ← symbolExpr symbol.name
+  let mut args := #[]
+  let mut congruence ← mkEqRefl head
+  for arg in t.args do
+    let (unfolded, proof) ← unfold defs vars arg
+    args := args.push unfolded
+    congruence ← mkCongr congruence proof
+  match defs[symbol.name]? with
+  | none => return (mkAppN head args, congruence)
+  | some (definition, parameters, body, proof) =>
+    let bound := Std.HashMap.ofList (parameters.zip args).toList
+    let mut instances := #[]
+    for (v, sortName) in definition.varSorts do
+      match bound[v]? with
+      | some e => instances := instances.push e
+      | none => instances := instances.push (← someElement (← sortType sortName))
+    let equation := mkAppN proof instances
+    let some (_, defined, _) := (← instantiateMVars (← inferType equation)).eq?
+      | throwError "a definition premise does not state an equation"
+    -- The definition speaks of the symbol at its own arguments, so it applies
+    -- once those have been unfolded.
+    unless ← isDefEq defined (mkAppN head args) do
+      throwError "the definition of {symbol.name} states{indentExpr defined}\n\
+        which is not{indentExpr (mkAppN head args)}"
+    let mut bodyVars : Vars := {}
+    for (v, e) in parameters.zip args do
+      bodyVars := bodyVars.insert v e
+    return (← term bodyVars body, ← mkEqTrans congruence equation)
+
+/--
+`definition_unfolding`: the premise with every use of a defined symbol replaced
+by what defines it.
+
+`FunctionDefinition::applyDefinitions` walks the clause replacing each
+application of a defined symbol by that definition's right-hand side at the
+application's arguments. Its arguments are themselves unfolded, but the
+right-hand side is not looked at again: the definitions were unfolded in
+dependency order before any clause was.
+-/
+def definitionUnfolding (step : Step) : ReconstructM Expr := do
+  let some (clauseProof, _) := step.premises[0]?
+    | throwError "definition_unfolding without a premise"
+  let some parent := step.unit.parents[0]?
+    | throwError "definition_unfolding without a premise"
+  let some clause := parent.clause?
+    | throwError "definition_unfolding should be given a clause"
+  let defs ← definitions step
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    let vars ← coverVars parent kept
+    let place := placeLiteral target
+    let body ← elimParts (← instantiateForall (← conclusionOf parent)
+        (← parent.varSorts.mapM fun (v, sortName) => do
+          match vars[v]? with
+          | some x => pure x
+          | none => someElement (← sortType sortName))) 0
+      (fun i h => do
+        let some l := clause.literals[i]?
+          | throwError "the premise has no literal {i}"
+        let mut args := #[]
+        let mut congruence ←
+          if l.isEquality then
+            let some sortName := l.sort?
+              | throwError "equality literal without a recorded argument sort"
+            mkEqRefl (← mkAppOptM ``Eq #[some (← sortType sortName)])
+          else
+            let some symbol := l.symbol?
+              | throwError "literal has unknown predicate {l.predicate}"
+            mkEqRefl (← symbolExpr symbol.name)
+        for arg in l.args do
+          let (unfolded, proof) ← unfold defs vars arg
+          args := args.push unfolded
+          congruence ← mkCongr congruence proof
+        let atom ← if l.polarity then pure congruence else mkCongrArg (mkConst ``Not) congruence
+        place (← mkAppM ``Eq.mp #[atom, h]))
+      (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
+        match vars[v]? with
+        | some x => pure x
+        | none => someElement (← sortType sortName)))
+    mkLambdaFVars xs body
+
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
   | .functionDefinition | .avatarDefinition | .predicateDefinition => true
