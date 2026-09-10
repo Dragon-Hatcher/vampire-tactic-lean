@@ -1,34 +1,26 @@
 import Vampire.InferenceRule
 import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Definition
 
 namespace Vampire.Reconstruct
 
 open Lean Meta
 
-/-- A step of vampire's proof, with everything needed to justify it. -/
-structure Step where
-  unit : Vampire.Unit
-  rule : InferenceRule
-  /-- The step's conclusion, as a Lean proposition. -/
-  conclusion : Expr
-  /-- The premises: a proof of each, paired with what it proves. -/
-  premises : Array (Expr × Expr)
-
 /--
-Stands in for a rule that has no implementation yet. The step's conclusion is
-still rebuilt and checked, so only the justification is missing.
--/
-def unimplemented (step : Step) : ReconstructM Expr := do
-  modify fun s => { s with unimplemented := s.unimplemented.insert step.rule.name }
-  mkSorry step.conclusion (synthetic := false)
+Justifies a step. Every rule vampire can emit has a case, so a rule added to
+the fork will not compile until it is accounted for; the ones with no
+implementation yet fall to `unimplemented`, which admits the conclusion.
 
-/--
-Justifies a step. Every rule vampire can emit has a case; the ones that are not
-implemented yet fall to `unimplemented`, which admits the conclusion.
+A rule that introduces a name binds it in its own case, before asking for the
+conclusion, since the conclusion is stated in that very name.
 -/
 def ofRule (step : Step) : ReconstructM Expr :=
   match step.rule with
+  -- Implemented.
+  | .functionDefinition => Definition.functionDefinition step
+  | .avatarDefinition => Definition.avatarDefinition step
 
+  -- Not implemented yet.
   | .input => unimplemented step
   | .genericFormulaClauseTransformation => unimplemented step
   | .negatedConjecture => unimplemented step
@@ -154,7 +146,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .equalityProxyAxiom => unimplemented step
   | .alascaIntegralityAxiom => unimplemented step
   | .definitionUnfolding => unimplemented step
-  | .functionDefinition => byReflexivity step.conclusion
   | .predicateDefinition => unimplemented step
   | .predicateDefinitionUnfolding => unimplemented step
   | .predicateDefinitionMerging => unimplemented step
@@ -185,7 +176,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .answerLiteralResolver => unimplemented step
   | .theoryTautologySatConflict => unimplemented step
   | .genericAvatarInference => unimplemented step
-  | .avatarDefinition => byReflexivity step.conclusion
   | .avatarComponent => unimplemented step
   | .avatarRefutation => unimplemented step
   | .avatarRefutationSmt => unimplemented step

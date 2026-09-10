@@ -25,15 +25,11 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
   -- splitting and definition introduction both place among the premises of
   -- every step using it, so replaying those binds it before it is needed here.
   let premises ← u.parents.mapM fun parent => do
-    return (← step parent, ← conclusion' parent)
-  -- A definition step states its own conclusion in the name it introduces, so
-  -- bind that before reading the conclusion back.
-  match rule with
-  | .functionDefinition => registerFunctionDefinition u
-  | .avatarDefinition => registerAvatarDefinition u
-  | _ => pure ()
-  let conclusion ← conclusion u
-  let proof ← ofRule { unit := u, rule, conclusion, premises }
+    return (← step parent, ← conclusionOf parent)
+  let proof ← ofRule { unit := u, rule, premises }
+  -- Asked for after the rule has run, so that a rule introducing a name has
+  -- bound it first; it is rebuilt once and cached.
+  let conclusion ← conclusionOf u
   -- The rules are trusted to return a proof of what the step claims; check it,
   -- so a wrong implementation is caught here rather than at `assign`.
   unless ← isDefEq (← inferType proof) conclusion do
@@ -41,9 +37,6 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
       {indentExpr (← inferType proof)}\nbut the step claims{indentExpr conclusion}"
   modify fun s => { s with proofs := s.proofs.insert u.number proof }
   return proof
-where
-  /-- A parent's conclusion, rebuilt for the premise list. -/
-  conclusion' (parent : Vampire.Unit) : ReconstructM Expr := conclusion parent
 
 /--
 Replays a refutation as a Lean proof of `False`.
