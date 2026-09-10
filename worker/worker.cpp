@@ -31,6 +31,8 @@
  *   proofText vampire's own rendering of the proof, padded likewise
  */
 
+#include <sys/stat.h>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +42,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "CASC/PortfolioMode.hpp"
 #include "Kernel/Clause.hpp"
 #include "Kernel/Formula.hpp"
 #include "Kernel/Inference.hpp"
@@ -339,13 +342,43 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  // Written aside and renamed so that a half-written file is never visible:
+  // in portfolio mode the process doing this can be killed at any moment.
+  std::string partial = path + ".part";
+  std::ofstream out(partial, std::ios::binary | std::ios::trunc);
   if (!out)
-    throw UserErrorException("cannot open output file " + path);
+    throw UserErrorException("cannot open output file " + partial);
   out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
   out.close();
   if (!out)
-    throw UserErrorException("cannot write output file " + path);
+    throw UserErrorException("cannot write output file " + partial);
+  if (std::rename(partial.c_str(), path.c_str()) != 0)
+    throw UserErrorException("cannot rename " + partial + " to " + path);
+}
+
+/** Where `emitProof` writes; set once from `main`. */
+std::string g_outPath;
+
+/** Encodes whatever proof this process has, if any, and writes it out. */
+void emitProof()
+{
+  Encoder enc;
+  enc.encodeSignature();
+  uint32_t refutation = NONE;
+  if (Unit* r = env.statistics->refutation) {
+    refutation = enc.encodeUnit(r);
+    std::ostringstream proof;
+    InferenceStore::instance()->outputProof(proof, r);
+    enc.proofText = proof.str();
+  }
+  write(g_outPath, enc,
+        static_cast<uint32_t>(env.statistics->terminationReason), refutation);
+}
+
+bool isPortfolioMode(Options::Mode mode)
+{
+  return mode == Options::Mode::PORTFOLIO || mode == Options::Mode::CASC
+      || mode == Options::Mode::SMTCOMP;
 }
 
 }  // namespace
@@ -368,26 +401,31 @@ int main(int argc, char** argv)
       env.options->set(arg.substr(0, eq), arg.substr(eq + 1));
     }
 
+    g_outPath = argv[2];
+    std::remove(g_outPath.c_str());
+
     Timer::reinitialise();
     UIHelper::parseFile(argv[1], env.options->inputSyntax(), false);
     Problem* prb = UIHelper::getInputProblem();
 
-    env.options->setForcedOptionValues();
-    env.options->checkGlobalOptionConstraints();
-    Preprocess(*env.options).preprocess(*prb);
-    ProvingHelper::runVampireSaturation(*prb, *env.options);
-
-    Encoder enc;
-    enc.encodeSignature();
-    uint32_t refutation = NONE;
-    if (Unit* r = env.statistics->refutation) {
-      refutation = enc.encodeUnit(r);
-      std::ostringstream proof;
-      InferenceStore::instance()->outputProof(proof, r);
-      enc.proofText = proof.str();
+    if (isPortfolioMode(env.options->mode())) {
+      // The slice that succeeds runs in a child of this process and exits
+      // there, so it has to do the encoding itself; the parent never sees its
+      // refutation. Portfolio mode preprocesses per slice, so not here.
+      UIHelper::onProofFound = &emitProof;
+      CASC::PortfolioMode::perform(prb);
+    } else {
+      env.options->setForcedOptionValues();
+      env.options->checkGlobalOptionConstraints();
+      Preprocess(*env.options).preprocess(*prb);
+      ProvingHelper::runVampireSaturation(*prb, *env.options);
     }
-    write(argv[2], enc, static_cast<uint32_t>(env.statistics->terminationReason),
-          refutation);
+
+    // In portfolio mode a child has already written the proof; anything this
+    // process could encode now would be an empty derivation on top of it.
+    struct stat ignored;
+    if (stat(g_outPath.c_str(), &ignored) != 0)
+      emitProof();
     return 0;
   } catch (Exception& e) {
     std::ostringstream msg;

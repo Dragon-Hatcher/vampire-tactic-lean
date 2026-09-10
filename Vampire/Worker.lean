@@ -6,7 +6,11 @@ namespace Vampire
 structure Config where
   /-- Seconds vampire may spend on the problem. -/
   timeout : Nat := 30
-  /-- Extra vampire options, e.g. `#[("mode", "portfolio")]`. -/
+  /-- Vampire's `mode`. `portfolio` works through a schedule of strategies. -/
+  mode : String := "portfolio"
+  /-- The strategy schedule `portfolio` mode follows. -/
+  schedule : String := "casc"
+  /-- Further vampire options, as they would be given on its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/
   worker? : Option System.FilePath := none
@@ -15,7 +19,8 @@ deriving Inhabited
 namespace Config
 
 def toArgs (cfg : Config) : Array String :=
-  #[s!"time_limit={cfg.timeout}"] ++ cfg.options.map fun (n, v) => s!"{n}={v}"
+  #[s!"time_limit={cfg.timeout}", s!"mode={cfg.mode}", s!"schedule={cfg.schedule}"]
+    ++ cfg.options.map fun (n, v) => s!"{n}={v}"
 
 end Config
 
