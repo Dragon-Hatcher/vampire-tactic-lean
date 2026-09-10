@@ -1,5 +1,6 @@
 import Vampire.InferenceRule
 import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
 import Vampire.Reconstruct.Rules.Skolem
 
@@ -22,6 +23,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .avatarDefinition => Definition.definitionStep step
   | .predicateDefinition => Definition.definitionStep step
   | .skolemize => Skolem.skolemize step
+  | .clausify => Clausify.clausify step
 
   -- Not implemented yet.
   | .input => unimplemented step
@@ -40,7 +42,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .theoryNormalization => unimplemented step
   | .alascaIntegerTransformation => unimplemented step
   | .skolemSymbolIntroduction => unimplemented step
-  | .clausify => unimplemented step
   | .reorientEquations => unimplemented step
   | .genericFormulaClauseTransformationLast => unimplemented step
   | .genericSimplifyingInference => unimplemented step
