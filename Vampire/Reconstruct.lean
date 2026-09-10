@@ -29,12 +29,35 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
   -- splitting and definition introduction both place among the premises of
   -- every step using it, so replaying those binds it before it is needed here.
   let premises ← u.parents.mapM fun parent => do
-    return (← step parent, ← conclusionOf parent)
-  let proof ←
-    try
-      ofRule { unit := u, rule, premises }
-    catch e =>
-      throwError "replaying {rule.name} for step {u.number}: {e.toMessageData}"
+    return (parent, ← step parent, ← conclusionOf parent)
+  -- A clause splitting worked on holds only under the names it was split
+  -- against, so those are assumed here and discharged into the conclusion. A
+  -- premise assumes some of the same names, and is applied to them; one
+  -- assuming anything else is left as it stands, for a rule that knows what
+  -- to make of it -- which is what the splitting rules themselves do.
+  let names := u.splits
+  let types ← names.mapM namedFormula
+  let decls := types.mapIdx fun i τ =>
+    (Name.mkSimple s!"a{i}", fun _ => pure τ)
+  let proof ← withLocalDeclsD decls fun assumed => do
+    let discharged ← premises.mapM fun (parent, proof, stated) => do
+      unless parent.splits.all (names.contains ·) do
+        return (proof, stated)
+      let mut proof := proof
+      let mut stated := stated
+      for name in parent.splits do
+        let some i := names.findIdx? (· == name)
+          | throwError "step {u.number} does not assume `{name}`"
+        let some h := assumed[i]? | throwError "no assumption for `{name}`"
+        proof := mkApp proof h
+        stated ← instantiateForall stated #[h]
+      return (proof, stated)
+    let body ←
+      try
+        ofRule { unit := u, rule, premises := discharged }
+      catch e =>
+        throwError "replaying {rule.name} for step {u.number}: {e.toMessageData}"
+    mkLambdaFVars assumed body
   -- Asked for after the rule has run, so that a rule introducing a name has
   -- bound it first; it is rebuilt once and cached.
   let conclusion ←

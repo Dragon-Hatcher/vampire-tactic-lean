@@ -635,17 +635,37 @@ def equiv (a b : Expr) : ReconstructM Expr := do
     #[pa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[pb]]]
 
 /--
+What a name splitting introduced stands for, `~n` for the negation of what `n`
+does.
+-/
+def namedFormula (name : String) : ReconstructM Expr := do
+  let negated := name.startsWith "~"
+  let key := if negated then (name.drop 1).toString else name
+  let some body := (← get).named[key]?
+    | throwIntroduced "the named subformula" name
+  return if negated then mkApp (mkConst ``Not) body else body
+
+/--
 The Lean proposition a step asserts. A clause is implicitly universally
 quantified over its variables; a formula carries its own binders.
+
+Splitting works on a clause under the assumption that the components it split
+off are false, and writes those assumptions on the clause. So such a clause
+says no more than that its literals follow from the names it holds under.
 -/
 private def buildConclusion (u : Vampire.Unit) : ReconstructM Expr := do
   let sorts := u.varSorts
-  match u.clause?, u.formula? with
-  | some c, _ =>
-    withVars sorts {} fun vars locals => do
-      mkForallFVars locals (← clause vars c)
-  | _, some f => formula sorts {} f
-  | _, _ => throwError "step {u.number} is neither a clause nor a formula"
+  let stated ←
+    match u.clause?, u.formula? with
+    | some c, _ =>
+      withVars sorts {} fun vars locals => do
+        mkForallFVars locals (← clause vars c)
+    | _, some f => formula sorts {} f
+    | _, _ => throwError "step {u.number} is neither a clause nor a formula"
+  let mut conclusion := stated
+  for name in u.splits.reverse do
+    conclusion ← mkArrow (← namedFormula name) conclusion
+  return conclusion
 
 /--
 The proposition a step asserts, rebuilt once.
@@ -746,8 +766,20 @@ structure Step where
   /-- The premises: a proof of each, paired with what it proves. -/
   premises : Array (Expr × Expr)
 
+/--
+What a step concludes, without the assumptions it holds under: what a rule has
+to prove, the framework having put those assumptions in scope.
+-/
+def coreOf (u : Vampire.Unit) : ReconstructM Expr := do
+  let mut core ← conclusionOf u
+  for name in u.splits do
+    unless core.isForall do
+      throwError "step {u.number} holds under `{name}` but states        {indentExpr core}"
+    core := core.bindingBody!
+  return core
+
 /-- The step's conclusion, as a Lean proposition. -/
-def Step.conclusion (step : Step) : ReconstructM Expr := conclusionOf step.unit
+def Step.conclusion (step : Step) : ReconstructM Expr := coreOf step.unit
 
 /--
 How a step used the premise in position `i` among its parents.

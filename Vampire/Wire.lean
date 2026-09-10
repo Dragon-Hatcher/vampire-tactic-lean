@@ -27,6 +27,7 @@ private structure Layout where
   parents : Nat
   varSorts : Nat
   skolems : Nat
+  splits : Nat
   uses : Nat
   bindings : Nat
   strings : Nat
@@ -103,11 +104,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 7
+private def version : UInt32 := 8
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 24 * 4 then
+  if data.size < 25 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -115,7 +116,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 23
+  let numRules := word 24
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -134,11 +135,12 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numParents := word 16
   let numVarSorts := word 17
   let numSkolems := word 18
-  let numUses := word 19
-  let numBindings := word 20
-  let stringsLen := word 21
-  let proofTextLen := word 22
-  let functions := 24 * 4
+  let numSplits := word 19
+  let numUses := word 20
+  let numBindings := word 21
+  let stringsLen := word 22
+  let proofTextLen := word 23
+  let functions := 25 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 2 * 4
   let terms := sorts + numSorts * 4
@@ -148,11 +150,12 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 15 * 4
+  let unitLits := units + numUnits * 17 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
-  let uses := skolems + numSkolems * 2 * 4
+  let splits := skolems + numSkolems * 2 * 4
+  let uses := splits + numSplits * 4
   let bindings := uses + numUses * 6 * 4
   let strings := bindings + numBindings * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
@@ -168,8 +171,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     data, terminationReason := reason
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
-      units, unitLits, parents, varSorts, skolems, uses, bindings, strings,
-      proofText, numFunctions,
+      units, unitLits, parents, varSorts, skolems, splits, uses, bindings,
+      strings, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -386,8 +389,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 15 c.idx.toNat 4
-  let count := p.field p.layout.units 15 c.idx.toNat 5
+  let first := p.field p.layout.units 17 c.idx.toNat 4
+  let count := p.field p.layout.units 17 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -480,7 +483,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 15 u.idx.toNat off
+  u.proof.field u.proof.layout.units 17 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -544,6 +547,21 @@ It says which hypothesis an `input` step restates.
 def name? (u : Unit) : Option String :=
   let off := u.field 12
   if off == none32 then none else some (u.proof.string off)
+
+/--
+The names this step's clause holds under.
+
+Splitting asserts a component's name and works on with the clause under that
+assumption, so what such a clause says is that its literals follow from the
+names it is written against. A name is written as the definition that
+introduced it does, negated ones with a leading `~`.
+-/
+def splits (u : Unit) : Array String :=
+  let p := u.proof
+  let first := u.field 15
+  let count := u.field 16
+  Array.ofFn (n := count.toNat) fun i =>
+    p.string (readU32 p.data (p.layout.splits + (first.toNat + i.val) * 4))
 
 /-- How this step used each of its premises. -/
 def premiseUses (u : Unit) : Array PremiseUse :=
