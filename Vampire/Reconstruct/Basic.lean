@@ -931,6 +931,27 @@ def doubleNegations (h : Expr) : ReconstructM (Array Expr) := do
   return out
 
 /--
+A witness making a quantified formula fail, from a proof that it does.
+
+`¬∀x, p x` gives `∃x, ¬p x`, and Hilbert choice a witness for it. Nothing is
+introduced by this: the witness is a term, and the quantifier it came from is
+the one the name was defined with.
+-/
+def witnessAgainst (against : Expr) : ReconstructM (Expr × Expr) := do
+  let stated ← instantiateMVars (← inferType against)
+  let some inner := asNegation stated
+    | throwError "not a refutation of anything:{indentExpr stated}"
+  let .forallE n τ body bi := inner
+    | throwError "not a quantified formula:{indentExpr inner}"
+  let predicate := Expr.lam n τ body bi
+  let existence ← mkAppM ``Iff.mp
+    #[← mkAppOptM ``Classical.not_forall #[some τ, some predicate], against]
+  let refuting ← withLocalDeclD n τ fun x => do
+    mkLambdaFVars #[x] (mkApp (mkConst ``Not) (body.instantiate1 x))
+  let (witness, choice) ← epsilon τ refuting
+  return (witness, ← mkAppM ``Iff.mp #[choice, existence])
+
+/--
 `target` from two complementary literals.
 
 Which of the two is the negation of the other is settled by comparing them, and

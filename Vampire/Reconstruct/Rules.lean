@@ -10,6 +10,7 @@ import Vampire.Reconstruct.Rules.Normalize
 import Vampire.Reconstruct.Rules.Resolution
 import Vampire.Reconstruct.Rules.Rewrite
 import Vampire.Reconstruct.Rules.Skolem
+import Vampire.Reconstruct.Rules.Splitting
 import Vampire.Reconstruct.Rules.Subsumption
 
 namespace Vampire.Reconstruct
@@ -34,6 +35,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .avatarRefutation => Avatar.refutation step
   | .avatarSplitClause => Avatar.splitClause step
   | .predicateDefinition => Definition.definitionStep step
+  | .generalSplittingComponent => Splitting.component step
+  | .generalSplitting => Splitting.general step
   | .definitionUnfolding => Definition.definitionUnfolding step
   | .unusedPredicateDefinitionRemoval =>
     Definition.unusedDefinitionRemoval step
@@ -178,8 +181,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .foolLetDefinition => unimplemented step
   | .foolFormulaDefinition => unimplemented step
   | .foolMatchDefinition => unimplemented step
-  | .generalSplitting => unimplemented step
-  | .generalSplittingComponent => unimplemented step
   | .colorUnblocking => unimplemented step
   | .satColorElimination => unimplemented step
   | .formulify => unimplemented step

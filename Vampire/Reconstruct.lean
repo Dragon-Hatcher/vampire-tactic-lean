@@ -98,6 +98,8 @@ private partial def bindIntroduced : ReconstructM PUnit := do
   let bind (u : Vampire.Unit) : ReconstructM PUnit := do
     if (u.rule?.map Definition.introducesName).getD false then
       Definition.register u
+    if u.rule? == some .generalSplittingComponent then
+      Splitting.register u
     -- What clausification named, which nothing in the proof states: the name
     -- stands for the formula, so binding it to that formula is what it means.
     for (name, arguments, named) in u.namings do
@@ -122,7 +124,8 @@ private partial def bindIntroduced : ReconstructM PUnit := do
       registerSkolems (owner.varSorts ++ u.varSorts)
         (Std.HashMap.ofList u.skolems.toList) {} f
   let mut pending := proof.units.filter fun u =>
-    (u.rule?.map Definition.introducesName).getD false || !u.skolems.isEmpty
+    (u.rule?.map Definition.introducesName).getD false
+      || u.rule? == some .generalSplittingComponent || !u.skolems.isEmpty
       || !u.namings.isEmpty
       || (u.genClause?.isSome && u.parents.any fun p => !p.skolems.isEmpty)
   repeat
