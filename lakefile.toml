@@ -1,0 +1,10 @@
+name = "vampire"
+defaultTargets = ["Vampire"]
+testDriver = "test"
+
+[[lean_lib]]
+name = "Vampire"
+
+[[lean_lib]]
+name = "test"
+globs = ["test.+"]
