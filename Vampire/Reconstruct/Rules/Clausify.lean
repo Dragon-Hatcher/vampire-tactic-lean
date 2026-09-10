@@ -151,7 +151,7 @@ private partial def prove (r : Replay) (c : GenClause) : ReconstructM Expr := do
           mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
       let body ←
         match c.parent? with
-        | none => root r c parts refuted
+        | none => root r parts refuted
         | some p => do
           let stated ← genParts r.sorts r.vars p
           let some position := c.position?
@@ -171,9 +171,8 @@ private partial def prove (r : Replay) (c : GenClause) : ReconstructM Expr := do
 The clauses clausification begins at: the formula itself, and, for a subformula
 it names, that the name and the subformula say the same thing.
 -/
-private partial def root (r : Replay) (c : GenClause) (parts : Array Expr)
+private partial def root (r : Replay) (parts : Array Expr)
     (refuted : Expr → ReconstructM Expr) : ReconstructM Expr := do
-  let _ := c
   if h : parts.size = 1 then
     return mkApp (← refuted parts[0]) r.premise
   if parts.size == 2 then

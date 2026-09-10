@@ -116,7 +116,7 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
     let isAnd := (← connectiveOf f) matches .and
     let parts ← f.subformulas.mapM (normalize expand sorts vars · polarity)
     let results := parts.map (·.2.1)
-    if h : parts.size = 0 then
+    if parts.size == 0 then
       throwError "a junction with no arguments"
     else if parts.size == 1 then
       let some (_, result, proof) := parts[0]? | throwError "a junction with no arguments"

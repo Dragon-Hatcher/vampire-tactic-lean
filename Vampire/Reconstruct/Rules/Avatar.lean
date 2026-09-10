@@ -133,7 +133,7 @@ private partial def satClause (origins : Std.HashMap UInt32 (Expr × Expr))
   let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
     let mut known := known
     for (name, i) in c.literals.zipIdx do
-      let (flipped, says) ← flipName name
+      let (_, says) ← flipName name
       let body ← namedFormula name
       let refuted ← withLocalDeclD `d body fun d => do
         mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
