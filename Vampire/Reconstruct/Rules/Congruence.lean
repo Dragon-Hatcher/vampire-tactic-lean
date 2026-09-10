@@ -34,10 +34,14 @@ no further weight.
 def unfolded (step : Step) : ReconstructM Expr := do
   let some (proof, stated) := step.premises[0]?
     | throwError "expected at least one premise"
+  let some parent := step.unit.parents[0]?
+    | throwError "expected at least one premise"
   let conclusion ← step.conclusion
   if ← isDefEq (← instantiateMVars stated) conclusion then
     return proof
-  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+  -- Folding rebuilds the clause, so its literals can come back in another
+  -- order; they are related one by one rather than by the clause's shape.
+  relateLiterals step parent proof stated
 
 /--
 `pure_predicate_removal`: a formula with what a pure predicate says left out.

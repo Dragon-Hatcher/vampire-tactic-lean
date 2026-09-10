@@ -173,7 +173,8 @@ premises of the step, one per use, and each is a unit equation whose left-hand
 side applies the defined symbol to distinct variables.
 -/
 private def definitions (step : Step) :
-    ReconstructM (Std.HashMap String (Vampire.Unit × Array UInt32 × Term × Expr)) := do
+    ReconstructM (Std.HashMap String
+      (Vampire.Unit × Array UInt32 × Term × Expr × Bool)) := do
   let mut out := {}
   for (parent, (proof, _)) in (step.unit.parents.zip step.premises).extract 1 do
     let some clause := parent.clause?
@@ -182,16 +183,28 @@ private def definitions (step : Step) :
       | throwError "a definition premise of definition_unfolding states no literal"
     unless clause.literals.size == 1 && l.isEquality && l.polarity do
       throwError "a definition premise of definition_unfolding is not an equation"
-    let #[lhs, rhs] := l.args
+    let #[left, right] := l.args
       | throwError "equality with {l.args.size} arguments"
-    let some symbol := lhs.symbol?
-      | throwError "the left-hand side of a definition is not an applied symbol"
-    let args ← lhs.args.mapM fun arg => do
+    -- Either side of an equation can be the symbol it defines, and the
+    -- equation alone does not say which; the step records it.
+    let some use := step.unit.premiseUses.find? (·.premise == parent.number)
+      | throwError "nothing says which side of the definition in step \
+        {parent.number} is the symbol it defines"
+    let some side := use.term
+      | throwError "nothing says which side of the definition in step \
+        {parent.number} is the symbol it defines"
+    let (defined, body, flipped) ←
+      if side == left then pure (left, right, false)
+      else if side == right then pure (right, left, true)
+      else throwError "what a definition defines is neither side of it"
+    let some symbol := defined.symbol?
+      | throwError "what a definition defines is not an applied symbol"
+    let args ← defined.args.mapM fun arg => do
       unless arg.isVar do
         throwError "the definition of {symbol.name} applies it to {arg}, \
           not a variable"
       return arg.var
-    out := out.insert symbol.name (parent, args, rhs, proof)
+    out := out.insert symbol.name (parent, args, body, proof, flipped)
   return out
 
 /--
@@ -203,7 +216,8 @@ unfolded in dependency order before any clause was -- but the arguments the
 symbol was applied to are.
 -/
 private partial def unfold
-    (defs : Std.HashMap String (Vampire.Unit × Array UInt32 × Term × Expr))
+    (defs : Std.HashMap String
+      (Vampire.Unit × Array UInt32 × Term × Expr × Bool))
     (vars : Vars) (t : Term) : ReconstructM (Expr × Expr) := do
   if t.isVar then
     let e ← term vars t
@@ -219,14 +233,17 @@ private partial def unfold
     congruence ← mkCongr congruence proof
   match defs[symbol.name]? with
   | none => return (mkAppN head args, congruence)
-  | some (definition, parameters, body, proof) =>
+  | some (definition, parameters, body, proof, flipped) =>
     let bound := Std.HashMap.ofList (parameters.zip args).toList
     let mut instances := #[]
     for (v, sortName) in definition.varSorts do
       match bound[v]? with
       | some e => instances := instances.push e
       | none => instances := instances.push (← someElement (← sortType sortName))
-    let equation := mkAppN proof instances
+    let equation ← do
+      let instantiated := mkAppN proof instances
+      -- The symbol a definition defines can be either side of it.
+      if flipped then mkAppM ``Eq.symm #[instantiated] else pure instantiated
     let some (_, defined, _) := (← instantiateMVars (← inferType equation)).eq?
       | throwError "a definition premise does not state an equation"
     -- The definition speaks of the symbol at its own arguments, so it applies

@@ -323,6 +323,10 @@ structure SatClause where
 instance : BEq Formula where
   beq a b := a.idx == b.idx
 
+/-- Two terms are the same when they are the same one: they are shared. -/
+instance : BEq Term where
+  beq a b := a.idx == b.idx
+
 /-- A step in the derivation: a clause or formula, and how it was inferred. -/
 structure Unit where
   private mk ::

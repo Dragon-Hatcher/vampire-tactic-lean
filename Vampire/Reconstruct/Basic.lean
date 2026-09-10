@@ -1039,6 +1039,59 @@ def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
   return use
 
 /--
+A step whose conclusion restates its premise's literals, whatever it did to
+them.
+
+The literals are taken as vampire has them rather than found by taking the
+clause apart: a literal naming a subformula stands for a whole formula, and the
+disjuncts of what it rebuilds to are not literals of the clause.
+-/
+def relateLiterals (step : Step) (parent : Vampire.Unit)
+    (premiseProof premiseStated : Expr) : ReconstructM Expr := do
+  let some source := parent.clause?
+    | -- These rules run over formulas too, before clausification, and there a
+      -- formula's shape is what it says.
+      return mkApp (← implies (← instantiateMVars premiseStated)
+        (← step.conclusion)) premiseProof
+  let some conclusion := step.unit.clause?
+    | return mkApp (← implies (← instantiateMVars premiseStated)
+        (← step.conclusion)) premiseProof
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    -- Dropping a literal can drop the last occurrence of a variable with it.
+    let vars ← coverVars parent kept
+    let mut args := #[]
+    for (v, sortName) in parent.varSorts do
+      match vars[v]? with
+      | some x => args := args.push x
+      | none => args := args.push (← someElement (← sortType sortName))
+    let sourceParts ← source.literals.mapM (Reconstruct.literal vars)
+    let targetParts ← conclusion.literals.mapM (Reconstruct.literal vars)
+    let body ← elimGiven sourceParts (fun _ h => do
+      -- Every literal the step kept is one of the conclusion's; one it dropped
+      -- has to be refutable on its own, as `t ≠ t` is.
+      let stated ← instantiateMVars (← inferType h)
+      for candidate in #[h] ++ (← doubleNegations h) ++
+          ((← flipEquality h).toArray) do
+        let says ← instantiateMVars (← inferType candidate)
+        for (part, i) in targetParts.zipIdx do
+          if ← isDefEq part says then
+            return ← injectGiven targetParts i candidate
+      if let some inner := asNegation stated then
+        if let some (_, lhs, rhs) := inner.eq? then
+          if ← isDefEq lhs rhs then
+            return ← mkAppOptM ``absurd
+              #[some inner, some target, some (← mkEqRefl lhs), some h]
+      if stated.isConstOf ``False then
+        return ← mkAppOptM ``False.elim #[some target, some h]
+      throwError "the literal{indentExpr stated}\nis neither among        {indentExpr target}\nnor refutable on its own")
+      (mkAppN premiseProof args)
+    mkLambdaFVars xs body
+
+/--
 Stands in for a rule that has no implementation yet. The step's conclusion is
 still rebuilt and checked, so only the justification is missing.
 -/
