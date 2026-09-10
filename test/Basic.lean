@@ -1,8 +1,7 @@
-import Mathlib.Data.Real.Basic
 import Vampire
 
-example : True := by vampire
+example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire +showQuery [hp, hpq]
 
-example (p q : Prop) (hp : p) (h : p → q) : q := by vampire 10
+example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire [*]
 
-example (x : ℝ) (h : 0 < x) : 0 < x + x := by vampire
+example {ι : Type} (f : ι → ι) (a : ι) (h : ∀ x, f x = x) : f (f a) = a := by vampire [h]

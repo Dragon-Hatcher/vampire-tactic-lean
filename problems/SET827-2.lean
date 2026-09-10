@@ -7,7 +7,8 @@
 -- as functions into `Prop`, and the whole problem as `axiom₁ → … → axiomₙ → goal`.
 -- `False` as the goal means the problem states no conjecture and asks for a refutation.
 --
--- Nothing is imported, so this file typechecks on its own.
+-- Only `Vampire` is imported, for the `vampire` tactic that closes the goal.
+import Vampire
 set_option maxHeartbeats 0
 set_option maxRecDepth 100000000
 set_option linter.all false
@@ -19,4 +20,4 @@ variable {t_tc__set : ι → ι}
 variable {t_c__in t_c__lessequals : ι → ι → ι → Prop}
 
 theorem T_SET827m2 : (∀ v0 v1 v2 v3 : ι, ((¬(t_c__in v3 v1 v0)) ∨ (¬(t_c__lessequals v1 v2 (t_tc__set v0))) ∨ (t_c__in v3 v2 v0))) → (t_c__in t_v__x t_v__V t_t__a) → (t_c__lessequals t_v__V t_v__Z (t_tc__set t_t__a)) → (¬(t_c__in t_v__x t_v__Z t_t__a)) → False := by
-  sorry
+  vampire

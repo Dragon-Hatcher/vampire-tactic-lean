@@ -4,7 +4,8 @@ open Lake DSL System
 
 package vampire
 
-require "leanprover-community" / "mathlib" @ git "v4.33.1"
+require "leanprover-community" / "mathlib" @ git "v4.33.0"
+require "leanprover-community" / "auto" @ git "v4.33.0"
 
 /-- The vampire checkout to build against: `$VAMPIRE_DIR`, else `../vampire-fork`. -/
 def vampireSourceDir (pkgDir : FilePath) : IO FilePath := do
