@@ -265,7 +265,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- Each component's name failing gives a way of making that component
     -- fail, and with it the negation of each of its literals.
     let mut arguments : Std.HashMap UInt32 Expr := {}
-    let mut negations : Std.HashMap Expr Expr := {}
+    let mut negations : Array (Expr × Expr) := #[]
     for (name, i) in disjuncts.zipIdx do
       if (parent.splits.contains (flippedName name)) then
         continue
@@ -282,6 +282,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
         if (← connectiveOf quantified) matches .«forall» then quantified.boundVars
         else #[]
       let renamed := Std.HashMap.ofList use.bindings.toList
+      let mut componentVars : Vars := {}
       for v in binders do
         let (witness, rest) ← witnessAgainst against
         against := rest
@@ -290,16 +291,34 @@ def splitClause (step : Step) : ReconstructM Expr := do
             relates to the clause"
         unless image.isVar do
           throwError "`{name}` was renamed to a term, not a variable"
+        componentVars := componentVars.insert v witness
         arguments := arguments.insert image.var witness
-      -- `against` now refutes the component itself, so each of its literals
-      -- is refuted with it.
-      let refutedComponent ← instantiateMVars (← inferType against)
-      let some disjunction := asNegation refutedComponent
-        | throwError "not a refutation of anything:{indentExpr refutedComponent}"
-      for (part, j) in (junctionParts ``Or disjunction).zipIdx do
+      -- `against` now refutes the component itself, so each of its literals is
+      -- refuted with it. Which literals those are is read off the component as
+      -- vampire states it: a literal naming a subformula stands for a whole
+      -- formula, so the disjuncts of what it rebuilds to are not its literals.
+      let parts ←
+        if name.startsWith "~" then
+          -- A ground component of one negative literal is named positively,
+          -- the definition stating the literal's complement, so the component
+          -- is what the negated name says rather than what the definition does.
+          pure #[← namedFormula name]
+        else
+          let component ←
+            if (← connectiveOf quantified) matches .«forall» then
+              let some inner := quantified.subformulas[0]?
+                | throwError "a quantifier without a body"
+              pure inner
+            else pure quantified
+          let literals :=
+            if (← connectiveOf component) matches .or then component.subformulas
+            else #[component]
+          literals.mapM (Reconstruct.formula definition.varSorts componentVars)
+      let disjunction := junction ``Or ``False parts
+      for (part, j) in parts.zipIdx do
         let negation ← withLocalDeclD `l part fun l => do
           mkLambdaFVars #[l] (mkApp against (← injectPart ``Or disjunction j l))
-        negations := negations.insert part negation
+        negations := negations.push (part, negation)
     -- The clause at all of those witnesses at once has every literal refuted.
     let mut arguments' := #[]
     for (v, sortName) in parent.varSorts do
@@ -310,7 +329,15 @@ def splitClause (step : Step) : ReconstructM Expr := do
     let instantiated ← instantiateForall stated arguments'
     let contradiction ← elimParts instantiated 0 (fun _ hl => do
       let literal ← instantiateMVars (← inferType hl)
-      let some negation := negations[literal]?
+      -- A named subformula stands for what it names, so a literal over one
+      -- rebuilds to that formula rather than to something atomic; comparing
+      -- them is a matter of definitional equality.
+      let mut found := none
+      for (part, negation) in negations do
+        if ← isDefEq part literal then
+          found := some negation
+          break
+      let some negation := found
         | throwError "nothing refutes{indentExpr literal}"
       mkAppOptM ``absurd
         #[some literal, some (mkConst ``False), some hl, some negation]) instance_

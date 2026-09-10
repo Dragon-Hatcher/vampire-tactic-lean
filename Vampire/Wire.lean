@@ -31,6 +31,8 @@ private structure Layout where
   satClauses : Nat
   satLits : Nat
   satPremises : Nat
+  namings : Nat
+  namingArgs : Nat
   uses : Nat
   bindings : Nat
   strings : Nat
@@ -116,11 +118,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 11
+private def version : UInt32 := 12
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 29 * 4 then
+  if data.size < 31 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -128,7 +130,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 27
+  let numRules := word 29
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -151,11 +153,13 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numSatClauses := word 20
   let numSatLits := word 21
   let numSatPremises := word 22
-  let numUses := word 23
-  let numBindings := word 24
-  let stringsLen := word 25
-  let proofTextLen := word 26
-  let functions := 29 * 4
+  let numNamings := word 23
+  let numNamingArgs := word 24
+  let numUses := word 25
+  let numBindings := word 26
+  let stringsLen := word 27
+  let proofTextLen := word 28
+  let functions := 31 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -165,7 +169,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 18 * 4
+  let unitLits := units + numUnits * 20 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -173,7 +177,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let satClauses := splits + numSplits * 4
   let satLits := satClauses + numSatClauses * 5 * 4
   let satPremises := satLits + numSatLits * 4
-  let uses := satPremises + numSatPremises * 4
+  let namings := satPremises + numSatPremises * 4
+  let namingArgs := namings + numNamings * 4 * 4
+  let uses := namingArgs + numNamingArgs * 4
   let bindings := uses + numUses * 6 * 4
   let strings := bindings + numBindings * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
@@ -187,11 +193,12 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     (readU32 data 8) "termination reason"
   return {
     data, terminationReason := reason
-    polarityFlipBoundary := readU32 data (28 * 4)
+    polarityFlipBoundary := readU32 data (30 * 4)
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
-      satPremises, uses, bindings, strings, proofText, numFunctions,
+      satPremises, namings, namingArgs, uses, bindings, strings, proofText,
+      numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -423,8 +430,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 18 c.idx.toNat 4
-  let count := p.field p.layout.units 18 c.idx.toNat 5
+  let first := p.field p.layout.units 20 c.idx.toNat 4
+  let count := p.field p.layout.units 20 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -517,7 +524,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 18 u.idx.toNat off
+  u.proof.field u.proof.layout.units 20 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -596,6 +603,27 @@ def splits (u : Unit) : Array String :=
   let count := u.field 16
   Array.ofFn (n := count.toNat) fun i =>
     p.string (readU32 p.data (p.layout.splits + (first.toNat + i.val) * 4))
+
+/--
+The subformulas this step's clausification named.
+
+Clausification names a subformula that occurs too often to be worth expanding,
+and works on with the name in its place. The definition never becomes a step of
+its own -- the clauses saying what the name means come out of the same
+clausification -- so nothing in the proof says what the name stands for.
+-/
+def namings (u : Unit) : Array (String × Array UInt32 × Formula) :=
+  let p := u.proof
+  let first := u.field 18
+  let count := u.field 19
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.namings + (first.toNat + i.val) * 4 * 4
+    let firstArg := readU32 p.data (base + 4)
+    let numArgs := readU32 p.data (base + 8)
+    (p.string (readU32 p.data base),
+     Array.ofFn (n := numArgs.toNat) fun j =>
+       readU32 p.data (p.layout.namingArgs + (firstArg.toNat + j.val) * 4),
+     ⟨p, readU32 p.data (base + 12)⟩)
 
 /--
 The propositional clause a step derived by SAT solving stands on, and `none`

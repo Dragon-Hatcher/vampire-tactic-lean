@@ -98,6 +98,20 @@ private partial def bindIntroduced : ReconstructM PUnit := do
   let bind (u : Vampire.Unit) : ReconstructM PUnit := do
     if (u.rule?.map Definition.introducesName).getD false then
       Definition.register u
+    -- What clausification named, which nothing in the proof states: the name
+    -- stands for the formula, so binding it to that formula is what it means.
+    for (name, arguments, named) in u.namings do
+      unless ← resolvesSymbol name do
+        let sorts := u.varSorts
+        let bound := arguments.filterMap fun v =>
+          (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+        unless bound.size == arguments.size do
+          throwError "step {u.number} named a formula over variables it does \
+            not record the sorts of"
+        let definition ← reading u <| withVars bound {} fun vars locals => do
+          mkLambdaFVars locals (← formula sorts vars named)
+        modify fun s =>
+          { s with introduced := s.introduced.insert name definition }
     unless u.skolems.isEmpty do
       let some (owner, f) := skolemSource u
         | throwError "step {u.number} records skolems but states no formula"
@@ -105,6 +119,7 @@ private partial def bindIntroduced : ReconstructM PUnit := do
         (Std.HashMap.ofList u.skolems.toList) {} f
   let mut pending := proof.units.filter fun u =>
     (u.rule?.map Definition.introducesName).getD false || !u.skolems.isEmpty
+      || !u.namings.isEmpty
   repeat
     let mut progressed := false
     let mut again := #[]
