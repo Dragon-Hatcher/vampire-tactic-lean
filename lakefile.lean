@@ -6,15 +6,15 @@ package vampire
 
 require "leanprover-community" / "mathlib" @ git "v4.33.1"
 
-/-- The vampire checkout to build against: `$VAMPIRE_DIR`, else the submodule. -/
+/-- The vampire checkout to build against: `$VAMPIRE_DIR`, else `../vampire-fork`. -/
 def vampireSourceDir (pkgDir : FilePath) : IO FilePath := do
   match ← IO.getEnv "VAMPIRE_DIR" with
   | some dir => return dir
   | none =>
-    let dir := pkgDir / "vampire"
+    let dir := pkgDir.parent.getD pkgDir / "vampire-fork"
     unless ← (dir / "CMakeLists.txt").pathExists do
-      error s!"no vampire sources at {dir}; run \
-        `git submodule update --init --recursive`, \
+      error s!"no vampire sources at {dir}; clone the fork there \
+        (`git clone --recurse-submodules <fork> vampire-fork`), \
         or set VAMPIRE_DIR to a vampire checkout"
     return dir
 
