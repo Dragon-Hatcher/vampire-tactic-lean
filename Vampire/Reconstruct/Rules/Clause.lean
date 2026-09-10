@@ -30,19 +30,56 @@ def instantiateAt (parent : Vampire.Unit) (vars : Vars) (proof stated : Expr) :
     | none => args := args.push (← someElement (← sortType sortName))
   return (mkAppN proof args, ← instantiateForall stated args)
 
-/-- A step whose conclusion restates its premise's literals. -/
+/--
+A step whose conclusion restates its premise's literals.
+
+The literals are taken as vampire has them rather than found by taking the
+clause apart: a literal naming a subformula stands for a whole formula, and the
+disjuncts of what it rebuilds to are not literals of the clause.
+-/
 def literals (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
+  let #[(premiseProof, _)] := step.premises
     | throwError "expected one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
     | throwError "expected a premise"
+  let some source := parent.clause?
+    | throwError "expected a clause"
+  let some conclusion := step.unit.clause?
+    | throwError "expected a clause"
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
-    let mut vars : Vars := {}
+    let mut kept : Vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
-    let (proof, stated) ← instantiateAt parent vars premiseProof premiseStated
-    mkLambdaFVars xs (mkApp (← implies stated target) proof)
+      kept := kept.insert v x
+    -- Dropping a literal can drop the last occurrence of a variable with it.
+    let vars ← coverVars parent kept
+    let mut args := #[]
+    for (v, sortName) in parent.varSorts do
+      match vars[v]? with
+      | some x => args := args.push x
+      | none => args := args.push (← someElement (← sortType sortName))
+    let sourceParts ← source.literals.mapM (Reconstruct.literal vars)
+    let targetParts ← conclusion.literals.mapM (Reconstruct.literal vars)
+    let body ← elimGiven sourceParts (fun _ h => do
+      -- Every literal the step kept is one of the conclusion's; one it dropped
+      -- has to be refutable on its own, as `t ≠ t` is.
+      let stated ← instantiateMVars (← inferType h)
+      for candidate in #[h] ++ (← doubleNegations h) ++
+          ((← flipEquality h).toArray) do
+        let says ← instantiateMVars (← inferType candidate)
+        for (part, i) in targetParts.zipIdx do
+          if ← isDefEq part says then
+            return ← injectGiven targetParts i candidate
+      if let some inner := asNegation stated then
+        if let some (_, lhs, rhs) := inner.eq? then
+          if ← isDefEq lhs rhs then
+            return ← mkAppOptM ``absurd
+              #[some inner, some target, some (← mkEqRefl lhs), some h]
+      if stated.isConstOf ``False then
+        return ← mkAppOptM ``False.elim #[some target, some h]
+      throwError "the literal{indentExpr stated}\nis neither among        {indentExpr target}\nnor refutable on its own")
+      (mkAppN premiseProof args)
+    mkLambdaFVars xs body
 
 /--
 `polarity_flipping`: nothing, once the predicates it flipped are read as

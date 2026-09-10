@@ -39,4 +39,21 @@ def unfolded (step : Step) : ReconstructM Expr := do
     return proof
   mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
 
+/--
+`pure_predicate_removal`: a formula with what a pure predicate says left out.
+
+`PredicateDefinition` replaces a predicate that only ever occurs one way round
+by the truth value that way round gives, and simplifies what is left: a
+conjunct that became `⊤` goes, and a disjunct that did takes the disjunction
+with it. What remains is what the premise said, less some of it, which is what
+`implies` settles by looking each part up.
+-/
+def weakened (step : Step) : ReconstructM Expr := do
+  let #[(proof, stated)] := step.premises
+    | throwError "expected one premise, got {step.premises.size}"
+  let conclusion ← step.conclusion
+  if ← isDefEq (← instantiateMVars stated) conclusion then
+    return proof
+  return mkApp (← implies (← instantiateMVars stated) conclusion) proof
+
 end Vampire.Reconstruct.Congruence

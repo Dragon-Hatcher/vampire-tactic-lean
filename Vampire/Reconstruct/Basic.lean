@@ -617,6 +617,14 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       return ← withLocalDeclD `h source fun h => do
         mkLambdaFVars #[h] (← introParts target 0 fun j => do
           return mkApp (← implies source parts[j]!) h)
+    -- What the source says of each of its conjuncts, when the target is one of
+    -- them: a rule that leaves a conjunct out keeps the rest in place.
+    if source.isAppOfArity ``And 2 && !target.isAppOfArity ``And 2 then
+      let conjuncts := junctionParts ``And source
+      for (conjunct, i) in conjuncts.zipIdx do
+        if ← isDefEq conjunct target then
+          return ← withLocalDeclD `h source fun h => do
+            mkLambdaFVars #[h] (← projectPart ``And source i h)
     let parts := junctionParts ``Or target
     let index := parts.zipIdx.foldl (init := ({} : Std.HashMap Expr Nat))
       fun acc (p, i) => acc.insert p i
