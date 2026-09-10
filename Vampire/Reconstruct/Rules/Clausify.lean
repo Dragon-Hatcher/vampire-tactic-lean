@@ -353,7 +353,26 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
     | throwError "a clausification step replaced a position that is not there"
   unless skolemises (← connectiveOf replaced) sign do return
   let bound := boundOf sorts replaced
-  withVars (sorts.filter fun (v, _) => !bound.any (·.1 == v)) {} fun vars _ =>
+  -- A variable the quantifier's body mentions is either an argument of the
+  -- symbols being introduced, and stands for itself, or one the clause has
+  -- already bound, and stands for what it was bound to -- which is why the
+  -- symbol does not take it as an argument.
+  let bindings := Std.HashMap.ofList parent.bindings.toList
+  let arguments := sorts.filter fun (v, _) =>
+    !bound.any (·.1 == v) && !bindings.contains v
+  withVars arguments {} fun vars _ => do
+    let mut vars := vars
+    -- A binding can stand on another, so keep reading them until none is left.
+    let mut pending := parent.bindings
+    repeat
+      let before := pending.size
+      let mut again := #[]
+      for (v, image) in pending do
+        match ← (try pure (some (← term vars image)) catch _ => pure none) with
+        | some e => vars := vars.insert v e
+        | none => again := again.push (v, image)
+      pending := again
+      if pending.isEmpty || pending.size == before then break
     registerBlock sorts sign skolems vars replaced
 
 def registerSkolemsOf (u : Vampire.Unit) : ReconstructM PUnit := do

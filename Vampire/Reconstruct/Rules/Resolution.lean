@@ -51,7 +51,9 @@ def resolution (step : Step) : ReconstructM Expr := do
         unless j == resolved₂.toNat do
           return ← place h₂
         let (positive, negative) ←
-          if (← inferType h₁).not?.isSome then pure (h₂, h₁) else pure (h₁, h₂)
+          if (asNegation (← instantiateMVars (← inferType h₁))).isSome then
+            pure (h₂, h₁)
+          else pure (h₁, h₂)
         mkAppOptM ``absurd
           #[some (← inferType positive), some target, some positive, some negative])
         p₂) p₁

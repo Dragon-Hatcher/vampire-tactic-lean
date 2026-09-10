@@ -65,14 +65,14 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
           let some candidate := candidate | continue
           let stated ← instantiateMVars (← inferType candidate)
           let complementary ←
-            match stated.not?, removed.not? with
+            match asNegation stated, asNegation removed with
             | some inner, _ => isDefEq inner removed
             | _, some inner => isDefEq inner stated
             | _, _ => pure false
           unless complementary do
             continue
           let (positive, negative) :=
-            if stated.not?.isSome then (h, candidate) else (candidate, h)
+            if (asNegation stated).isSome then (h, candidate) else (candidate, h)
           return ← mkAppOptM ``absurd
             #[some (← inferType positive), some target, some positive, some negative]
         place hSide)

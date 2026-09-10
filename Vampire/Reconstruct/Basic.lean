@@ -99,10 +99,19 @@ def asNegation (e : Expr) : Option Expr :=
   match e.not? with
   | some inner => some inner
   | none =>
-    match e with
-    | .forallE _ d body _ =>
-      if body.isConstOf ``False && !body.hasLooseBVars then some d else none
-    | _ => none
+    -- `a ≠ b` is the same thing again, and a proof built by `Ne.symm` states
+    -- itself that way.
+    if e.isAppOfArity ``Ne 3 then
+      match e.getAppFn with
+      | .const _ levels =>
+        let args := e.getAppArgs
+        some (mkAppN (.const ``Eq levels) args)
+      | _ => none
+    else
+      match e with
+      | .forallE _ d body _ =>
+        if body.isConstOf ``False && !body.hasLooseBVars then some d else none
+      | _ => none
 
 /-- The name of the negation of what `name` names. -/
 def flippedName (name : String) : String :=
