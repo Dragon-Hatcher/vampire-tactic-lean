@@ -124,6 +124,9 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let some outcome := outcome
       | throwError "vampire reported a refutation but produced no proof"
     unless outcome.unimplemented.isEmpty do
+      -- The proof term holds a `sorry` for each of these, so say so rather
+      -- than leaving the goal looking closed.
+      logWarning m!"vampire's proof was replayed except for         {outcome.unimplemented}, which are admitted"
       trace[vampire] "admitted rules: {outcome.unimplemented}"
     query.preprocessed.goal.assign outcome.proof
     mv.assign (.mvar query.copy)
