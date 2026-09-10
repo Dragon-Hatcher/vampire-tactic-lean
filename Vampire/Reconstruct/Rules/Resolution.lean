@@ -31,9 +31,13 @@ def resolution (step : Step) : ReconstructM Expr := do
       {parent₂.number}"
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
-    let mut vars : Vars := {}
+    let mut kept : Vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+      kept := kept.insert v x
+    -- Resolving away the last literal a variable occurs in leaves it out of
+    -- the conclusion, while the unifier still speaks of it; such a variable
+    -- stands for an arbitrary element, the same one wherever it is met.
+    let vars ← coverVars parent₂ (← coverVars parent₁ kept)
     let (p₁, t₁) ← instantiateAt parent₁ use₁ vars proof₁ stated₁
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps

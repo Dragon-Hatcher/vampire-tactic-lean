@@ -708,6 +708,25 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
     return ← mkAppM ``not_congr #[← equivNormal ia ib]
   if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
     return ← mkAppM ``iff_congr #[← equivNormal a₁ b₁, ← equivNormal a₂ b₂]
+  -- Rectification drops a quantifier over a variable its body never mentions,
+  -- so one side can carry a binder the other does not.
+  for (x, y) in [(a, b), (b, a)] do
+    if let .forallE _ d body _ := x then
+      unless (← isProp d) && !body.hasLooseBVars do
+        if !body.hasLooseBVars && !(y matches .forallE ..) then
+          let dropped ← mkAppOptM ``forall_const
+            #[some body, some d, some (← nonempty d)]
+          let related ← if x == a then equivNormal body y else equivNormal y body
+          return ← if x == a then mkAppM ``Iff.trans #[dropped, related]
+            else mkAppM ``Iff.trans #[related, ← mkAppM ``Iff.symm #[dropped]]
+    if x.isAppOfArity ``Exists 2 && !(y.isAppOfArity ``Exists 2) then
+      if let .lam _ d body _ := x.appArg! then
+        unless body.hasLooseBVars do
+          let dropped ← mkAppOptM ``exists_const
+            #[some body, some d, some (← nonempty d)]
+          let related ← if x == a then equivNormal body y else equivNormal y body
+          return ← if x == a then mkAppM ``Iff.trans #[dropped, related]
+            else mkAppM ``Iff.trans #[related, ← mkAppM ``Iff.symm #[dropped]]
   match a, b with
   | .forallE _ ad ab _, .forallE _ bd bb _ =>
     if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
