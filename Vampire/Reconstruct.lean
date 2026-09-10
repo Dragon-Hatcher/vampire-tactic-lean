@@ -21,9 +21,18 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
     return p
   let some rule := u.rule?
     | throwError "step {u.number} has unknown inference rule {u.ruleIndex}"
-  let conclusion ← conclusion u
+  -- Premises first: a name vampire introduced is defined by a step that
+  -- splitting and definition introduction both place among the premises of
+  -- every step using it, so replaying those binds it before it is needed here.
   let premises ← u.parents.mapM fun parent => do
     return (← step parent, ← conclusion' parent)
+  -- A definition step states its own conclusion in the name it introduces, so
+  -- bind that before reading the conclusion back.
+  match rule with
+  | .functionDefinition => registerFunctionDefinition u
+  | .avatarDefinition => registerAvatarDefinition u
+  | _ => pure ()
+  let conclusion ← conclusion u
   let proof ← ofRule { unit := u, rule, conclusion, premises }
   -- The rules are trusted to return a proof of what the step claims; check it,
   -- so a wrong implementation is caught here rather than at `assign`.
