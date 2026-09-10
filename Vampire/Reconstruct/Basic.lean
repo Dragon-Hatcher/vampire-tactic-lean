@@ -962,6 +962,28 @@ def witnessAgainst (against : Expr) : ReconstructM (Expr × Expr) := do
   let (witness, choice) ← epsilon τ refuting
   return (witness, ← mkAppM ``Iff.mp #[choice, existence])
 
+/-- `a` with its double negations stripped, and that it says the same. -/
+private partial def strippedOf (a : Expr) : ReconstructM (Expr × Expr) := do
+  if let some inner := a.not? then
+    if let some innermost := inner.not? then
+      let (stripped, proof) ← strippedOf innermost
+      return (stripped, ← mkAppM ``Iff.trans
+        #[← mkAppOptM ``Classical.not_not #[some innermost], proof])
+  return (a, ← mkAppOptM ``Iff.refl #[some a])
+
+/--
+`a ↔ b`, when the two differ only by double negations.
+
+Clausification records what it put in a clause before its own normalisation
+has unwrapped a negation into the sign it carries, so the two can meet with a
+double negation between them.
+-/
+def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
+  let (strippedA, saysA) ← strippedOf a
+  let (strippedB, saysB) ← strippedOf b
+  unless ← isDefEq strippedA strippedB do return none
+  return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])
+
 /--
 `target` from two complementary literals.
 

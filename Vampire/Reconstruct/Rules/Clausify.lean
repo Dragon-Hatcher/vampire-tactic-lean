@@ -146,9 +146,15 @@ private partial def prove (r : Replay) (c : GenClause) : ReconstructM Expr := do
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
       let refuted (e : Expr) : ReconstructM Expr := do
-        let i ← indexOfPart parts e
-        withLocalDeclD `p e fun p => do
-          mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
+        -- What a step put in a clause is recorded before the clausifier's own
+        -- normalisation has unwrapped a negation into the sign it carries.
+        for (part, i) in parts.zipIdx do
+          let some says ← sameUpToDoubleNegation part e | continue
+          let refutation ← withLocalDeclD `p part fun p => do
+            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
+          return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], refutation]
+        throwError "the clause does not say{indentExpr e}\nwhich a step it was \
+          reached from does"
       let body ←
         match c.parent? with
         | none => root r parts refuted
