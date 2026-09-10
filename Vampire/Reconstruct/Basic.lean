@@ -1068,7 +1068,9 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       match vars[v]? with
       | some x => args := args.push x
       | none => args := args.push (← someElement (← sortType sortName))
-    let sourceParts ← source.literals.mapM (Reconstruct.literal vars)
+    -- The premise's literals are read as the premise means them: polarity
+    -- flipping divides the proof, and this step can be the line itself.
+    let sourceParts ← reading parent (source.literals.mapM (literal vars))
     let targetParts ← conclusion.literals.mapM (Reconstruct.literal vars)
     let body ← elimGiven sourceParts (fun _ h => do
       -- Every literal the step kept is one of the conclusion's; one it dropped
