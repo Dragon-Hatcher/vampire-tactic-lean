@@ -286,7 +286,9 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
           let (unfolded, proof) ← unfold defs vars arg
           args := args.push unfolded
           congruence ← mkCongr congruence proof
-        let atom ← if l.polarity then pure congruence else mkCongrArg (mkConst ``Not) congruence
+        let atom ←
+          if ← literalPolarity l then pure congruence
+          else mkCongrArg (mkConst ``Not) congruence
         place (← mkAppM ``Eq.mp #[atom, h]))
       (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
         match vars[v]? with

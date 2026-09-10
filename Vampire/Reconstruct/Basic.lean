@@ -11,6 +11,22 @@ structure Context where
   /-- What the TPTP names in the proof stand for. -/
   symbols : Symbols
   proof : Proof
+  /--
+  The number of the first step polarity flipping made, or zero if it never ran:
+  the steps from there on mean the opposite by the predicates it flipped.
+  -/
+  flipped : UInt32 := 0
+  /--
+  Whether the step being read is one of those polarity flipping has been
+  through.
+
+  Flipping picks a set of predicates and replaces every literal of every clause
+  over them by its complement, all at once. It says nothing, then, about the
+  clauses -- it says that those predicates now mean the opposite of what they
+  did. So a step after it is read with the polarity of a flipped predicate's
+  literals inverted, which is what makes the flipping itself say nothing.
+  -/
+  flipping : Bool := false
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/
@@ -155,9 +171,23 @@ partial def term (vars : Vars) (t : Term) : ReconstructM Expr := do
     | throwError "term has unknown functor {t.functor}"
   return mkAppN (← symbolExpr symbol.name) (← t.args.mapM (term vars))
 
+/--
+Whether a literal occurs positively, as the step it belongs to means it.
+
+Polarity flipping leaves a flipped predicate meaning the opposite of what it
+did, so a literal over one occurs the other way round in the steps after it.
+-/
+def literalPolarity (l : Literal) : ReconstructM Bool := do
+  if (← read).flipping then
+    if let some symbol := l.symbol? then
+      if symbol.flipped then
+        return !l.polarity
+  return l.polarity
+
 /-- Rebuilds a vampire literal as a Lean proposition. -/
 def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
   let args ← l.args.mapM (term vars)
+  let polarity ← literalPolarity l
   let atom ←
     if l.isEquality then
       let some sortName := l.sort?
@@ -169,7 +199,7 @@ def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       pure (mkAppN (← symbolExpr symbol.name) args)
-  return if l.polarity then atom else mkApp (mkConst ``Not) atom
+  return if polarity then atom else mkApp (mkConst ``Not) atom
 
 /--
 Folds an n-ary junction, right-associated as Lean writes them. Vampire's
@@ -676,6 +706,15 @@ def equiv (a b : Expr) : ReconstructM Expr := do
     #[pa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[pb]]]
 
 /--
+Reads a step the way that step means it: polarity flipping divides the proof
+into the steps before it and the steps after it, which mean the opposite by the
+predicates it flipped.
+-/
+def reading (u : Vampire.Unit) (k : ReconstructM α) : ReconstructM α :=
+  withReader (fun c =>
+    { c with flipping := c.flipped != 0 && u.number >= c.flipped }) k
+
+/--
 The Lean proposition a step asserts. A clause is implicitly universally
 quantified over its variables; a formula carries its own binders.
 
@@ -706,7 +745,7 @@ why it is taken on demand rather than handed to the rule ready-made.
 def conclusionOf (u : Vampire.Unit) : ReconstructM Expr := do
   if let some c := (← get).conclusions[u.number]? then
     return c
-  let c ← buildConclusion u
+  let c ← reading u (buildConclusion u)
   modify fun s => { s with conclusions := s.conclusions.insert u.number c }
   return c
 

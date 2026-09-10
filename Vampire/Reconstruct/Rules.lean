@@ -51,12 +51,12 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .removeDuplicateLiterals => Clause.literals step
   | .trivialInequalityRemoval => Clause.literals step
   | .reorientEquations => Clause.literals step
+  | .polarityFlipping => Clause.polarityFlipping step
   | .flatten => Congruence.restated step
   | .rectify => Congruence.restated step
   | .definitionFolding => Congruence.unfolded step
 
   -- Not implemented yet.
-  | .polarityFlipping => unimplemented step
   | .genericFormulaClauseTransformation => unimplemented step
   | .negatedConjecture => unimplemented step
   | .answerLiteralInjection => unimplemented step

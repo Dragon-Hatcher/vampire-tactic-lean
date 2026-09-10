@@ -101,17 +101,26 @@ structure Proof where
   private layout : Layout
   /-- Why vampire stopped. -/
   terminationReason : TerminationReason
+  /--
+  The number of the first step polarity flipping made, or zero if it never ran.
+
+  Flipping replaces every clause of the problem over the predicates it picks by
+  their complements, which says nothing about the clauses: it says that those
+  predicates now mean the opposite of what they did. So the proof divides in
+  two here, the halves disagreeing over what those predicates mean.
+  -/
+  polarityFlipBoundary : UInt32
 deriving Inhabited
 
 namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 9
+private def version : UInt32 := 11
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 28 * 4 then
+  if data.size < 29 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -146,9 +155,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numBindings := word 24
   let stringsLen := word 25
   let proofTextLen := word 26
-  let functions := 28 * 4
+  let functions := 29 * 4
   let predicates := functions + numFunctions * 2 * 4
-  let sorts := predicates + numPredicates * 2 * 4
+  let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
   let args := terms + numTerms * 4 * 4
   let literals := args + numArgs * 4
@@ -178,6 +187,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     (readU32 data 8) "termination reason"
   return {
     data, terminationReason := reason
+    polarityFlipBoundary := readU32 data (28 * 4)
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
@@ -208,6 +218,11 @@ end Proof
 structure Symbol where
   name : String
   arity : UInt32
+  /--
+  Whether polarity flipping flipped this predicate, so that every clause after
+  it means the opposite by the predicate than the ones before it do.
+  -/
+  flipped : Bool := false
 deriving Repr, Inhabited
 
 /-- A term: a variable, or a functor applied to arguments. -/
@@ -295,8 +310,9 @@ def function? (p : Proof) (functor : UInt32) : Option Symbol :=
 def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
   if predicate.toNat >= p.layout.numPredicates then none
   else some {
-    name := p.string (p.field p.layout.predicates 2 predicate.toNat 0)
-    arity := p.field p.layout.predicates 2 predicate.toNat 1
+    name := p.string (p.field p.layout.predicates 3 predicate.toNat 0)
+    arity := p.field p.layout.predicates 3 predicate.toNat 1
+    flipped := p.field p.layout.predicates 3 predicate.toNat 2 != 0
   }
 
 /-- The name of the sort vampire numbers `i`. -/

@@ -161,10 +161,19 @@ private partial def propagate (origins : Std.HashMap UInt32 (Expr × Expr))
     match known[flippedName name]? with
     | some negated =>
       -- The literal is already false, so this case cannot arise. Which of the
-      -- two is the negation is up to which of the two names carries it.
-      let (positive, negation) :=
-        if (← instantiateMVars (← inferType h)).not?.isSome then (negated, h)
-        else (h, negated)
+      -- two proofs is the negation of the other is settled by comparing them:
+      -- a name and its negation are two names, and either may carry the
+      -- negation.
+      let stated ← instantiateMVars (← inferType h)
+      let refuting ← instantiateMVars (← inferType negated)
+      let (positive, negation) ←
+        if ← isDefEq refuting (mkApp (mkConst ``Not) stated) then
+          pure (h, negated)
+        else if ← isDefEq stated (mkApp (mkConst ``Not) refuting) then
+          pure (negated, h)
+        else
+          throwError "neither of{indentExpr stated}\nand{indentExpr refuting}\n\
+            is the negation of the other"
       mkAppOptM ``absurd
         #[some (← inferType positive), some (mkConst ``False), some positive,
           some negation]

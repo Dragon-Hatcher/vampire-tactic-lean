@@ -73,7 +73,7 @@ private def literalAbstracting (vars : Vars) (bindings : Std.HashMap UInt32 Term
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       pure (mkAppN (← symbolExpr symbol.name) args)
-  return if l.polarity then atom else mkApp (mkConst ``Not) atom
+  return if ← literalPolarity l then atom else mkApp (mkConst ``Not) atom
 
 /--
 The equation a premise use points at, as an oriented rewrite: the side the

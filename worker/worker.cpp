@@ -12,9 +12,12 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    28 words, see `write`
+ *   header    29 words, see `write`
  *   functions {nameOff, arity}          -- indexed by a term's functor
- *   predicates{nameOff, arity}          -- indexed by a literal's predicate
+ *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
+ *             flags: 1 = polarity flipping flipped this predicate, so that
+ *             every clause after it means the opposite by the predicate than
+ *             the ones before it do
  *   sorts     {nameOff}                 -- vampire's type constructors
  *   terms     {tag, value, firstArg, arity}   tag: 0 = variable, 1 = functor
  *   args      term indices, shared by terms and literals
@@ -123,7 +126,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 9;
+const uint32_t VERSION = 11;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
@@ -156,6 +159,7 @@ struct Encoder {
       Signature::Symbol* sym = env.signature->getPredicate(i);
       predicates.push_back(addString(sym->name()));
       predicates.push_back(sym->arity());
+      predicates.push_back(sym->wasFlipped() ? 1 : 0);
     }
   }
 
@@ -514,7 +518,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, refutation == NONE ? 0 : 1);
   putWord(buf, refutation);
   putWord(buf, static_cast<uint32_t>(enc.functions.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.predicates.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.predicates.size() / 3));
   putWord(buf, static_cast<uint32_t>(enc.sorts.size()));
   putWord(buf, static_cast<uint32_t>(enc.terms.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.args.size()));
@@ -538,6 +542,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   // Lets the Lean side notice that its generated `InferenceRule` is stale.
   putWord(buf, static_cast<uint32_t>(
     InferenceRule::FUNCTIONAL_EXTENSIONALITY_AXIOM) + 1);
+  putWord(buf, InferenceStore::instance()->polarityFlipBoundary());
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);

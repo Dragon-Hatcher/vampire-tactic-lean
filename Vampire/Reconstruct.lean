@@ -20,7 +20,7 @@ structure Outcome where
 Replays a step, after its premises. Steps are shared, so each is replayed once
 and remembered by vampire's number for it.
 -/
-partial def step (u : Vampire.Unit) : ReconstructM Expr := do
+partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
   if let some p := (← get).proofs[u.number]? then
     return p
   let some rule := u.rule?
@@ -130,7 +130,7 @@ def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
     bindIntroduced
     let term ← step refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray }
-  let (outcome, _) ← (go.run { symbols, proof }).run {}
+  let (outcome, _) ← (go.run { symbols, proof, flipped := proof.polarityFlipBoundary }).run {}
   return some outcome
 
 end Vampire.Reconstruct
