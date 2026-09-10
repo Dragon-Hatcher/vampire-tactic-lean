@@ -812,6 +812,24 @@ def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
   return none
 
 /--
+The same literal with a double negation taken off, or put on.
+
+A name and its negation are two names, and polarity flipping leaves a literal
+meaning the opposite of what it did, so the two can meet with one negation
+between them either way round.
+-/
+def doubleNegations (h : Expr) : ReconstructM (Array Expr) := do
+  let stated ← instantiateMVars (← inferType h)
+  let mut out := #[]
+  if let some inner := stated.not? then
+    if let some innermost := inner.not? then
+      out := out.push (← mkAppM ``Iff.mp
+        #[← mkAppOptM ``Classical.not_not #[some innermost], h])
+  out := out.push (← mkAppM ``Iff.mpr
+    #[← mkAppOptM ``Classical.not_not #[some stated], h])
+  return out
+
+/--
 A proof of `target` from one of its literals, found by lookup.
 
 A simplifying or generating inference carries every literal it did not act on
@@ -819,7 +837,7 @@ into the conclusion unchanged, so where the literal lands is not searched for.
 -/
 def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
   let parts := junctionParts ``Or target
-  for candidate in #[some h, ← flipEquality h] do
+  for candidate in #[some h, ← flipEquality h] ++ (← doubleNegations h).map some do
     let some candidate := candidate | continue
     let stated ← instantiateMVars (← inferType candidate)
     for (part, i) in parts.zipIdx do
