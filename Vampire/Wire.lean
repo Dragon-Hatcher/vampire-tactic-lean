@@ -27,6 +27,8 @@ private structure Layout where
   parents : Nat
   varSorts : Nat
   skolems : Nat
+  uses : Nat
+  bindings : Nat
   strings : Nat
   proofText : Nat
   numFunctions : Nat
@@ -101,11 +103,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 4
+private def version : UInt32 := 5
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 22 * 4 then
+  if data.size < 24 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -113,7 +115,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 21
+  let numRules := word 23
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -132,9 +134,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numParents := word 16
   let numVarSorts := word 17
   let numSkolems := word 18
-  let stringsLen := word 19
-  let proofTextLen := word 20
-  let functions := 22 * 4
+  let numUses := word 19
+  let numBindings := word 20
+  let stringsLen := word 21
+  let proofTextLen := word 22
+  let functions := 24 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 2 * 4
   let terms := sorts + numSorts * 4
@@ -144,11 +148,13 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 13 * 4
+  let unitLits := units + numUnits * 15 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
-  let strings := skolems + numSkolems * 2 * 4
+  let uses := skolems + numSkolems * 2 * 4
+  let bindings := uses + numUses * 4 * 4
+  let strings := bindings + numBindings * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -162,7 +168,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     data, terminationReason := reason
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
-      units, unitLits, parents, varSorts, skolems, strings, proofText, numFunctions,
+      units, unitLits, parents, varSorts, skolems, uses, bindings, strings,
+      proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -214,6 +221,21 @@ structure Clause where
   private mk ::
   private proof : Proof
   private idx : UInt32
+
+/--
+How a step used one of its premises: which of that premise's literals the
+inference acted on, and what the unifier bound each of its variables to.
+
+A generating inference discards the substitution it computes, so without this a
+reconstruction would have to recover it by matching the conclusion back against
+the premises.
+-/
+structure PremiseUse where
+  /-- Vampire's number for the premise. -/
+  premise : UInt32
+  /-- Index of the literal the inference acted on. -/
+  literal : Option UInt32
+  bindings : Array (UInt32 × Term)
 
 /-- A step in the derivation: a clause or formula, and how it was inferred. -/
 structure Unit where
@@ -350,8 +372,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 13 c.idx.toNat 4
-  let count := p.field p.layout.units 13 c.idx.toNat 5
+  let first := p.field p.layout.units 15 c.idx.toNat 4
+  let count := p.field p.layout.units 15 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -444,7 +466,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 13 u.idx.toNat off
+  u.proof.field u.proof.layout.units 15 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -508,6 +530,22 @@ It says which hypothesis an `input` step restates.
 def name? (u : Unit) : Option String :=
   let off := u.field 12
   if off == none32 then none else some (u.proof.string off)
+
+/-- How this step used each of its premises. -/
+def premiseUses (u : Unit) : Array PremiseUse :=
+  let p := u.proof
+  let first := u.field 13
+  let count := u.field 14
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.uses + (first.toNat + i.val) * 4 * 4
+    let literal := readU32 p.data (base + 4)
+    let firstBinding := readU32 p.data (base + 8)
+    let numBindings := readU32 p.data (base + 12)
+    { premise := readU32 p.data base
+      literal := if literal == none32 then none else some literal
+      bindings := Array.ofFn (n := numBindings.toNat) fun j =>
+        let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
+        (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩) }
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=

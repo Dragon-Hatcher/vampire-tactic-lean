@@ -5,6 +5,7 @@ import Vampire.Reconstruct.Rules.Congruence
 import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
 import Vampire.Reconstruct.Rules.Input
+import Vampire.Reconstruct.Rules.Resolution
 import Vampire.Reconstruct.Rules.Skolem
 
 namespace Vampire.Reconstruct
@@ -28,6 +29,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .skolemize => Skolem.skolemize step
   | .clausify => Clausify.clausify step
   | .input => Input.input step
+  | .resolution => Resolution.resolution step
   | .removeDuplicateLiterals => Clause.literals step
   | .trivialInequalityRemoval => Clause.literals step
   | .reorientEquations => Clause.literals step
@@ -101,7 +103,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .functionDefinitionDemodulation => unimplemented step
   | .genericSimplifyingInferenceLast => unimplemented step
   | .genericGeneratingInference => unimplemented step
-  | .resolution => unimplemented step
   | .constrainedResolution => unimplemented step
   | .factoring => unimplemented step
   | .constrainedFactoring => unimplemented step

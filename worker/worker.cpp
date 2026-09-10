@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    22 words, see `write`
+ *   header    24 words, see `write`
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity}          -- indexed by a literal's predicate
  *   sorts     {nameOff}                 -- vampire's type constructors
@@ -30,7 +30,7 @@
  *   vars      variable numbers of quantified formulas
  *   units     {number, rule, inputType, flags, payload, numLits,
  *              firstParent, numParents, firstVarSort, numVarSorts,
- *              firstSkolem, numSkolems, name}
+ *              firstSkolem, numSkolems, name, firstUse, numUses}
  *             `name` is the string offset of the name the input gave this
  *             formula, and `NONE` for anything vampire derived. It says which
  *             hypothesis an `input` step restates, so replay need not search
@@ -42,6 +42,14 @@
  *   varSorts  {variable, sort} pairs, giving the sorts a unit's free
  *             variables take -- a clause is implicitly universally quantified
  *             over them, so rebuilding it needs their sorts
+ *   uses      {premise, literal, firstBinding, numBindings}: how a generated
+ *             clause used one of its premises. `premise` is that premise's
+ *             number, `literal` the index of the literal the inference acted
+ *             on or `NONE`. A generating inference discards the unifier it
+ *             computes, so without this a reconstruction would have to
+ *             recover it by matching the conclusion against the premises.
+ *   bindings  {variable, term} pairs: what the unifier bound each of a
+ *             premise's variables to
  *   skolems   {variable, term} pairs: the existential variable a skolemisation
  *             step replaced, and the term it became. Skolemisation works on
  *             NNF rather than prenex input and a skolem takes only the
@@ -88,12 +96,13 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 4;
+const uint32_t VERSION = 5;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
-      formulas, subs, vars, units, unitLits, parents, varSorts, skolems;
+      formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
+      bindings;
   std::string strings;
   std::string proofText;
 
@@ -278,8 +287,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 13);
-    units.resize(units.size() + 13, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 15);
+    units.resize(units.size() + 15, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -342,19 +351,40 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[13 * idx + 0] = u->number();
-    units[13 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[13 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[13 * idx + 3] = flags;
-    units[13 * idx + 4] = payload;
-    units[13 * idx + 5] = numLits;
-    units[13 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[13 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[13 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[13 * idx + 9] = numVarSorts;
-    units[13 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[13 * idx + 11] = numSkolems;
-    units[13 * idx + 12] = nameOff;
+    units[15 * idx + 0] = u->number();
+    units[15 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[15 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[15 * idx + 3] = flags;
+    units[15 * idx + 4] = payload;
+    units[15 * idx + 5] = numLits;
+    units[15 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[15 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[15 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[15 * idx + 9] = numVarSorts;
+    units[15 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[15 * idx + 11] = numSkolems;
+    units[15 * idx + 12] = nameOff;
+
+    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 4);
+    uint32_t numUses = 0;
+    if (const Stack<InferenceStore::PremiseUse>* recorded =
+          InferenceStore::instance()->premiseUses(u)) {
+      for (const auto& use : *recorded) {
+        uint32_t firstBinding = static_cast<uint32_t>(bindings.size() / 2);
+        for (const auto& [var, term] : use.bindings) {
+          bindings.push_back(var);
+          bindings.push_back(encodeTerm(term));
+        }
+        uses.push_back(use.premise);
+        uses.push_back(use.literal == InferenceStore::literalNone ? NONE
+                                                                  : use.literal);
+        uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
+        uses.push_back(static_cast<uint32_t>(use.bindings.size()));
+        numUses++;
+      }
+    }
+    units[15 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[15 * idx + 14] = numUses;
     return idx;
   }
 };
@@ -399,11 +429,13 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 13));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 15));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.skolems.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 4));
+  putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
   putWord(buf, static_cast<uint32_t>(enc.proofText.size()));
   // Lets the Lean side notice that its generated `InferenceRule` is stale.
@@ -424,6 +456,8 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.parents);
   putWords(buf, enc.varSorts);
   putWords(buf, enc.skolems);
+  putWords(buf, enc.uses);
+  putWords(buf, enc.bindings);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 
