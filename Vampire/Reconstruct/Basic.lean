@@ -82,12 +82,20 @@ def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
       pure (mkAppN (← symbolExpr symbol.name) args)
   return if l.polarity then atom else mkApp (mkConst ``Not) atom
 
+/--
+Folds an n-ary junction, right-associated as Lean writes them. Vampire's
+conjunctions and disjunctions take any number of arguments, and an empty one is
+the connective's unit.
+-/
+def junction (fn unit : Name) (args : Array Expr) : Expr :=
+  if args.isEmpty then
+    mkConst unit
+  else
+    args.pop.foldr (fun a acc => mkApp2 (mkConst fn) a acc) args.back!
+
 /-- Rebuilds a clause as the disjunction of its literals. -/
 def clause (vars : Vars) (c : Clause) : ReconstructM Expr := do
-  let literals ← c.literals.mapM (literal vars)
-  match literals.toList with
-  | [] => return mkConst ``False
-  | l :: rest => return rest.foldl (fun acc l => mkApp2 (mkConst ``Or) acc l) l
+  return junction ``Or ``False (← c.literals.mapM (literal vars))
 
 /-- Introduces a local for each variable in `sorts`, in order. -/
 def withVars (sorts : Array (UInt32 × String)) (vars : Vars)
@@ -107,6 +115,7 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
   let sub (i : Nat) : ReconstructM Expr := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     formula sorts vars g
+  let all : ReconstructM (Array Expr) := f.subformulas.mapM (formula sorts vars)
   let binary (fn : Name) : ReconstructM Expr :=
     return mkApp2 (mkConst fn) (← sub 0) (← sub 1)
   let quantified (bind : Array Expr → Expr → ReconstructM Expr) : ReconstructM Expr := do
@@ -127,8 +136,8 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
   | .«true» => return mkConst ``True
   | .«false» => return mkConst ``False
   | .not => return mkApp (mkConst ``Not) (← sub 0)
-  | .and => return mkApp2 (mkConst ``And) (← sub 0) (← sub 1)
-  | .or => return mkApp2 (mkConst ``Or) (← sub 0) (← sub 1)
+  | .and => return junction ``And ``True (← all)
+  | .or => return junction ``Or ``False (← all)
   | .imp => mkArrow (← sub 0) (← sub 1)
   | .iff => binary ``Iff
   | .xor => return mkApp (mkConst ``Not) (← binary ``Iff)
