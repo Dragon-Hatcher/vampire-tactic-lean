@@ -34,6 +34,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .clausify => Clausify.clausify step
   | .input => Input.input step
   | .resolution => Resolution.resolution step
+  | .equalityResolutionWithDeletion =>
+    Resolution.equalityResolutionWithDeletion step
   | .ennf => Normalize.ennf step
   | .nnf => Normalize.nnf step
   | .forwardSubsumptionResolution => Subsumption.subsumptionResolution step
@@ -62,7 +64,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .genericFormulaClauseTransformationLast => unimplemented step
   | .genericSimplifyingInference => unimplemented step
   | .reorderLiterals => unimplemented step
-  | .equalityResolutionWithDeletion => unimplemented step
   | .subsumptionEqualityResolution => unimplemented step
   | .backwardDemodulation => unimplemented step
   | .alascaFwdDemodulation => unimplemented step
