@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    25 words, see `write`
+ *   header    28 words, see `write`
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity}          -- indexed by a literal's predicate
  *   sorts     {nameOff}                 -- vampire's type constructors
@@ -31,7 +31,9 @@
  *   units     {number, rule, inputType, flags, payload, numLits,
  *              firstParent, numParents, firstVarSort, numVarSorts,
  *              firstSkolem, numSkolems, name, firstUse, numUses,
- *              firstSplit, numSplits}
+ *              firstSplit, numSplits, satPremise}
+ *             `satPremise` is the propositional clause a step derived by SAT
+ *             solving stands on, and `NONE` for anything else
  *             `name` is the string offset of the name the input gave this
  *             formula, and `NONE` for anything vampire derived. It says which
  *             hypothesis an `input` step restates, so replay need not search
@@ -57,6 +59,16 @@
  *             superposition does
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
+ *   satClauses{firstLit, numLits, firstPremise, numPremises, origin}: a clause
+ *             of the propositional problem splitting hands to a SAT solver.
+ *             `origin` is the unit this clause came from, for one that is a
+ *             first-order clause's propositional shadow, and `NONE` for one
+ *             the solver derived -- whose premises are then the clauses it was
+ *             derived from, in the order the solver used them, each of which
+ *             holds all but one of its literals falsified by the ones before
+ *   satLits   string offsets of a propositional clause's literals, each the
+ *             name of a component or its negation
+ *   satPremises indices into `satClauses`
  *   splits    string offsets of the names a clause holds under: splitting
  *             asserts a component's name and works on with the clause under
  *             that assumption, so what such a clause says is that its literals
@@ -95,6 +107,8 @@
 #include "Lib/Timer.hpp"
 #include "Parse/TPTP.hpp"
 #include "Saturation/ProvingHelper.hpp"
+#include "SAT/SATClause.hpp"
+#include "SAT/SATInference.hpp"
 #include "Saturation/Splitter.hpp"
 #include "Shell/Options.hpp"
 #include "Shell/Preprocess.hpp"
@@ -109,18 +123,19 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 8;
+const uint32_t VERSION = 9;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
-      bindings, splits;
+      bindings, splits, satClauses, satLits, satPremises;
   std::string strings;
   std::string proofText;
 
   std::unordered_map<uint64_t, uint32_t> termSeen, sortSeen;
-  std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen;
+  std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen,
+      satSeen;
 
   uint32_t addString(const std::string& s)
   {
@@ -294,14 +309,55 @@ struct Encoder {
     return idx;
   }
 
+  /** A clause of the propositional problem, and how the solver derived it. */
+  uint32_t encodeSatClause(SATClause* cl)
+  {
+    auto seen = satSeen.find(cl);
+    if (seen != satSeen.end())
+      return seen->second;
+
+    uint32_t idx = static_cast<uint32_t>(satClauses.size() / 5);
+    satClauses.resize(satClauses.size() + 5, 0);
+    satSeen.emplace(cl, idx);
+
+    uint32_t firstLit = static_cast<uint32_t>(satLits.size());
+    for (SATLiteral l : iterTraits(cl->iter()))
+      satLits.push_back(addString(Splitter::getFormulaStringFromLiteral(l)));
+    uint32_t numLits = static_cast<uint32_t>(cl->length());
+
+    uint32_t origin = NONE;
+    std::vector<uint32_t> premiseIdxs;
+    if (SATInference* inf = cl->inference()) {
+      if (inf->getType() == SATInference::InfType::PROP_INF) {
+        for (SATClause* p : iterTraits(inf->propInf()->getPremises()->iter()))
+          premiseIdxs.push_back(encodeSatClause(p));
+        // The premises were collected by pushing them onto a list, which
+        // reverses them; the order the solver used them in is what matters.
+        std::reverse(premiseIdxs.begin(), premiseIdxs.end());
+      } else {
+        origin = encodeUnit(inf->foConversion()->getOrigin());
+      }
+    }
+    uint32_t firstPremise = static_cast<uint32_t>(satPremises.size());
+    for (uint32_t p : premiseIdxs)
+      satPremises.push_back(p);
+
+    satClauses[5 * idx + 0] = numLits == 0 ? NONE : firstLit;
+    satClauses[5 * idx + 1] = numLits;
+    satClauses[5 * idx + 2] = premiseIdxs.empty() ? NONE : firstPremise;
+    satClauses[5 * idx + 3] = static_cast<uint32_t>(premiseIdxs.size());
+    satClauses[5 * idx + 4] = origin;
+    return idx;
+  }
+
   uint32_t encodeUnit(Unit* u)
   {
     auto seen = unitSeen.find(u);
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 17);
-    units.resize(units.size() + 17, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 18);
+    units.resize(units.size() + 18, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -375,19 +431,19 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[17 * idx + 0] = u->number();
-    units[17 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[17 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[17 * idx + 3] = flags;
-    units[17 * idx + 4] = payload;
-    units[17 * idx + 5] = numLits;
-    units[17 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[17 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[17 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[17 * idx + 9] = numVarSorts;
-    units[17 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[17 * idx + 11] = numSkolems;
-    units[17 * idx + 12] = nameOff;
+    units[18 * idx + 0] = u->number();
+    units[18 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[18 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[18 * idx + 3] = flags;
+    units[18 * idx + 4] = payload;
+    units[18 * idx + 5] = numLits;
+    units[18 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[18 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[18 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[18 * idx + 9] = numVarSorts;
+    units[18 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[18 * idx + 11] = numSkolems;
+    units[18 * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -416,10 +472,12 @@ struct Encoder {
         numUses++;
       }
     }
-    units[17 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[17 * idx + 14] = numUses;
-    units[17 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[17 * idx + 16] = numSplits;
+    units[18 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[18 * idx + 14] = numUses;
+    units[18 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[18 * idx + 16] = numSplits;
+    units[18 * idx + 17] =
+      inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
     return idx;
   }
 };
@@ -464,12 +522,15 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 17));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 18));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.skolems.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.splits.size()));
+  putWord(buf, static_cast<uint32_t>(enc.satClauses.size() / 5));
+  putWord(buf, static_cast<uint32_t>(enc.satLits.size()));
+  putWord(buf, static_cast<uint32_t>(enc.satPremises.size()));
   putWord(buf, static_cast<uint32_t>(enc.uses.size() / 6));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
@@ -493,6 +554,9 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.varSorts);
   putWords(buf, enc.skolems);
   putWords(buf, enc.splits);
+  putWords(buf, enc.satClauses);
+  putWords(buf, enc.satLits);
+  putWords(buf, enc.satPremises);
   putWords(buf, enc.uses);
   putWords(buf, enc.bindings);
   putBlob(buf, enc.strings);

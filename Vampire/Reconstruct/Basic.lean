@@ -74,6 +74,10 @@ def namedFormula (name : String) : ReconstructM Expr := do
     | throwIntroduced "the named subformula" name
   return if negated then mkApp (mkConst ``Not) body else body
 
+/-- The name of the negation of what `name` names. -/
+def flippedName (name : String) : String :=
+  if name.startsWith "~" then (name.drop 1).toString else "~" ++ name
+
 /--
 `⟦~n⟧`, and that it says what `¬⟦n⟧` does.
 
@@ -82,7 +86,7 @@ names, and which of the two carries the negation is up to which one splitting
 introduced.
 -/
 def flipName (name : String) : ReconstructM (Expr × Expr) := do
-  let flipped := if name.startsWith "~" then (name.drop 1).toString else "~" ++ name
+  let flipped := flippedName name
   let body ← namedFormula name
   let flippedBody ← namedFormula flipped
   if flippedBody == mkApp (mkConst ``Not) body then

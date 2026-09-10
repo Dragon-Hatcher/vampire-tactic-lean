@@ -104,4 +104,85 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
   mkAppM ``Iff.mp
     #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
 
+/-- What a propositional clause says: the disjunction of what its names say. -/
+private def satClauseStates (c : SatClause) : ReconstructM Expr := do
+  return junction ``Or ``False (← c.literals.mapM namedFormula)
+
+mutual
+
+/--
+A proof of what a propositional clause says.
+
+A clause is either a first-order clause's propositional shadow, and then it says
+what that clause says, up to the order of the names; or the solver derived it,
+and then it follows from the clauses it was derived from by unit propagation:
+supposing its own literals false, each clause in turn has all but one of its
+literals false, so that one holds -- and the last has none left.
+-/
+private partial def satClause (origins : Std.HashMap UInt32 (Expr × Expr))
+    (known : Std.HashMap String Expr) (c : SatClause) : ReconstructM Expr := do
+  let target ← satClauseStates c
+  if let some origin := c.origin? then
+    let some (proof, stated) := origins[origin.number]?
+      | throwError "the propositional shadow of step {origin.number}, which is \
+        not among the refutation's premises"
+    let place := placeLiteral target
+    return ← elimParts stated 0 (fun _ h => place h) proof
+  -- Suppose the clause fails; then each of its literals is false, which is to
+  -- say that each of their negations holds.
+  let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
+    let mut known := known
+    for (name, i) in c.literals.zipIdx do
+      let (flipped, says) ← flipName name
+      let body ← namedFormula name
+      let refuted ← withLocalDeclD `d body fun d => do
+        mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
+      known := known.insert (flippedName name)
+        (← mkAppM ``Iff.mpr #[says, refuted])
+    mkLambdaFVars #[n] (← propagate origins known c.premises 0)
+  mkAppM ``Iff.mp #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
+
+/--
+`False`, by unit propagation through the clauses a derived clause was derived
+from: each of them has all but one of its literals already false, and the last
+of them has none left.
+-/
+private partial def propagate (origins : Std.HashMap UInt32 (Expr × Expr))
+    (known : Std.HashMap String Expr) (premises : Array SatClause) (i : Nat) :
+    ReconstructM Expr := do
+  let some premise := premises[i]?
+    | throwError "the clauses a propositional step was derived from left \
+      nothing to contradict"
+  let names := premise.literals
+  let proof ← satClause origins known premise
+  let stated ← satClauseStates premise
+  elimParts stated 0 (fun j h => do
+    let some name := names[j]? | throwError "missing literal"
+    match known[flippedName name]? with
+    | some negated =>
+      -- The literal is already false, so this case cannot arise. Which of the
+      -- two is the negation is up to which of the two names carries it.
+      let (positive, negation) :=
+        if (← instantiateMVars (← inferType h)).not?.isSome then (negated, h)
+        else (h, negated)
+      mkAppOptM ``absurd
+        #[some (← inferType positive), some (mkConst ``False), some positive,
+          some negation]
+    | none => propagate origins (known.insert name h) premises (i + 1)) proof
+
+end
+
+/--
+`avatar_refutation`: the propositional problem the names were handed to has no
+model, so what they stand for cannot all hold.
+-/
+def refutation (step : Step) : ReconstructM Expr := do
+  let some root := step.unit.satPremise?
+    | throwError "an avatar refutation without the propositional clause it \
+      stands on"
+  let mut origins : Std.HashMap UInt32 (Expr × Expr) := {}
+  for (parent, premise) in step.unit.parents.zip step.premises do
+    origins := origins.insert parent.number premise
+  satClause origins {} root
+
 end Vampire.Reconstruct.Avatar
