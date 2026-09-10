@@ -5,6 +5,7 @@ import Vampire.Reconstruct.Rules.Congruence
 import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
 import Vampire.Reconstruct.Rules.Input
+import Vampire.Reconstruct.Rules.Normalize
 import Vampire.Reconstruct.Rules.Resolution
 import Vampire.Reconstruct.Rules.Rewrite
 import Vampire.Reconstruct.Rules.Skolem
@@ -33,6 +34,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .clausify => Clausify.clausify step
   | .input => Input.input step
   | .resolution => Resolution.resolution step
+  | .ennf => Normalize.ennf step
+  | .nnf => Normalize.nnf step
   | .forwardSubsumptionResolution => Subsumption.subsumptionResolution step
   | .forwardDemodulation => Rewrite.demodulation step
   | .superposition => Rewrite.superposition step
@@ -46,8 +49,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
 
   -- Not implemented yet.
   | .polarityFlipping => unimplemented step
-  | .nnf => unimplemented step
-  | .ennf => unimplemented step
   | .genericFormulaClauseTransformation => unimplemented step
   | .negatedConjecture => unimplemented step
   | .answerLiteralInjection => unimplemented step
