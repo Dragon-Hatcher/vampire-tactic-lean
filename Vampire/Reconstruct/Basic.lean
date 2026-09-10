@@ -490,11 +490,12 @@ partial def projectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
   if !chain.isAppOfArity fn 2 then
     return h
   let left := chain.appFn!.appArg!
+  let right := chain.appArg!
   let n := (junctionParts fn left).size
   if i < n then
-    projectPart fn left i (← mkAppM ``And.left #[h])
+    projectPart fn left i (mkApp3 (mkConst ``And.left) left right h)
   else
-    projectPart fn chain.appArg! (i - n) (← mkAppM ``And.right #[h])
+    projectPart fn right (i - n) (mkApp3 (mkConst ``And.right) left right h)
 
 /-- A proof of a whole disjunction from a proof of its `i`th part. -/
 partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
@@ -505,9 +506,36 @@ partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
   let right := chain.appArg!
   let n := (junctionParts fn left).size
   if i < n then
-    mkAppOptM ``Or.inl #[none, some right, some (← injectPart fn left i h)]
+    return mkApp3 (mkConst ``Or.inl) left right (← injectPart fn left i h)
   else
-    mkAppOptM ``Or.inr #[some left, none, some (← injectPart fn right (i - n) h)]
+    return mkApp3 (mkConst ``Or.inr) left right (← injectPart fn right (i - n) h)
+
+/--
+A closed `chain → motive` sending each part of `chain` to `handler`, along with
+the motive, which the leftmost part's proof settles.
+
+The bound variable is put in place as the elimination is built rather than
+abstracted into it afterwards: abstracting at every level of a right-nested
+chain walks the whole of what has been built so far each time.
+-/
+partial def elimFunction (chain : Expr) (offset : Nat)
+    (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :
+    ReconstructM (Expr × Expr) := do
+  if !chain.isAppOfArity ``Or 2 then
+    return ← withLocalDeclD `a chain fun a => do
+      let body ← handler offset a
+      let motive ← match motive? with
+        | some motive => pure motive
+        | none => inferType body
+      return (← mkLambdaFVars #[a] body, motive)
+  let left := chain.appFn!.appArg!
+  let right := chain.appArg!
+  let n := (junctionParts ``Or left).size
+  let (onLeft, motive) ← elimFunction left offset handler motive?
+  let (onRight, _) ← elimFunction right (offset + n) handler (some motive)
+  return (.lam `x chain
+    (mkApp6 (mkConst ``Or.elim) left right motive (.bvar 0) onLeft onRight)
+    .default, motive)
 
 /-- Eliminates a disjunction, sending its `i`th part to `handler i`. -/
 partial def elimParts (chain : Expr) (offset : Nat)
@@ -517,11 +545,9 @@ partial def elimParts (chain : Expr) (offset : Nat)
   let left := chain.appFn!.appArg!
   let right := chain.appArg!
   let n := (junctionParts ``Or left).size
-  withLocalDeclD `a left fun a =>
-    withLocalDeclD `b right fun b => do
-      mkAppM ``Or.elim #[h,
-        ← mkLambdaFVars #[a] (← elimParts left offset handler a),
-        ← mkLambdaFVars #[b] (← elimParts right (offset + n) handler b)]
+  let (onLeft, motive) ← elimFunction left offset handler none
+  let (onRight, _) ← elimFunction right (offset + n) handler (some motive)
+  return mkApp6 (mkConst ``Or.elim) left right motive h onLeft onRight
 
 /-!
 The helpers above take a junction apart by its shape, which is right for a
@@ -535,11 +561,30 @@ partial def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if parts.size <= 1 then return h
   let rest := parts.extract 1 parts.size
+  let tail := junction ``Or ``False rest
   if i == 0 then
-    mkAppOptM ``Or.inl #[none, some (junction ``Or ``False rest), some h]
+    return mkApp3 (mkConst ``Or.inl) parts[0]! tail h
   else
-    mkAppOptM ``Or.inr
-      #[some parts[0]!, none, some (← injectGiven rest (i - 1) h)]
+    return mkApp3 (mkConst ``Or.inr) parts[0]! tail (← injectGiven rest (i - 1) h)
+
+/-- `elimFunction`, for a disjunction whose parts are given rather than found. -/
+partial def elimGivenFunction (parts : Array Expr) (offset : Nat)
+    (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :
+    ReconstructM (Expr × Expr) := do
+  if parts.size <= 1 then
+    return ← withLocalDeclD `a parts[0]! fun a => do
+      let body ← handler offset a
+      let motive ← match motive? with
+        | some motive => pure motive
+        | none => inferType body
+      return (← mkLambdaFVars #[a] body, motive)
+  let rest := parts.extract 1 parts.size
+  let tail := junction ``Or ``False rest
+  let (onLeft, motive) ← elimGivenFunction #[parts[0]!] offset handler motive?
+  let (onRight, _) ← elimGivenFunction rest (offset + 1) handler (some motive)
+  return (.lam `x (junction ``Or ``False parts)
+    (mkApp6 (mkConst ``Or.elim) parts[0]! tail motive (.bvar 0) onLeft onRight)
+    .default, motive)
 
 /-- Eliminates a disjunction of the given parts, sending the `i`th to `handler i`. -/
 partial def elimGiven (parts : Array Expr)
@@ -548,20 +593,20 @@ partial def elimGiven (parts : Array Expr)
   if parts.size <= 1 then return ← handler offset h
   let rest := parts.extract 1 parts.size
   let tail := junction ``Or ``False rest
-  withLocalDeclD `a parts[0]! fun a =>
-    withLocalDeclD `b tail fun b => do
-      mkAppM ``Or.elim #[h,
-        ← mkLambdaFVars #[a] (← handler offset a),
-        ← mkLambdaFVars #[b] (← elimGiven rest handler b (offset + 1))]
+  let (onLeft, motive) ← elimGivenFunction #[parts[0]!] offset handler none
+  let (onRight, _) ← elimGivenFunction rest (offset + 1) handler (some motive)
+  return mkApp6 (mkConst ``Or.elim) parts[0]! tail motive h onLeft onRight
 
 /-- The `i`th part of a conjunction of the given parts, from a proof of the whole. -/
 partial def projectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if parts.size <= 1 then return h
+  let rest := parts.extract 1 parts.size
+  let tail := junction ``And ``True rest
   if i == 0 then
-    mkAppM ``And.left #[h]
+    return mkApp3 (mkConst ``And.left) parts[0]! tail h
   else
-    projectGiven (parts.extract 1 parts.size) (i - 1) (← mkAppM ``And.right #[h])
+    projectGiven rest (i - 1) (mkApp3 (mkConst ``And.right) parts[0]! tail h)
 
 /-- A conjunction of the given parts, from a proof of each. -/
 partial def introGiven (parts : Array Expr)
@@ -569,9 +614,9 @@ partial def introGiven (parts : Array Expr)
     ReconstructM Expr := do
   if parts.size == 0 then return mkConst ``True.intro
   if parts.size == 1 then return ← component offset
-  mkAppM ``And.intro
-    #[← component offset,
-      ← introGiven (parts.extract 1 parts.size) component (offset + 1)]
+  let rest := parts.extract 1 parts.size
+  return mkApp4 (mkConst ``And.intro) parts[0]! (junction ``And ``True rest)
+    (← component offset) (← introGiven rest component (offset + 1))
 
 /-- Builds a conjunction from a proof of each of its parts. -/
 partial def introParts (chain : Expr) (offset : Nat)
@@ -581,8 +626,8 @@ partial def introParts (chain : Expr) (offset : Nat)
   let left := chain.appFn!.appArg!
   let right := chain.appArg!
   let n := (junctionParts ``And left).size
-  mkAppM ``And.intro
-    #[← introParts left offset component, ← introParts right (offset + n) component]
+  return mkApp4 (mkConst ``And.intro) left right
+    (← introParts left offset component) (← introParts right (offset + n) component)
 
 /--
 `source → target`, where the two say the same thing up to the order and nesting
@@ -700,6 +745,21 @@ partial def elimOr (chain : Expr) (handlers : Array Expr) (h : Expr) (i : Nat :=
         ← mkLambdaFVars #[b] (← elimOr rest handlers b (i + 1))]
 
 /--
+`k`'s result, with each of `values` standing behind a local of the given type
+rather than written out wherever it is used.
+
+A congruence over a junction needs each part's equivalence twice, once each way
+round, so writing them out doubles the term at every level of nesting. Bound
+once and applied, the term stays the size of the proof it stands for.
+-/
+def shared (types values : Array Expr) (k : Array Expr → ReconstructM Expr) :
+    ReconstructM Expr := do
+  let decls := types.mapIdx fun i τ => (Name.mkSimple s!"e{i}", fun _ => pure τ)
+  let abstracted ← withLocalDeclsD decls fun locals => do
+    mkLambdaFVars locals (← k locals)
+  return mkAppN abstracted values
+
+/--
 `a ↔ b`, where the two say the same thing up to the shape vampire keeps them in.
 
 Congruence rather than implication, because a formula's parts sit in positions
@@ -786,23 +846,29 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         -- made about which part answers to which. The two sides may associate
         -- differently, which is what flattening changes, so the parts are
         -- reached by index rather than by following either shape.
-        let parts ← ap.zipIdx.mapM fun (x, i) => equivNormal x bp[i]!
-        if fn == ``And then
-          let forward ← withLocalDeclD `h a fun h => do
-            mkLambdaFVars #[h] (← introParts b 0 fun j => do
-              mkAppM ``Iff.mp #[parts[j]!, ← projectPart fn a j h])
-          let backward ← withLocalDeclD `h b fun h => do
-            mkLambdaFVars #[h] (← introParts a 0 fun j => do
-              mkAppM ``Iff.mpr #[parts[j]!, ← projectPart fn b j h])
-          return ← mkAppM ``Iff.intro #[forward, backward]
-        else
-          let forward ← withLocalDeclD `h a fun h => do
-            mkLambdaFVars #[h] (← elimParts a 0 (fun i hi => do
-              injectPart fn b i (← mkAppM ``Iff.mp #[parts[i]!, hi])) h)
-          let backward ← withLocalDeclD `h b fun h => do
-            mkLambdaFVars #[h] (← elimParts b 0 (fun i hi => do
-              injectPart fn a i (← mkAppM ``Iff.mpr #[parts[i]!, hi])) h)
-          return ← mkAppM ``Iff.intro #[forward, backward]
+        let values ← ap.zipIdx.mapM fun (x, i) => equivNormal x bp[i]!
+        let types := ap.zipIdx.map fun (x, i) => mkApp2 (mkConst ``Iff) x bp[i]!
+        return ← shared types values fun parts => do
+          let mp (i : Nat) (h : Expr) : Expr :=
+            mkApp4 (mkConst ``Iff.mp) ap[i]! bp[i]! parts[i]! h
+          let mpr (i : Nat) (h : Expr) : Expr :=
+            mkApp4 (mkConst ``Iff.mpr) ap[i]! bp[i]! parts[i]! h
+          if fn == ``And then
+            let forward ← withLocalDeclD `h a fun h => do
+              mkLambdaFVars #[h] (← introParts b 0 fun j => do
+                return mp j (← projectPart fn a j h))
+            let backward ← withLocalDeclD `h b fun h => do
+              mkLambdaFVars #[h] (← introParts a 0 fun j => do
+                return mpr j (← projectPart fn b j h))
+            return mkApp4 (mkConst ``Iff.intro) a b forward backward
+          else
+            let forward ← withLocalDeclD `h a fun h => do
+              mkLambdaFVars #[h] (← elimParts a 0 (fun i hi =>
+                injectPart fn b i (mp i hi)) h)
+            let backward ← withLocalDeclD `h b fun h => do
+              mkLambdaFVars #[h] (← elimParts b 0 (fun i hi =>
+                injectPart fn a i (mpr i hi)) h)
+            return mkApp4 (mkConst ``Iff.intro) a b forward backward
     throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
 
 /-- `a ↔ b`, for two ways of writing one formula. -/
