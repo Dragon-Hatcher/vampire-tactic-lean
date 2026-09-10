@@ -46,7 +46,7 @@ private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit :
     let fresh? (t : Term) : ReconstructM (Option (String × Array Term)) := do
       if t.isVar then return none
       let some symbol := t.symbol? | return none
-      if ← resolvesSymbol symbol.name then return none
+      if ← isGoalSymbol symbol.name then return none
       return some (symbol.name, t.args)
     let (name, args, body) ←
       match ← fresh? lhs, ← fresh? rhs with
@@ -127,7 +127,7 @@ private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit 
       | throwError "a naming definition's name should be an atom"
     let some symbol := l.symbol?
       | throwError "the name has an unknown predicate {l.predicate}"
-    if ((← read).symbols.symbols[symbol.name]?).isSome then
+    if ← isGoalSymbol symbol.name then
       throwError "a predicate_definition step should introduce a predicate, \
         but {symbol.name} comes from the goal"
     let args ← l.args.mapM fun arg => do
@@ -184,6 +184,9 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
 
 /-- Any of the definition rules. -/
 def definitionStep (step : Step) : ReconstructM Expr := do
+  -- Bound already by the pass over the proof, unless what it names mentions a
+  -- symbol only bound while replaying, as a clausified skolem is.
+  register step.unit
   byDefinition (← step.conclusion)
 
 end Vampire.Reconstruct.Definition

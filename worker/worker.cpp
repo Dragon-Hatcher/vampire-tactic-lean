@@ -30,7 +30,11 @@
  *   vars      variable numbers of quantified formulas
  *   units     {number, rule, inputType, flags, payload, numLits,
  *              firstParent, numParents, firstVarSort, numVarSorts,
- *              firstSkolem, numSkolems}
+ *              firstSkolem, numSkolems, name}
+ *             `name` is the string offset of the name the input gave this
+ *             formula, and `NONE` for anything vampire derived. It says which
+ *             hypothesis an `input` step restates, so replay need not search
+ *             for one that matches.
  *             flags: 1 = clause. A clause's payload is its first literal
  *             index, a formula's payload is its formula index.
  *   unitLits  literal indices
@@ -84,7 +88,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 3;
+const uint32_t VERSION = 4;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
@@ -274,8 +278,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 12);
-    units.resize(units.size() + 12, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 13);
+    units.resize(units.size() + 13, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -332,18 +336,25 @@ struct Encoder {
       numSkolems++;
     }
 
-    units[12 * idx + 0] = u->number();
-    units[12 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[12 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[12 * idx + 3] = flags;
-    units[12 * idx + 4] = payload;
-    units[12 * idx + 5] = numLits;
-    units[12 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[12 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[12 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[12 * idx + 9] = numVarSorts;
-    units[12 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[12 * idx + 11] = numSkolems;
+    std::string axiomName;
+    std::filesystem::path axiomPath;
+    uint32_t nameOff =
+      Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
+                                                          : NONE;
+
+    units[13 * idx + 0] = u->number();
+    units[13 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[13 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[13 * idx + 3] = flags;
+    units[13 * idx + 4] = payload;
+    units[13 * idx + 5] = numLits;
+    units[13 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[13 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[13 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[13 * idx + 9] = numVarSorts;
+    units[13 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[13 * idx + 11] = numSkolems;
+    units[13 * idx + 12] = nameOff;
     return idx;
   }
 };
@@ -388,7 +399,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 12));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 13));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));

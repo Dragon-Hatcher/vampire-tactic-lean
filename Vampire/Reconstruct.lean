@@ -52,24 +52,41 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
   return proof
 
 /--
-Binds every name a definition step in the proof introduces.
+Binds every name the proof introduces, before any step is replayed.
 
-Splitting makes a definition a premise of each step using its name, so
-replaying premises first would reach it in time. Naming does not: it replaces a
-subformula in place and states the definition as a separate root, which need
-not be an ancestor of the steps mentioning the name. What a definition names
-can itself mention another introduced name, so this runs until it stops making
-progress rather than in one pass.
+Neither kind of introduction can be relied on to come first while replaying.
+Splitting makes a definition a premise of the steps using its name, but naming
+does not: it replaces a subformula in place and states the definition as a
+separate root. And a definition's own body can mention a skolem, while what an
+existential is skolemised over can mention a named predicate, so the two are
+bound together, repeatedly, until it stops making progress.
 -/
-private partial def bindDefinitions : ReconstructM PUnit := do
-  let mut pending := (← read).proof.units.filter fun u =>
-    (u.rule?.map Definition.introducesName).getD false
+private partial def bindIntroduced : ReconstructM PUnit := do
+  let proof := (← read).proof
+  -- Where the existentials a unit's skolems came from are written down: its
+  -- own formula, unless a skolemisation step transformed a formula into it.
+  let skolemSource (u : Vampire.Unit) : Option (Vampire.Unit × Formula) :=
+    match u.rule? with
+    | some .skolemize => do
+      let parent ← u.parents[0]?
+      return (parent, ← parent.formula?)
+    | _ => do return (u, ← u.formula?)
+  let bind (u : Vampire.Unit) : ReconstructM PUnit := do
+    if (u.rule?.map Definition.introducesName).getD false then
+      Definition.register u
+    unless u.skolems.isEmpty do
+      let some (owner, f) := skolemSource u
+        | throwError "step {u.number} records skolems but states no formula"
+      registerSkolems (owner.varSorts ++ u.varSorts)
+        (Std.HashMap.ofList u.skolems.toList) {} f
+  let mut pending := proof.units.filter fun u =>
+    (u.rule?.map Definition.introducesName).getD false || !u.skolems.isEmpty
   repeat
     let mut progressed := false
     let mut again := #[]
     for u in pending do
       try
-        Definition.register u
+        bind u
         progressed := true
       catch _ =>
         again := again.push u
@@ -86,7 +103,7 @@ the goal corresponds to it.
 def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
-    bindDefinitions
+    bindIntroduced
     let term ← step refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray }
   let (outcome, _) ← (go.run { symbols, proof }).run {}

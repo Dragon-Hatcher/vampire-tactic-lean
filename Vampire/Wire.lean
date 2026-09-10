@@ -101,7 +101,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 3
+private def version : UInt32 := 4
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -144,7 +144,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 12 * 4
+  let unitLits := units + numUnits * 13 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -350,8 +350,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 12 c.idx.toNat 4
-  let count := p.field p.layout.units 12 c.idx.toNat 5
+  let first := p.field p.layout.units 13 c.idx.toNat 4
+  let count := p.field p.layout.units 13 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -444,7 +444,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 12 u.idx.toNat off
+  u.proof.field u.proof.layout.units 13 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -500,6 +500,14 @@ def skolems (u : Unit) : Array (UInt32 × Term) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.skolems + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+/--
+The name the input gave this formula, and `none` for anything vampire derived.
+It says which hypothesis an `input` step restates.
+-/
+def name? (u : Unit) : Option String :=
+  let off := u.field 12
+  if off == none32 then none else some (u.proof.string off)
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=

@@ -201,6 +201,24 @@ def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
 
 mutual
 
+/--
+The arguments of a nested conjunction or disjunction, flattened, in the order
+vampire will keep them.
+
+Vampire's parser flattens a junction and reverses its arguments, so emitting
+them reversed is what makes its reading of a formula agree with the goal's.
+Were that to stop holding, an `input` step would say so: it would no longer
+prove what the goal states.
+-/
+partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
+  let rec parts (e : Expr) : Array Expr :=
+    if e.isAppOfArity fn 2 then
+      #[e.appFn!.appArg!] ++ parts e.appArg!
+    else
+      #[e]
+  let flattened := parts e
+  return (← flattened.mapM translateFormula).reverse
+
 /-- Translates a Lean expression of non-`Prop` type into a TPTP term. -/
 partial def translateTerm (e : Expr) : TranslateM Tm := do
   let e ← instantiateMVars e
@@ -252,8 +270,8 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
     | True => return .top
     | False => return .bot
     | Not p => return .neg (← translateFormula p)
-    | And p q => return .and #[← translateFormula p, ← translateFormula q]
-    | Or p q => return .or #[← translateFormula p, ← translateFormula q]
+    | And _ _ => return .and (← junctionArgs ``And e)
+    | Or _ _ => return .or (← junctionArgs ``Or e)
     | Iff p q => return .iff (← translateFormula p) (← translateFormula q)
     | Eq _ a b => return .eq (← translateTerm a) (← translateTerm b) true
     | Ne _ a b => return .eq (← translateTerm a) (← translateTerm b) false
@@ -290,6 +308,12 @@ AVATAR predicate -- is absent, which is how such names are recognised.
 structure Symbols where
   sorts : Std.HashMap String Expr := {}
   symbols : Std.HashMap String Expr := {}
+  /--
+  The hypothesis each formula in the problem states, by the name it was given.
+  An `input` step names the formula it restates, so this says which hypothesis
+  proves it.
+  -/
+  hypotheses : Std.HashMap String Expr := {}
 deriving Inhabited
 
 /-- The TPTP problem for a set of hypotheses, to be refuted. -/
@@ -304,7 +328,11 @@ def problemOf (hypotheses : Array (Expr × Role)) : MetaM (String × Symbols) :=
   let lines := state.decls.types ++ state.decls.symbols ++ formulas
   let invert (m : Std.HashMap Expr String) : Std.HashMap String Expr :=
     m.fold (init := {}) fun acc e name => acc.insert name e
-  let symbols := { sorts := invert state.sorts, symbols := invert state.symbols }
+  let named := hypotheses.zipIdx.foldl (init := {}) fun acc ((h, _), i) =>
+    Std.HashMap.insert acc s!"h{i}" h
+  let symbols :=
+    { sorts := invert state.sorts, symbols := invert state.symbols
+      hypotheses := named }
   return (String.intercalate "\n" lines.toList ++ "\n", symbols)
 
 end Vampire

@@ -53,6 +53,16 @@ def symbolExpr (name : String) : ReconstructM Expr := do
 def resolvesSymbol (name : String) : ReconstructM Bool := do
   return ((← read).symbols.symbols[name]?).isSome || ((← get).introduced[name]?).isSome
 
+/--
+Whether the goal is where a TPTP symbol comes from.
+
+This is what tells a symbol vampire introduced from one of the goal's own,
+which asking whether it resolves no longer does: names are bound before any
+step is replayed, so by then an introduced one resolves too.
+-/
+def isGoalSymbol (name : String) : ReconstructM Bool := do
+  return ((← read).symbols.symbols[name]?).isSome
+
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
@@ -223,6 +233,307 @@ def registerSkolem (skolems : Std.HashMap UInt32 Term) (vars : Vars) (v : UInt32
     return x
   let definition ← mkLambdaFVars args witness
   modify fun s => { s with introduced := s.introduced.insert symbol.name definition }
+
+/--
+Binds every skolem the premise's existentials introduce.
+
+`newcnf` skolemises while clausifying, so the clause is stated in symbols that
+nothing has bound yet -- and the clause has to be read before it can be
+derived. Choosing the witnesses needs only the premise, so this runs first.
+-/
+partial def registerSkolems (sorts : Array (UInt32 × String))
+    (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) :
+    ReconstructM PUnit := do
+  let bound (f : Formula) : Array (UInt32 × String) :=
+    f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+  match ← connectiveOf f with
+  | .«exists» =>
+    let some body := f.subformulas[0]? | throwError "quantifier without a body"
+    let rec go (rest : List (UInt32 × String)) (vars : Vars) : ReconstructM PUnit := do
+      match rest with
+      | [] => registerSkolems sorts skolems vars body
+      | (v, sortName) :: rest => do
+        let τ ← sortType sortName
+        let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
+          mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
+        let (witness, _) ← epsilon τ p
+        registerSkolem skolems vars v witness
+        go rest (vars.insert v witness)
+    go (bound f).toList vars
+  | .«forall» =>
+    let some body := f.subformulas[0]? | throwError "quantifier without a body"
+    withVars (bound f) vars fun vars _ => registerSkolems sorts skolems vars body
+  | .and | .or | .not | .imp | .iff | .xor =>
+    f.subformulas.forM (registerSkolems sorts skolems vars)
+  | _ => return
+
+
+/--
+Something of the clause's sort, for a variable the clause does not mention.
+
+A universal can bind more than the clause kept, and instantiating it needs
+some element; vampire's domains are never empty.
+-/
+def someElement (τ : Expr) : ReconstructM Expr := do
+  let goal := mkApp (mkConst ``Nonempty [← getLevel τ]) τ
+  match ← trySynthInstance goal with
+  | .some inst =>
+    mkAppOptM ``Classical.choice #[some τ, some inst]
+  | _ =>
+    throwError "cannot instantiate a quantifier over{indentExpr τ}\n\
+      without `Nonempty` for it"
+
+/--
+The arguments of an n-ary junction, however it was nested.
+
+Both sides are descended into, not just the right: flattening is what merges a
+nested junction into a wider one, so the two sides of such a step differ in
+exactly that.
+-/
+partial def junctionParts (fn : Name) (e : Expr) : Array Expr :=
+  if e.isAppOfArity fn 2 then
+    junctionParts fn e.appFn!.appArg! ++ junctionParts fn e.appArg!
+  else
+    #[e]
+
+/--
+The `i`th part of a junction, from a proof of the whole.
+
+Indices count parts left to right, whatever the nesting: flattening merges a
+nested junction into a wider one, leaving the parts in place but not the shape,
+so neither side can be taken to associate one way.
+-/
+partial def projectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
+    ReconstructM Expr := do
+  if !chain.isAppOfArity fn 2 then
+    return h
+  let left := chain.appFn!.appArg!
+  let n := (junctionParts fn left).size
+  if i < n then
+    projectPart fn left i (← mkAppM ``And.left #[h])
+  else
+    projectPart fn chain.appArg! (i - n) (← mkAppM ``And.right #[h])
+
+/-- A proof of a whole disjunction from a proof of its `i`th part. -/
+partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
+    ReconstructM Expr := do
+  if !chain.isAppOfArity fn 2 then
+    return h
+  let left := chain.appFn!.appArg!
+  let right := chain.appArg!
+  let n := (junctionParts fn left).size
+  if i < n then
+    mkAppOptM ``Or.inl #[none, some right, some (← injectPart fn left i h)]
+  else
+    mkAppOptM ``Or.inr #[some left, none, some (← injectPart fn right (i - n) h)]
+
+/-- Eliminates a disjunction, sending its `i`th part to `handler i`. -/
+partial def elimParts (chain : Expr) (offset : Nat)
+    (handler : Nat → Expr → ReconstructM Expr) (h : Expr) : ReconstructM Expr := do
+  if !chain.isAppOfArity ``Or 2 then
+    return ← handler offset h
+  let left := chain.appFn!.appArg!
+  let right := chain.appArg!
+  let n := (junctionParts ``Or left).size
+  withLocalDeclD `a left fun a =>
+    withLocalDeclD `b right fun b => do
+      mkAppM ``Or.elim #[h,
+        ← mkLambdaFVars #[a] (← elimParts left offset handler a),
+        ← mkLambdaFVars #[b] (← elimParts right (offset + n) handler b)]
+
+/-- Builds a conjunction from a proof of each of its parts. -/
+partial def introParts (chain : Expr) (offset : Nat)
+    (component : Nat → ReconstructM Expr) : ReconstructM Expr := do
+  if !chain.isAppOfArity ``And 2 then
+    return ← component offset
+  let left := chain.appFn!.appArg!
+  let right := chain.appArg!
+  let n := (junctionParts ``And left).size
+  mkAppM ``And.intro
+    #[← introParts left offset component, ← introParts right (offset + n) component]
+
+/--
+`source → target`, where the two say the same thing up to the order and nesting
+of junctions.
+
+Vampire's parser reverses a junction's arguments, so a formula's own reading of
+itself differs from the goal's, and a rule that drops or repeats literals
+leaves the rest in place. Both come to relating two junctions over the same
+parts, which a lookup settles rather than a search: each part of one is found
+among the parts of the other by structural equality.
+
+A disjunct of the source that is absent from the target has to be refutable on
+its own, as `t ≠ t` is, which is how a removed literal is accounted for.
+-/
+partial def implies (source target : Expr) : ReconstructM Expr := do
+  let source ← instantiateMVars source
+  let target ← instantiateMVars target
+  if ← isDefEq source target then
+    return ← withLocalDeclD `h source fun h => mkLambdaFVars #[h] h
+  match source, target with
+  | .forallE _ sd sb _, .forallE _ td tb _ =>
+    -- Only a genuine quantifier: `¬a` is an arrow too, but not a `forallE`.
+    unless ← isDefEq sd td do
+      throwError "implies: cannot relate{indentExpr source}\nto{indentExpr target}"
+    withLocalDeclD `x sd fun x => do
+      let rest ← implies (sb.instantiate1 x) (tb.instantiate1 x)
+      withLocalDeclD `h source fun h => do
+        mkLambdaFVars #[h] (← mkLambdaFVars #[x] (mkApp rest (mkApp h x)))
+  | _, _ =>
+    if target.isAppOfArity ``And 2 then
+      let parts := junctionParts ``And target
+      return ← withLocalDeclD `h source fun h => do
+        mkLambdaFVars #[h] (← introParts target 0 fun j => do
+          return mkApp (← implies source parts[j]!) h)
+    let parts := junctionParts ``Or target
+    let index := parts.zipIdx.foldl (init := ({} : Std.HashMap Expr Nat))
+      fun acc (p, i) => acc.insert p i
+    -- `l : d` becomes a proof of the target, if `d` is among its disjuncts or
+    -- is refutable on its own. An equality can be stated either way round, so
+    -- the flipped form is looked up too rather than searched for.
+    let branchFor (d : Expr) : ReconstructM Expr := do
+      if let some i := index[d]? then
+        return ← withLocalDeclD `l d fun l => do
+          mkLambdaFVars #[l] (← injectPart ``Or target i l)
+      if let some (α, a, b) := d.eq? then
+        let flipped ← mkAppOptM ``Eq #[some α, some b, some a]
+        if let some i := index[flipped]? then
+          return ← withLocalDeclD `l d fun l => do
+            mkLambdaFVars #[l] (← injectPart ``Or target i (← mkAppM ``Eq.symm #[l]))
+      if let some inner := d.not? then
+        if let some (α, a, b) := inner.eq? then
+          let flipped ← mkAppOptM ``Eq #[some α, some b, some a]
+          let negated := mkApp (mkConst ``Not) flipped
+          if let some i := index[negated]? then
+            return ← withLocalDeclD `l d fun l => do
+              let contrapositive ← withLocalDeclD `e flipped fun e => do
+                mkLambdaFVars #[e] (mkApp l (← mkAppM ``Eq.symm #[e]))
+              mkLambdaFVars #[l] (← injectPart ``Or target i contrapositive)
+        -- Absent, so it has to be refutable: `t ≠ t` is what removal leaves.
+        if let some (_, a, b) := inner.eq? then
+          if ← isDefEq a b then
+            return ← withLocalDeclD `l d fun l => do
+              mkLambdaFVars #[l]
+                (← mkAppOptM ``absurd
+                  #[some inner, some target, some (← mkEqRefl a), some l])
+      throwError "implies: the disjunct{indentExpr d}\nis neither among\
+        {indentExpr target}\nnor refutable"
+    let branches ← (junctionParts ``Or source).mapM branchFor
+    withLocalDeclD `h source fun h => do
+      mkLambdaFVars #[h] (← elimParts source 0 (fun i hi => do
+        let some branch := branches[i]? | throwError "missing disjunct"
+        return mkApp branch hi) h)
+
+
+
+/-- A proof of a right-folded conjunction from proofs of its parts. -/
+def introAnd (parts : Array Expr) : ReconstructM Expr := do
+  if parts.isEmpty then
+    return ← mkAppM ``True.intro #[]
+  let mut acc := parts.back!
+  for p in parts.pop.reverse do
+    acc ← mkAppM ``And.intro #[p, acc]
+  return acc
+
+/-- Eliminates a disjunction, sending its `i`th disjunct to `handlers[i]`. -/
+partial def elimOr (chain : Expr) (handlers : Array Expr) (h : Expr) (i : Nat := 0) :
+    ReconstructM Expr := do
+  if i + 1 == handlers.size then
+    return mkApp handlers[i]! h
+  let some handler := handlers[i]? | throwError "missing disjunct"
+  let rest := chain.appArg!
+  withLocalDeclD `a chain.appFn!.appArg! fun a =>
+    withLocalDeclD `b rest fun b => do
+      mkAppM ``Or.elim #[h,
+        ← mkLambdaFVars #[a] (mkApp handler a),
+        ← mkLambdaFVars #[b] (← elimOr rest handlers b (i + 1))]
+
+/--
+`a ↔ b`, where the two say the same thing up to the shape vampire keeps them in.
+
+Congruence rather than implication, because a formula's parts sit in positions
+of either polarity -- the left of an arrow reverses -- and only an equivalence
+composes through all of them.
+
+Vampire's parser reverses a junction's arguments, so its reading of a formula
+differs from the goal's in the order of every conjunction and disjunction. The
+parts are therefore paired in order and, failing that, in reverse: two fixed
+pairings, not a search among them.
+-/
+partial def equiv (a b : Expr) : ReconstructM Expr := do
+  -- A hypothesis reaches here through elaboration, so its type can still be a
+  -- metavariable; every recogniser below would miss it.
+  let a ← instantiateMVars a
+  let b ← instantiateMVars b
+  if ← isDefEq a b then
+    return ← mkAppOptM ``Iff.refl #[some a]
+  -- An equality can be stated either way round.
+  if let (some (α, x, y), some (_, x', y')) := (a.eq?, b.eq?) then
+    if (← isDefEq x y') && (← isDefEq y x') then
+      return ← mkAppOptM ``eq_comm #[some α, some x, some y]
+  -- Flattening cancels a double negation, so one side can carry two where the
+  -- other carries none.
+  if let some ia := a.not? then
+    if let some iia := ia.not? then
+      return ← mkAppM ``Iff.trans
+        #[← mkAppOptM ``Classical.not_not #[some iia], ← equiv iia b]
+  if let some ib := b.not? then
+    if let some iib := ib.not? then
+      return ← mkAppM ``Iff.trans
+        #[← equiv a iib, ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some iib]]]
+  if let (some ia, some ib) := (a.not?, b.not?) then
+    return ← mkAppM ``not_congr #[← equiv ia ib]
+  if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
+    return ← mkAppM ``iff_congr #[← equiv a₁ b₁, ← equiv a₂ b₂]
+  match a, b with
+  | .forallE _ ad ab _, .forallE _ bd bb _ =>
+    if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
+      -- An arrow: its left side is negative, which is why this is an ↔.
+      return ← mkAppM ``imp_congr #[← equiv ad bd, ← equiv ab bb]
+    unless ← isDefEq ad bd do
+      throwError "equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
+    return ← withLocalDeclD `x ad fun x => do
+      let inner ← equiv (ab.instantiate1 x) (bb.instantiate1 x)
+      mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
+  | _, _ =>
+    if a.isAppOfArity ``Exists 2 && b.isAppOfArity ``Exists 2 then
+      match a.appArg!, b.appArg! with
+      | .lam _ ad abody _, .lam _ _ bbody _ =>
+        return ← withLocalDeclD `x ad fun x => do
+          let inner ← equiv (abody.instantiate1 x) (bbody.instantiate1 x)
+          mkAppM ``exists_congr #[← mkLambdaFVars #[x] inner]
+      | _, _ => throwError "equiv/exists: cannot relate{indentExpr a}\nto{indentExpr b}"
+    for fn in [``And, ``Or] do
+      if a.isAppOfArity fn 2 || b.isAppOfArity fn 2 then
+        let ap := junctionParts fn a
+        let bp := junctionParts fn b
+        unless ap.size == bp.size do
+          throwError "junctions have {ap.size} and {bp.size} parts:\
+            {indentExpr a}\nand{indentExpr b}"
+        -- Part by part, in order. The translation emits a junction in the
+        -- order vampire keeps it, so there is nothing to align: were the two
+        -- to disagree, an `input` step would say so rather than a guess being
+        -- made about which part answers to which. The two sides may associate
+        -- differently, which is what flattening changes, so the parts are
+        -- reached by index rather than by following either shape.
+        let parts ← ap.zipIdx.mapM fun (x, i) => equiv x bp[i]!
+        if fn == ``And then
+          let forward ← withLocalDeclD `h a fun h => do
+            mkLambdaFVars #[h] (← introParts b 0 fun j => do
+              mkAppM ``Iff.mp #[parts[j]!, ← projectPart fn a j h])
+          let backward ← withLocalDeclD `h b fun h => do
+            mkLambdaFVars #[h] (← introParts a 0 fun j => do
+              mkAppM ``Iff.mpr #[parts[j]!, ← projectPart fn b j h])
+          return ← mkAppM ``Iff.intro #[forward, backward]
+        else
+          let forward ← withLocalDeclD `h a fun h => do
+            mkLambdaFVars #[h] (← elimParts a 0 (fun i hi => do
+              injectPart fn b i (← mkAppM ``Iff.mp #[parts[i]!, hi])) h)
+          let backward ← withLocalDeclD `h b fun h => do
+            mkLambdaFVars #[h] (← elimParts b 0 (fun i hi => do
+              injectPart fn a i (← mkAppM ``Iff.mpr #[parts[i]!, hi])) h)
+          return ← mkAppM ``Iff.intro #[forward, backward]
+    throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
 
 /--
 The Lean proposition a step asserts. A clause is implicitly universally

@@ -35,21 +35,6 @@ private partial def inject (target : Expr) (i : Nat) (hypothesis : Expr) :
       #[some target.appFn!.appArg!, none, some (← inject rest i hypothesis)]
 
 /--
-Something of the clause's sort, for a variable the clause does not mention.
-
-A universal can bind more than the clause kept, and instantiating it needs
-some element; vampire's domains are never empty.
--/
-private def someElement (τ : Expr) : ReconstructM Expr := do
-  let goal := mkApp (mkConst ``Nonempty [← getLevel τ]) τ
-  match ← trySynthInstance goal with
-  | .some inst =>
-    mkAppOptM ``Classical.choice #[some τ, some inst]
-  | _ =>
-    throwError "cannot instantiate a quantifier over{indentExpr τ}\n\
-      without `Nonempty` for it"
-
-/--
 A proof of `⟦f⟧ → target`, where `target` is the clause as a disjunction.
 
 `vars` sends a variable of the premise to what stands for it: the local the
@@ -156,39 +141,6 @@ partial def derive (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UIn
           mkLambdaFVars #[h] (← inject target i h)
     throwError "the literal{indentExpr literal}\nis not among{indentExpr target}"
 
-
-/--
-Binds every skolem the premise's existentials introduce.
-
-`newcnf` skolemises while clausifying, so the clause is stated in symbols that
-nothing has bound yet -- and the clause has to be read before it can be
-derived. Choosing the witnesses needs only the premise, so this runs first.
--/
-private partial def registerSkolems (sorts : Array (UInt32 × String))
-    (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) :
-    ReconstructM PUnit := do
-  let bound (f : Formula) : Array (UInt32 × String) :=
-    f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
-  match ← connectiveOf f with
-  | .«exists» =>
-    let some body := f.subformulas[0]? | throwError "quantifier without a body"
-    let rec go (rest : List (UInt32 × String)) (vars : Vars) : ReconstructM PUnit := do
-      match rest with
-      | [] => registerSkolems sorts skolems vars body
-      | (v, sortName) :: rest => do
-        let τ ← sortType sortName
-        let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-          mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
-        let (witness, _) ← epsilon τ p
-        registerSkolem skolems vars v witness
-        go rest (vars.insert v witness)
-    go (bound f).toList vars
-  | .«forall» =>
-    let some body := f.subformulas[0]? | throwError "quantifier without a body"
-    withVars (bound f) vars fun vars _ => registerSkolems sorts skolems vars body
-  | .and | .or | .not | .imp | .iff | .xor =>
-    f.subformulas.forM (registerSkolems sorts skolems vars)
-  | _ => return
 
 /--
 `clausify`: one clause of a formula's conjunctive normal form.

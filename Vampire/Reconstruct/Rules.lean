@@ -1,7 +1,10 @@
 import Vampire.InferenceRule
 import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Clause
+import Vampire.Reconstruct.Rules.Congruence
 import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
+import Vampire.Reconstruct.Rules.Input
 import Vampire.Reconstruct.Rules.Skolem
 
 namespace Vampire.Reconstruct
@@ -24,9 +27,15 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .predicateDefinition => Definition.definitionStep step
   | .skolemize => Skolem.skolemize step
   | .clausify => Clausify.clausify step
+  | .input => Input.input step
+  | .removeDuplicateLiterals => Clause.literals step
+  | .trivialInequalityRemoval => Clause.literals step
+  | .reorientEquations => Clause.literals step
+  | .flatten => Congruence.restated step
+  | .definitionFolding => Congruence.unfolded step
 
   -- Not implemented yet.
-  | .input => unimplemented step
+  | .definitionUnfolding => unimplemented step
   | .genericFormulaClauseTransformation => unimplemented step
   | .negatedConjecture => unimplemented step
   | .answerLiteralInjection => unimplemented step
@@ -34,20 +43,15 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .claimDefinition => unimplemented step
   | .rectify => unimplemented step
   | .closure => unimplemented step
-  | .flatten => unimplemented step
   | .ennf => unimplemented step
   | .nnf => unimplemented step
   | .reduceFalseTrue => unimplemented step
-  | .definitionFolding => unimplemented step
   | .theoryNormalization => unimplemented step
   | .alascaIntegerTransformation => unimplemented step
   | .skolemSymbolIntroduction => unimplemented step
-  | .reorientEquations => unimplemented step
   | .genericFormulaClauseTransformationLast => unimplemented step
   | .genericSimplifyingInference => unimplemented step
   | .reorderLiterals => unimplemented step
-  | .removeDuplicateLiterals => unimplemented step
-  | .trivialInequalityRemoval => unimplemented step
   | .equalityResolutionWithDeletion => unimplemented step
   | .forwardSubsumptionResolution => unimplemented step
   | .backwardSubsumptionResolution => unimplemented step
@@ -148,7 +152,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .equalityProxyDefinition => unimplemented step
   | .equalityProxyAxiom => unimplemented step
   | .alascaIntegralityAxiom => unimplemented step
-  | .definitionUnfolding => unimplemented step
   | .predicateDefinitionUnfolding => unimplemented step
   | .predicateDefinitionMerging => unimplemented step
   | .polarityFlipping => unimplemented step
