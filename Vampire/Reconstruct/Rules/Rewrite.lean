@@ -3,38 +3,88 @@ import Vampire.Reconstruct.Basic
 /-!
 Rewriting with an equation.
 
-`ForwardDemodulation` finds a unit equation in the index whose left-hand side
-matches a subterm of a literal of the clause being simplified, and replaces
-every occurrence of that subterm by the right-hand side under the match. So the
-conclusion is the premise with one literal rewritten, and the equation is what
-rewrites it.
+`ForwardDemodulation` finds a unit equation whose left-hand side matches a
+subterm of a literal of the clause being simplified and replaces the subterm by
+the right-hand side under the match. `Superposition` does the same with the
+equation's own clause and a unifier rather than a match, so the equation's other
+literals join the conclusion.
 
-Which subterm of which literal, and which side of the equation was matched, is
-gone once the inference is done -- vampire's own proof checker calls working it
-out afterwards "very hard" and guesses -- so the fork records it.
+Which subterm of which literal, which side of the equation, and the
+substitution: none of it survives the inference -- vampire's own proof checker
+calls working out afterwards which way a demodulator was used "very hard" and
+guesses -- so the fork records it.
 -/
 
 namespace Vampire.Reconstruct.Rewrite
 
 open Lean Meta
 
-/-- The same proposition with every occurrence of `from` replaced by `to`. -/
-private def rewriteWith (heq «from» to : Expr) (h : Expr) : ReconstructM Expr := do
-  let stated ← instantiateMVars (← inferType h)
-  let τ ← inferType «from»
-  let motive ← withLocalDeclD `x τ fun x => do
-    mkLambdaFVars #[x] (stated.replace fun e => if e == «from» then some x else none)
-  mkAppOptM ``Eq.subst #[some τ, some motive, some «from», some to, some heq, some h]
+/--
+A term of a premise, as the inference saw it: applied symbols down to what
+stands for the premise's variables.
+
+Which occurrences of a term a rewrite replaces is settled on vampire's terms
+rather than on the Lean expressions they rebuild to. The two are not the same
+question: a symbol vampire introduced rebuilds to the definition that gave it
+meaning, so two of vampire's terms can rebuild to one expression, and replacing
+occurrences of that expression would replace ones the inference left alone.
+-/
+private inductive Tree where
+  | app (head : Expr) (args : Array Tree)
+  | leaf (e : Expr)
+deriving BEq, Inhabited
+
+private partial def treeOf (vars : Vars) (bindings : Std.HashMap UInt32 Term)
+    (t : Term) : ReconstructM Tree := do
+  if t.isVar then
+    match bindings[t.var]? with
+    | some image => treeOf vars {} image
+    | none =>
+      let some x := vars[t.var]?
+        | throwError "variable X{t.var} has no recorded sort"
+      return .leaf x
+  else
+    let some symbol := t.symbol?
+      | throwError "term has unknown functor {t.functor}"
+    return .app (← symbolExpr symbol.name) (← t.args.mapM (treeOf vars bindings))
+
+private def Tree.toExpr : Tree → Expr
+  | .leaf e => e
+  | .app head args => mkAppN head (args.map Tree.toExpr)
+
+private partial def Tree.replacing (target : Tree) (x : Expr) : Tree → Tree
+  | t@(.leaf _) => if t == target then .leaf x else t
+  | t@(.app head args) =>
+    if t == target then .leaf x else .app head (args.map (Tree.replacing target x))
+
+/-- A premise's literal at the recorded substitution, with `target` abstracted. -/
+private def literalAbstracting (vars : Vars) (bindings : Std.HashMap UInt32 Term)
+    (l : Literal) (target : Tree) (x : Expr) : ReconstructM Expr := do
+  let args ← l.args.mapM fun a =>
+    return (Tree.replacing target x (← treeOf vars bindings a)).toExpr
+  let atom ←
+    if l.isEquality then
+      let some sortName := l.sort?
+        | throwError "equality literal without a recorded argument sort"
+      let #[lhs, rhs] := args
+        | throwError "equality literal with {args.size} arguments"
+      mkAppOptM ``Eq #[some (← sortType sortName), some lhs, some rhs]
+    else
+      let some symbol := l.symbol?
+        | throwError "literal has unknown predicate {l.predicate}"
+      pure (mkAppN (← symbolExpr symbol.name) args)
+  return if l.polarity then atom else mkApp (mkConst ``Not) atom
 
 /--
 The equation a premise use points at, as an oriented rewrite: the side the
-inference matched, what it rewrites to, and the equation itself.
+inference matched, what it rewrites to, and a proof of the equation that way
+round.
 
 Which way round the equation was used is read off the recorded side, and the
-recorded match is what states that side in the premise's own variables.
+recorded substitution is what states that side in the premise's own variables.
 -/
-private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
-    (vars : Vars) (proof stated : Expr) : ReconstructM (Expr × Expr × Expr) := do
+private def orientedEquation (use : PremiseUse) (vars : Vars) (proof stated : Expr) :
+    ReconstructM (Expr × Expr × Expr) := do
   let some equationSide := use.term
     | throwError "the step did not record which side of the equation it used"
   let «from» ← term (← substitutedVars use vars) equationSide
@@ -47,6 +97,41 @@ private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
   throwError "neither side of{indentExpr stated}\nis the term{indentExpr «from»}\n\
     the equation was matched at"
 
+/--
+What a rewriting inference did to the premise it rewrote: which literal, and
+the term within it, at the substitution the premise was taken at.
+-/
+private structure Rewritten where
+  literals : Array Literal
+  bindings : Std.HashMap UInt32 Term
+  literal : Nat
+  wholePremise : Bool
+  target : Tree
+
+private def rewrittenOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars) :
+    ReconstructM Rewritten := do
+  let some literal := use.literal
+    | throwError "the step did not record the literal it rewrote"
+  let some rewritten := use.term
+    | throwError "the step did not record the term it rewrote"
+  let some clause := parent.clause?
+    | throwError "the premise being rewritten is not a clause"
+  let bindings := Std.HashMap.ofList use.bindings.toList
+  return { literals := clause.literals, bindings, literal := literal.toNat
+           wholePremise := use.rewritesWholePremise
+           target := ← treeOf vars bindings rewritten }
+
+/-- `heq : t = to` turns a proof of a literal into one of the literal rewritten. -/
+private def rewriteWith (rw : Rewritten) (vars : Vars) (heq to : Expr) (i : Nat)
+    (h : Expr) : ReconstructM Expr := do
+  let some l := rw.literals[i]?
+    | throwError "the premise has no literal {i}"
+  let «from» := rw.target.toExpr
+  let τ ← inferType «from»
+  let motive ← withLocalDeclD `x τ fun x => do
+    mkLambdaFVars #[x] (← literalAbstracting vars rw.bindings l rw.target x)
+  mkAppOptM ``Eq.subst #[some τ, some motive, some «from», some to, some heq, some h]
+
 /-- `forward_demodulation`: the premise with one literal rewritten. -/
 def demodulation (step : Step) : ReconstructM Expr := do
   let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
@@ -55,10 +140,6 @@ def demodulation (step : Step) : ReconstructM Expr := do
     | throwError "demodulation should have two premises"
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
-  let some rewrittenLiteral := mainUse.literal
-    | throwError "demodulation did not record the literal it rewrote"
-  let some rewrittenTerm := mainUse.term
-    | throwError "demodulation did not record the term it rewrote"
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
     let mut kept : Vars := {}
@@ -66,14 +147,14 @@ def demodulation (step : Step) : ReconstructM Expr := do
       kept := kept.insert v x
     -- Rewriting can be what removes a variable from the clause.
     let vars ← coverVars mainParent kept
+    let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let (_, to, heq) ← orientedEquation sideParent sideUse vars sideAt sideType
-    let rewritten ← term (← substitutedVars mainUse vars) rewrittenTerm
+    let (_, to, heq) ← orientedEquation sideUse vars sideAt sideType
     let place := placeLiteral target
     let body ← elimParts mainType 0 (fun i h => do
-      if i == rewrittenLiteral.toNat then
-        place (← rewriteWith heq rewritten to h)
+      if i == rw.literal || rw.wholePremise then
+        place (← rewriteWith rw vars heq to i h)
       else
         place h) mainAt
     mkLambdaFVars xs body
@@ -89,10 +170,6 @@ def superposition (step : Step) : ReconstructM Expr := do
     | throwError "superposition should have two premises"
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
-  let some rewrittenLiteral := mainUse.literal
-    | throwError "superposition did not record the literal it rewrote"
-  let some rewrittenTerm := mainUse.term
-    | throwError "superposition did not record the term it rewrote"
   let some equationLiteral := sideUse.literal
     | throwError "superposition did not record which literal is the equation"
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
@@ -101,26 +178,22 @@ def superposition (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
     let vars ← coverVars sideParent (← coverVars mainParent kept)
+    let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let place := placeLiteral target
-    let rewritten ← term (← substitutedVars mainUse vars) rewrittenTerm
     -- The equation is a literal of its own premise, so the case where it holds
     -- is the one that rewrites; its other literals are literals of the
     -- conclusion, as are the ones the rewritten premise keeps.
     let body ← elimParts mainType 0 (fun i h => do
-      let rewrite (h : Expr) : ReconstructM Expr :=
+      if i == rw.literal || rw.wholePremise then
         elimParts sideType 0 (fun j hSide => do
           unless j == equationLiteral.toNat do
             return ← place hSide
-          let (_, to, heq) ← orientedEquation sideParent sideUse vars hSide
-            (← inferType hSide)
-          place (← rewriteWith heq rewritten to h)) sideAt
-      if i == rewrittenLiteral.toNat || mainUse.rewritesWholePremise then
-        rewrite h
+          let (_, to, heq) ← orientedEquation sideUse vars hSide (← inferType hSide)
+          place (← rewriteWith rw vars heq to i h)) sideAt
       else
         place h) mainAt
     mkLambdaFVars xs body
-
 
 end Vampire.Reconstruct.Rewrite
