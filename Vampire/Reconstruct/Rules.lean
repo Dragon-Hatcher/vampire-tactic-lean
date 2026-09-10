@@ -42,6 +42,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .input => Input.input step
   | .resolution => Resolution.resolution step
   | .extensionalityResolution => Resolution.resolution step
+  | .forwardLiteralRewriting => Resolution.resolution step
   | .factoring => Resolution.factoring step
   | .equalityResolutionWithDeletion =>
     Resolution.equalityResolutionWithDeletion step
@@ -80,7 +81,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaBwdDemodulation => unimplemented step
   | .forwardSubsumptionDemodulation => unimplemented step
   | .backwardSubsumptionDemodulation => unimplemented step
-  | .forwardLiteralRewriting => unimplemented step
   | .innerRewriting => unimplemented step
   | .condensation => unimplemented step
   | .evaluation => unimplemented step
