@@ -5,7 +5,9 @@ Rewriting with an equation.
 
 `ForwardDemodulation` finds a unit equation whose left-hand side matches a
 subterm of a literal of the clause being simplified and replaces the subterm by
-the right-hand side under the match. `Superposition` does the same with the
+the right-hand side under the match; `BackwardDemodulation` is the same
+inference found from the other end, and states its premises the same way
+round. `Superposition` does the same with the
 equation's own clause and a unifier rather than a match, so the equation's other
 literals join the conclusion.
 

@@ -296,6 +296,48 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
         | none => someElement (← sortType sortName)))
     mkLambdaFVars xs body
 
+/--
+A proof of what is kept of a definition, from the definition.
+
+Under the binders both sides share, one direction of an equivalence is what the
+equivalence says either way round.
+-/
+private partial def weaken (premise stated conclusion : Expr) :
+    ReconstructM Expr := do
+  if let (.forallE _ d body _, .forallE n d' body' _) := (← whnf stated, conclusion) then
+    unless (← isProp d) && !body.hasLooseBVars do
+      unless ← isDefEq d d' do
+        throwError "the definition binds{indentExpr d}\nwhere what is kept of \
+          it binds{indentExpr d'}"
+      return ← withLocalDeclD n d' fun x => do
+        let inner ← weaken (mkApp premise x) (body.instantiate1 x) (body'.instantiate1 x)
+        mkLambdaFVars #[x] inner
+  let some (antecedent, consequent) := conclusion.arrow?
+    | throwError "what is kept of a definition is not an implication:\
+      {indentExpr conclusion}"
+  if let some (left, right) := stated.iff? then
+    if (← isDefEq left antecedent) && (← isDefEq right consequent) then
+      return ← mkAppM ``Iff.mp #[premise]
+    if (← isDefEq right antecedent) && (← isDefEq left consequent) then
+      return ← mkAppM ``Iff.mpr #[premise]
+    throwError "neither direction of{indentExpr stated}\nis{indentExpr conclusion}"
+  if ← isDefEq stated conclusion then
+    return premise
+  throwError "cannot keep{indentExpr conclusion}\nof{indentExpr stated}"
+
+/--
+`unused_predicate_definition_removal`: one direction of a definition, the only
+one still needed.
+
+`PredicateDefinition` keeps a definition whose predicate is only ever used one
+way round as an implication rather than an equivalence.
+-/
+def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "unused predicate definition removal should have one premise, \
+      got {step.premises.size}"
+  weaken premiseProof (← instantiateMVars premiseStated) (← step.conclusion)
+
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
   | .functionDefinition | .avatarDefinition | .predicateDefinition => true
