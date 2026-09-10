@@ -1,3 +1,5 @@
+import Vampire.InferenceRule
+
 namespace Vampire
 
 /-- Absent index. -/
@@ -13,6 +15,7 @@ def none32 : UInt32 := 0xFFFFFFFF
 private structure Layout where
   functions : Nat
   predicates : Nat
+  sorts : Nat
   terms : Nat
   args : Nat
   literals : Nat
@@ -22,10 +25,12 @@ private structure Layout where
   units : Nat
   unitLits : Nat
   parents : Nat
+  varSorts : Nat
   strings : Nat
   proofText : Nat
   numFunctions : Nat
   numPredicates : Nat
+  numSorts : Nat
   numTerms : Nat
   numLiterals : Nat
   numFormulas : Nat
@@ -95,11 +100,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 1
+private def version : UInt32 := 2
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 18 * 4 then
+  if data.size < 21 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -107,31 +112,40 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
+  let numRules := word 20
+  if numRules != InferenceRule.count then
+    .error (.error s!"vampire declares {numRules} inference rules but \
+      Vampire/InferenceRule.lean has {InferenceRule.count}; \
+      rerun scripts/gen-inference-rules.py")
   let numFunctions := word 5
   let numPredicates := word 6
-  let numTerms := word 7
-  let numArgs := word 8
-  let numLiterals := word 9
-  let numFormulas := word 10
-  let numSubs := word 11
-  let numVars := word 12
-  let numUnits := word 13
-  let numUnitLits := word 14
-  let numParents := word 15
-  let stringsLen := word 16
-  let proofTextLen := word 17
-  let functions := 18 * 4
+  let numSorts := word 7
+  let numTerms := word 8
+  let numArgs := word 9
+  let numLiterals := word 10
+  let numFormulas := word 11
+  let numSubs := word 12
+  let numVars := word 13
+  let numUnits := word 14
+  let numUnitLits := word 15
+  let numParents := word 16
+  let numVarSorts := word 17
+  let stringsLen := word 18
+  let proofTextLen := word 19
+  let functions := 21 * 4
   let predicates := functions + numFunctions * 2 * 4
-  let terms := predicates + numPredicates * 2 * 4
+  let sorts := predicates + numPredicates * 2 * 4
+  let terms := sorts + numSorts * 4
   let args := terms + numTerms * 4 * 4
   let literals := args + numArgs * 4
-  let formulas := literals + numLiterals * 4 * 4
-  let subs := formulas + numFormulas * 6 * 4
+  let formulas := literals + numLiterals * 5 * 4
+  let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 8 * 4
+  let unitLits := units + numUnits * 10 * 4
   let parents := unitLits + numUnitLits * 4
-  let strings := parents + numParents * 4
+  let varSorts := parents + numParents * 4
+  let strings := varSorts + numVarSorts * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -144,9 +158,10 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   return {
     data, terminationReason := reason
     layout := {
-      functions, predicates, terms, args, literals, formulas, subs, vars, units,
-      unitLits, parents, strings, proofText, numFunctions, numPredicates,
-      numTerms, numLiterals, numFormulas, numUnits, proofTextLen
+      functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
+      units, unitLits, parents, varSorts, strings, proofText, numFunctions,
+      numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
+      proofTextLen
     }
   }
 
@@ -224,6 +239,11 @@ def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
     arity := p.field p.layout.predicates 2 predicate.toNat 1
   }
 
+/-- The name of the sort vampire numbers `i`. -/
+def sortName? (p : Proof) (i : UInt32) : Option String :=
+  if i.toNat >= p.layout.numSorts then none
+  else some (p.string (readU32 p.data (p.layout.sorts + i.toNat * 4)))
+
 /-- The final step of the derivation, when vampire found a refutation. -/
 def refutation? (p : Proof) : Option Unit :=
   if readU32 p.data 12 == 0 then none
@@ -276,7 +296,7 @@ end Term
 namespace Literal
 
 @[inline] private def field (l : Literal) (off : Nat) : UInt32 :=
-  l.proof.field l.proof.layout.literals 4 l.idx.toNat off
+  l.proof.field l.proof.layout.literals 5 l.idx.toNat off
 
 /-- The predicate symbol's index. -/
 def predicate (l : Literal) : UInt32 := l.field 0
@@ -299,6 +319,14 @@ def args (l : Literal) : Array Term :=
   Array.ofFn (n := l.arity.toNat) fun i =>
     ⟨l.proof, readU32 l.proof.data (l.proof.layout.args + (first.toNat + i.val) * 4)⟩
 
+/--
+The sort of an equality's arguments. A clause `X = Y` gives no other way to
+recover it, so the worker records it.
+-/
+def sort? (l : Literal) : Option String :=
+  let i := l.field 4
+  if i == none32 then none else l.proof.sortName? i
+
 protected def render (l : Literal) : String :=
   let name := (l.symbol?.map (·.name)).getD s!"p{l.predicate}"
   let args := l.args.toList.map toString
@@ -319,8 +347,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 8 c.idx.toNat 4
-  let count := p.field p.layout.units 8 c.idx.toNat 5
+  let first := p.field p.layout.units 10 c.idx.toNat 4
+  let count := p.field p.layout.units 10 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -340,7 +368,7 @@ end Clause
 namespace Formula
 
 @[inline] private def field (f : Formula) (off : Nat) : UInt32 :=
-  f.proof.field f.proof.layout.formulas 6 f.idx.toNat off
+  f.proof.field f.proof.layout.formulas 7 f.idx.toNat off
 
 /-- The formula's top-level connective. -/
 def connective (f : Formula) : Except Error Connective :=
@@ -353,6 +381,14 @@ def connective (f : Formula) : Except Error Connective :=
 def literal? (f : Formula) : Option Literal :=
   let l := f.field 1
   if l == none32 then none else some ⟨f.proof, l⟩
+
+/--
+The name of a named subformula: a definition vampire introduced while
+clausifying. `none` for every other connective.
+-/
+def name? (f : Formula) : Option String :=
+  let off := f.field 6
+  if off == none32 then none else some (f.proof.string off)
 
 /-- The immediate subformulas. -/
 def subformulas (f : Formula) : Array Formula :=
@@ -405,13 +441,13 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 8 u.idx.toNat off
+  u.proof.field u.proof.layout.units 10 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
 
-/-- The inference rule, as vampire's numbering. -/
-def rule (u : Unit) : UInt32 := u.field 1
+/-- The inference rule, as vampire numbers it. -/
+def ruleIndex (u : Unit) : UInt32 := u.field 1
 
 /-- Where this step came from. -/
 def inputType (u : Unit) : Except Error UnitInputType :=
@@ -430,6 +466,21 @@ def clause? (u : Unit) : Option Clause :=
 /-- The formula, when this step has not been clausified. -/
 def formula? (u : Unit) : Option Formula :=
   if u.isClause then none else some ⟨u.proof, u.field 4⟩
+
+/-- The rule this step was derived by. -/
+def rule? (u : Unit) : Option InferenceRule := InferenceRule.ofNat? (u.field 1).toNat
+
+/--
+The sorts of the step's free variables. A clause is implicitly universally
+quantified over them, so rebuilding it as a Lean proposition needs their sorts.
+-/
+def varSorts (u : Unit) : Array (UInt32 × String) :=
+  let p := u.proof
+  let first := u.field 8
+  let count := u.field 9
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.varSorts + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=

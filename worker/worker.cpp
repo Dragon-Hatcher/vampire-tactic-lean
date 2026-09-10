@@ -12,21 +12,31 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    18 words, see `Header`
+ *   header    21 words, see `write`
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity}          -- indexed by a literal's predicate
+ *   sorts     {nameOff}                 -- vampire's type constructors
  *   terms     {tag, value, firstArg, arity}   tag: 0 = variable, 1 = functor
  *   args      term indices, shared by terms and literals
- *   literals  {predicate, flags, firstArg, arity}  flags: 1 = positive, 2 = equality
- *   formulas  {connective, literal, firstSub, numSubs, firstVar, numVars}
+ *   literals  {predicate, flags, firstArg, arity, sort}
+ *             flags: 1 = positive, 2 = equality. `sort` is the sort of an
+ *             equality's arguments and `NONE` otherwise; a clause `X = Y`
+ *             offers no other way to recover it.
+ *   formulas  {connective, literal, firstSub, numSubs, firstVar, numVars, name}
+ *             `name` is the string offset of a named subformula -- a
+ *             definition vampire introduced while clausifying -- and `NONE`
+ *             otherwise
  *   subs      formula indices
  *   vars      variable numbers of quantified formulas
  *   units     {number, rule, inputType, flags, payload, numLits,
- *              firstParent, numParents}
+ *              firstParent, numParents, firstVarSort, numVarSorts}
  *             flags: 1 = clause. A clause's payload is its first literal
  *             index, a formula's payload is its formula index.
  *   unitLits  literal indices
  *   parents   unit indices
+ *   varSorts  {variable, sort} pairs, giving the sorts a unit's free
+ *             variables take -- a clause is implicitly universally quantified
+ *             over them, so rebuilding it needs their sorts
  *   strings   NUL-terminated names, padded to a 4-byte boundary
  *   proofText vampire's own rendering of the proof, padded likewise
  */
@@ -49,6 +59,7 @@
 #include "Kernel/InferenceStore.hpp"
 #include "Kernel/Problem.hpp"
 #include "Kernel/Signature.hpp"
+#include "Kernel/SortHelper.hpp"
 #include "Kernel/Term.hpp"
 #include "Kernel/Unit.hpp"
 #include "Lib/Environment.hpp"
@@ -69,16 +80,16 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 1;
+const uint32_t VERSION = 2;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 struct Encoder {
-  std::vector<uint32_t> functions, predicates, terms, args, literals, formulas,
-      subs, vars, units, unitLits, parents;
+  std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
+      formulas, subs, vars, units, unitLits, parents, varSorts;
   std::string strings;
   std::string proofText;
 
-  std::unordered_map<uint64_t, uint32_t> termSeen;
+  std::unordered_map<uint64_t, uint32_t> termSeen, sortSeen;
   std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen;
 
   uint32_t addString(const std::string& s)
@@ -101,6 +112,21 @@ struct Encoder {
       predicates.push_back(addString(sym->name()));
       predicates.push_back(sym->arity());
     }
+  }
+
+  /** Interns a sort, which for our purposes is always an atomic type. */
+  uint32_t encodeSort(TermList sort)
+  {
+    auto seen = sortSeen.find(sort.content());
+    if (seen != sortSeen.end())
+      return seen->second;
+    std::string name = sort.isTerm()
+      ? env.signature->typeConName(sort.term()->functor())
+      : "$unknown";
+    uint32_t idx = static_cast<uint32_t>(sorts.size());
+    sorts.push_back(addString(name));
+    sortSeen.emplace(sort.content(), idx);
+    return idx;
   }
 
   uint32_t encodeTerm(TermList t)
@@ -163,11 +189,13 @@ struct Encoder {
     if (l->isEquality())
       flags |= 2;
 
-    uint32_t idx = static_cast<uint32_t>(literals.size() / 4);
+    uint32_t idx = static_cast<uint32_t>(literals.size() / 5);
     literals.push_back(l->functor());
     literals.push_back(flags);
     literals.push_back(arity == 0 ? NONE : firstArg);
     literals.push_back(arity);
+    literals.push_back(l->isEquality()
+      ? encodeSort(SortHelper::getEqualityArgumentSort(l)) : NONE);
     literalSeen.emplace(l, idx);
     return idx;
   }
@@ -178,11 +206,12 @@ struct Encoder {
     if (seen != formulaSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(formulas.size() / 6);
-    formulas.resize(formulas.size() + 6, 0);
+    uint32_t idx = static_cast<uint32_t>(formulas.size() / 7);
+    formulas.resize(formulas.size() + 7, 0);
     formulaSeen.emplace(f, idx);
 
     uint32_t literal = NONE;
+    uint32_t name = NONE;
     std::vector<uint32_t> subIdxs;
     std::vector<uint32_t> varNums;
 
@@ -210,6 +239,9 @@ struct Encoder {
           varNums.push_back(it->head().first);
         subIdxs.push_back(encodeFormula(f->qarg()));
         break;
+      case NAME:
+        name = addString(static_cast<const NamedFormula*>(f)->name());
+        break;
       default:
         // TRUE, FALSE, BOOL_TERM, NAME, NOCONN carry no subformulas here.
         break;
@@ -222,12 +254,13 @@ struct Encoder {
     for (uint32_t v : varNums)
       vars.push_back(v);
 
-    formulas[6 * idx + 0] = static_cast<uint32_t>(f->connective());
-    formulas[6 * idx + 1] = literal;
-    formulas[6 * idx + 2] = subIdxs.empty() ? NONE : firstSub;
-    formulas[6 * idx + 3] = static_cast<uint32_t>(subIdxs.size());
-    formulas[6 * idx + 4] = varNums.empty() ? NONE : firstVar;
-    formulas[6 * idx + 5] = static_cast<uint32_t>(varNums.size());
+    formulas[7 * idx + 0] = static_cast<uint32_t>(f->connective());
+    formulas[7 * idx + 1] = literal;
+    formulas[7 * idx + 2] = subIdxs.empty() ? NONE : firstSub;
+    formulas[7 * idx + 3] = static_cast<uint32_t>(subIdxs.size());
+    formulas[7 * idx + 4] = varNums.empty() ? NONE : firstVar;
+    formulas[7 * idx + 5] = static_cast<uint32_t>(varNums.size());
+    formulas[7 * idx + 6] = name;
     return idx;
   }
 
@@ -237,8 +270,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 8);
-    units.resize(units.size() + 8, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 10);
+    units.resize(units.size() + 10, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -271,14 +304,30 @@ struct Encoder {
     for (uint32_t p : parentIdxs)
       parents.push_back(p);
 
-    units[8 * idx + 0] = u->number();
-    units[8 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[8 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[8 * idx + 3] = flags;
-    units[8 * idx + 4] = payload;
-    units[8 * idx + 5] = numLits;
-    units[8 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[8 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> sortsOfVars;
+    SortHelper::collectVariableSorts(u, sortsOfVars);
+    uint32_t firstVarSort = static_cast<uint32_t>(varSorts.size() / 2);
+    uint32_t numVarSorts = 0;
+    DHMap<unsigned, TermList, FnvHash, IdentityHash>::Iterator it2(sortsOfVars);
+    while (it2.hasNext()) {
+      unsigned var;
+      TermList sort;
+      it2.next(var, sort);
+      varSorts.push_back(var);
+      varSorts.push_back(encodeSort(sort));
+      numVarSorts++;
+    }
+
+    units[10 * idx + 0] = u->number();
+    units[10 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[10 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[10 * idx + 3] = flags;
+    units[10 * idx + 4] = payload;
+    units[10 * idx + 5] = numLits;
+    units[10 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[10 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[10 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[10 * idx + 9] = numVarSorts;
     return idx;
   }
 };
@@ -316,20 +365,26 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, refutation);
   putWord(buf, static_cast<uint32_t>(enc.functions.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.predicates.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.sorts.size()));
   putWord(buf, static_cast<uint32_t>(enc.terms.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.args.size()));
-  putWord(buf, static_cast<uint32_t>(enc.literals.size() / 4));
-  putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 6));
+  putWord(buf, static_cast<uint32_t>(enc.literals.size() / 5));
+  putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 8));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 10));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
+  putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
   putWord(buf, static_cast<uint32_t>(enc.proofText.size()));
+  // Lets the Lean side notice that its generated `InferenceRule` is stale.
+  putWord(buf, static_cast<uint32_t>(
+    InferenceRule::FUNCTIONAL_EXTENSIONALITY_AXIOM) + 1);
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
+  putWords(buf, enc.sorts);
   putWords(buf, enc.terms);
   putWords(buf, enc.args);
   putWords(buf, enc.literals);
@@ -339,6 +394,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.units);
   putWords(buf, enc.unitLits);
   putWords(buf, enc.parents);
+  putWords(buf, enc.varSorts);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

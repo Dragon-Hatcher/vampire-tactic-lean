@@ -273,8 +273,18 @@ def Role.render : Role → String
   | .axiom => "axiom"
   | .negatedConjecture => "negated_conjecture"
 
+/--
+The Lean expressions the TPTP names stand for, so that a proof over those names
+can be read back. Anything vampire introduces itself -- a skolem function, an
+AVATAR predicate -- is absent, which is how such names are recognised.
+-/
+structure Symbols where
+  sorts : Std.HashMap String Expr := {}
+  symbols : Std.HashMap String Expr := {}
+deriving Inhabited
+
 /-- The TPTP problem for a set of hypotheses, to be refuted. -/
-def problemOf (hypotheses : Array (Expr × Role)) : MetaM String := do
+def problemOf (hypotheses : Array (Expr × Role)) : MetaM (String × Symbols) := do
   let go : TranslateM (Array String) := do
     let mut formulas := #[]
     for ((h, role), i) in hypotheses.zipIdx do
@@ -283,6 +293,9 @@ def problemOf (hypotheses : Array (Expr × Role)) : MetaM String := do
     return formulas
   let (formulas, state) ← go.run {}
   let lines := state.decls.types ++ state.decls.symbols ++ formulas
-  return String.intercalate "\n" lines.toList ++ "\n"
+  let invert (m : Std.HashMap Expr String) : Std.HashMap String Expr :=
+    m.fold (init := {}) fun acc e name => acc.insert name e
+  let symbols := { sorts := invert state.sorts, symbols := invert state.symbols }
+  return (String.intercalate "\n" lines.toList ++ "\n", symbols)
 
 end Vampire

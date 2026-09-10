@@ -1,6 +1,7 @@
 import Lean
 import Auto.Tactic
 import Vampire.Preprocess
+import Vampire.Reconstruct
 import Vampire.Worker
 
 namespace Vampire
@@ -15,28 +16,30 @@ structure TacticConfig extends Config where
   showQuery : Bool := false
 deriving Inhabited
 
-/-- The outcome of running vampire on a goal. -/
-inductive Result where
-  /-- Vampire refuted the hypotheses; the goal follows. -/
-  | refuted (proof : Proof)
-  /-- Vampire stopped without a refutation. -/
-  | unrefuted (reason : TerminationReason)
+/-- What running vampire on a goal produced. -/
+structure Query where
+  /-- The goal preprocessing left, whose type is `False`. -/
+  preprocessed : Preprocess.Result
+  /-- The copy of the caller's goal that preprocessing consumed. -/
+  copy : MVarId
+  /-- The TPTP problem sent to vampire. -/
+  problem : String
+  symbols : Symbols
+  proof : Proof
 
 def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : System.FilePath) :
-    MetaM (Result × String) := mv.withContext do
+    MetaM Query := mv.withContext do
   -- Preprocessing assigns the goal it is given, so work on a copy and leave the
   -- caller's goal for it to discharge.
-  let mv' := (← mkFreshExprMVar (← mv.getType)).mvarId!
-  let result ← if cfg.mono then Preprocess.mono mv' hs else Preprocess.intros mv' hs
-  let problem ← result.goal.withContext (problemOf result.hypotheses)
+  let copy := (← mkFreshExprMVar (← mv.getType)).mvarId!
+  let preprocessed ← if cfg.mono then Preprocess.mono copy hs else Preprocess.intros copy hs
+  let (problem, symbols) ← preprocessed.goal.withContext (problemOf preprocessed.hypotheses)
   trace[vampire] "problem:\n{problem}"
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok proof =>
     trace[vampire] "proof:\n{proof.proofText}"
-    match proof.refutation? with
-    | some _ => return (.refuted proof, problem)
-    | none => return (.unrefuted proof.terminationReason, problem)
+    return { preprocessed, copy, problem, symbols, proof }
 
 namespace Tactic
 
@@ -89,19 +92,36 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let hs ← elabHints hs
     let mv ← getMainGoal
     let searchFrom := (← getFileName : System.FilePath).parent.getD "."
-    let (result, problem) ← run cfg mv hs searchFrom
+    let query ← run cfg mv hs searchFrom
     if cfg.showQuery then
-      logInfo m!"TPTP problem:\n{problem}"
+      logInfo m!"TPTP problem:\n{query.problem}"
       mv.admit (synthetic := false)
       replaceMainGoal []
       return
-    match result with
-    | .unrefuted reason =>
-      throwError "vampire did not refute the goal ({repr reason}). \
-        Try passing more hypotheses, raising the timeout, or `+mono`."
-    | .refuted _ =>
-      -- Reconstruction is not implemented yet, so the proof is admitted.
+    unless query.proof.refutation?.isSome do
+      throwError "vampire did not refute the goal \
+        ({repr query.proof.terminationReason}). Try passing more hypotheses, \
+        raising the timeout, or `+mono`."
+    -- Replay the refutation. Anything vampire introduced itself -- a skolem
+    -- function, an AVATAR predicate -- has no counterpart in the goal, so
+    -- replay gives up and the goal is admitted whole.
+    let replayed ←
+      try
+        query.preprocessed.goal.withContext
+          (Reconstruct.run query.proof query.symbols)
+      catch e =>
+        logInfo m!"vampire refuted the goal but the proof could not be \
+          replayed, so it is admitted: {e.toMessageData}"
+        pure none
+    match replayed with
+    | none =>
       mv.admit (synthetic := false)
+      replaceMainGoal []
+    | some outcome =>
+      unless outcome.unimplemented.isEmpty do
+        trace[vampire] "admitted rules: {outcome.unimplemented}"
+      query.preprocessed.goal.assign outcome.proof
+      mv.assign (.mvar query.copy)
       replaceMainGoal []
   | _ => throwUnsupportedSyntax
 
