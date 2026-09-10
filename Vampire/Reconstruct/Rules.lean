@@ -1,5 +1,6 @@
 import Vampire.InferenceRule
 import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Avatar
 import Vampire.Reconstruct.Rules.Clause
 import Vampire.Reconstruct.Rules.Congruence
 import Vampire.Reconstruct.Rules.Clausify
@@ -28,6 +29,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   -- Implemented.
   | .functionDefinition => Definition.definitionStep step
   | .avatarDefinition => Definition.definitionStep step
+  | .avatarComponent => Avatar.component step
+  | .avatarContradictionClause => Avatar.contradictionClause step
   | .predicateDefinition => Definition.definitionStep step
   | .definitionUnfolding => Definition.definitionUnfolding step
   | .skolemize => Skolem.skolemize step
@@ -186,11 +189,9 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .answerLiteralResolver => unimplemented step
   | .theoryTautologySatConflict => unimplemented step
   | .genericAvatarInference => unimplemented step
-  | .avatarComponent => unimplemented step
   | .avatarRefutation => unimplemented step
   | .avatarRefutationSmt => unimplemented step
   | .avatarSplitClause => unimplemented step
-  | .avatarContradictionClause => unimplemented step
   | .genericAvatarInferenceLast => unimplemented step
   | .genericNonspecificInferenceLast => unimplemented step
   | .genericTheoryAxiom => unimplemented step

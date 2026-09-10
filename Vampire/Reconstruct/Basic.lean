@@ -63,6 +63,35 @@ step is replayed, so by then an introduced one resolves too.
 def isGoalSymbol (name : String) : ReconstructM Bool := do
   return ((← read).symbols.symbols[name]?).isSome
 
+/--
+What a name splitting introduced stands for, `~n` for the negation of what `n`
+does.
+-/
+def namedFormula (name : String) : ReconstructM Expr := do
+  let negated := name.startsWith "~"
+  let key := if negated then (name.drop 1).toString else name
+  let some body := (← get).named[key]?
+    | throwIntroduced "the named subformula" name
+  return if negated then mkApp (mkConst ``Not) body else body
+
+/--
+`⟦~n⟧`, and that it says what `¬⟦n⟧` does.
+
+One is the other under a double negation: a name and its negation are two
+names, and which of the two carries the negation is up to which one splitting
+introduced.
+-/
+def flipName (name : String) : ReconstructM (Expr × Expr) := do
+  let flipped := if name.startsWith "~" then (name.drop 1).toString else "~" ++ name
+  let body ← namedFormula name
+  let flippedBody ← namedFormula flipped
+  if flippedBody == mkApp (mkConst ``Not) body then
+    return (flippedBody, ← mkAppOptM ``Iff.refl #[some flippedBody])
+  if body == mkApp (mkConst ``Not) flippedBody then
+    return (flippedBody,
+      ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some flippedBody]])
+  throwError "`{name}` and `{flipped}` are not each other's negation"
+
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
@@ -184,14 +213,8 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
   | .«exists» => quantified fun locals body => do
     locals.foldrM (fun x body => do mkAppM ``Exists #[← mkLambdaFVars #[x] body]) body
   | .name =>
-    -- Splitter writes the negation of a component as `~n`, and keeps the
-    -- definition under the positive name.
     let some raw := f.name? | throwError "named formula without a name"
-    let negated := raw.startsWith "~"
-    let key := if negated then (raw.drop 1).toString else raw
-    let some body := (← get).named[key]?
-      | throwIntroduced "the named subformula" raw
-    return if negated then mkApp (mkConst ``Not) body else body
+    namedFormula raw
   | c => throwError "cannot rebuild a formula with connective {repr c}"
 
 
@@ -635,17 +658,6 @@ def equiv (a b : Expr) : ReconstructM Expr := do
     #[pa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[pb]]]
 
 /--
-What a name splitting introduced stands for, `~n` for the negation of what `n`
-does.
--/
-def namedFormula (name : String) : ReconstructM Expr := do
-  let negated := name.startsWith "~"
-  let key := if negated then (name.drop 1).toString else name
-  let some body := (← get).named[key]?
-    | throwIntroduced "the named subformula" name
-  return if negated then mkApp (mkConst ``Not) body else body
-
-/--
 The Lean proposition a step asserts. A clause is implicitly universally
 quantified over its variables; a formula carries its own binders.
 
@@ -765,6 +777,13 @@ structure Step where
   rule : InferenceRule
   /-- The premises: a proof of each, paired with what it proves. -/
   premises : Array (Expr × Expr)
+  /--
+  The names the step holds under, each with the hypothesis standing for it.
+
+  Discharged into the conclusion by the framework, so a rule only reads these
+  where what it does depends on them, as splitting's own rules do.
+  -/
+  assumed : Array (String × Expr)
 
 /--
 What a step concludes, without the assumptions it holds under: what a rule has

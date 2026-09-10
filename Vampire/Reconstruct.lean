@@ -54,7 +54,8 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := do
       return (proof, stated)
     let body ←
       try
-        ofRule { unit := u, rule, premises := discharged }
+        ofRule { unit := u, rule, premises := discharged
+                 assumed := names.zip assumed }
       catch e =>
         throwError "replaying {rule.name} for step {u.number}: {e.toMessageData}"
     mkLambdaFVars assumed body
