@@ -54,6 +54,30 @@ def resolution (step : Step) : ReconstructM Expr := do
     mkLambdaFVars xs body
 
 /--
+`factoring`: the premise at the unifier that makes two of its literals one.
+
+The literal dropped is one of the two, and its image is the other's, which the
+conclusion keeps; so every literal of the premise at the unifier is a literal
+of the conclusion, and there is no case to close.
+-/
+def factoring (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "factoring should have one premise, got {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "factoring without a premise"
+  let use ← step.useAt 0
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    let vars ← coverVars parent kept
+    let (premiseAt, premiseType) ←
+      instantiateAt parent use vars premiseProof premiseStated
+    let place := placeLiteral target
+    mkLambdaFVars xs (← elimParts premiseType 0 (fun _ h => place h) premiseAt)
+
+/--
 `equality_resolution_with_deletion`: the premise at the binding one of its
 inequalities gives, less that inequality.
 
