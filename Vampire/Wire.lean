@@ -26,6 +26,7 @@ private structure Layout where
   unitLits : Nat
   parents : Nat
   varSorts : Nat
+  skolems : Nat
   strings : Nat
   proofText : Nat
   numFunctions : Nat
@@ -100,11 +101,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 2
+private def version : UInt32 := 3
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 21 * 4 then
+  if data.size < 22 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -112,7 +113,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 20
+  let numRules := word 21
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -130,9 +131,10 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numUnitLits := word 15
   let numParents := word 16
   let numVarSorts := word 17
-  let stringsLen := word 18
-  let proofTextLen := word 19
-  let functions := 21 * 4
+  let numSkolems := word 18
+  let stringsLen := word 19
+  let proofTextLen := word 20
+  let functions := 22 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 2 * 4
   let terms := sorts + numSorts * 4
@@ -142,10 +144,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 10 * 4
+  let unitLits := units + numUnits * 12 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
-  let strings := varSorts + numVarSorts * 2 * 4
+  let skolems := varSorts + numVarSorts * 2 * 4
+  let strings := skolems + numSkolems * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -159,7 +162,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     data, terminationReason := reason
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
-      units, unitLits, parents, varSorts, strings, proofText, numFunctions,
+      units, unitLits, parents, varSorts, skolems, strings, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -347,8 +350,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 10 c.idx.toNat 4
-  let count := p.field p.layout.units 10 c.idx.toNat 5
+  let first := p.field p.layout.units 12 c.idx.toNat 4
+  let count := p.field p.layout.units 12 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -441,7 +444,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 10 u.idx.toNat off
+  u.proof.field u.proof.layout.units 12 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -481,6 +484,22 @@ def varSorts (u : Unit) : Array (UInt32 × String) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.varSorts + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+
+/--
+The skolem symbols this step introduced: the existential variable each replaced,
+and the term it became.
+
+Skolemisation works on NNF rather than prenex input, and a skolem takes only
+the universals it depends on, so this is vampire's own record of the term
+rather than something re-derived.
+-/
+def skolems (u : Unit) : Array (UInt32 × Term) :=
+  let p := u.proof
+  let first := u.field 10
+  let count := u.field 11
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.skolems + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=
