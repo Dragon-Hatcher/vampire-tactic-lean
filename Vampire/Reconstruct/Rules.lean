@@ -18,8 +18,9 @@ conclusion, since the conclusion is stated in that very name.
 def ofRule (step : Step) : ReconstructM Expr :=
   match step.rule with
   -- Implemented.
-  | .functionDefinition => Definition.functionDefinition step
-  | .avatarDefinition => Definition.avatarDefinition step
+  | .functionDefinition => Definition.definitionStep step
+  | .avatarDefinition => Definition.definitionStep step
+  | .predicateDefinition => Definition.definitionStep step
   | .skolemize => Skolem.skolemize step
 
   -- Not implemented yet.
@@ -147,7 +148,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .equalityProxyAxiom => unimplemented step
   | .alascaIntegralityAxiom => unimplemented step
   | .definitionUnfolding => unimplemented step
-  | .predicateDefinition => unimplemented step
   | .predicateDefinitionUnfolding => unimplemented step
   | .predicateDefinitionMerging => unimplemented step
   | .polarityFlipping => unimplemented step

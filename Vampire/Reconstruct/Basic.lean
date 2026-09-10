@@ -53,6 +53,12 @@ def symbolExpr (name : String) : ReconstructM Expr := do
 def resolvesSymbol (name : String) : ReconstructM Bool := do
   return ((← read).symbols.symbols[name]?).isSome || ((← get).introduced[name]?).isSome
 
+/-- A formula's top-level connective. -/
+def connectiveOf (f : Formula) : ReconstructM Connective :=
+  match f.connective with
+  | .ok c => return c
+  | .error e => throwError "{e}"
+
 /-- The local standing for each of a step's variables. -/
 abbrev Vars := Std.HashMap UInt32 Expr
 
@@ -126,10 +132,7 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
         let some g := f.subformulas[0]? | throwError "quantifier without a body"
         pure g)
       bind locals body
-  let connective ← match f.connective with
-    | .ok c => pure c
-    | .error e => throwError "{e}"
-  match connective with
+  match ← connectiveOf f with
   | .literal =>
     let some l := f.literal? | throwError "atom without a literal"
     literal vars l
