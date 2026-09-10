@@ -923,6 +923,30 @@ def doubleNegations (h : Expr) : ReconstructM (Array Expr) := do
   return out
 
 /--
+`target` from two complementary literals.
+
+Which of the two is the negation of the other is settled by comparing them, and
+an equality can be stated either way round, so one of them may have to be
+turned about first.
+-/
+def closeComplementary (target h₁ h₂ : Expr) : ReconstructM Expr := do
+  let (positive, negative) ←
+    if (asNegation (← instantiateMVars (← inferType h₁))).isSome then pure (h₂, h₁)
+    else pure (h₁, h₂)
+  let stated ← instantiateMVars (← inferType positive)
+  let some refuted := asNegation (← instantiateMVars (← inferType negative))
+    | throwError "the literals resolved on are not complementary"
+  let positive ←
+    if ← isDefEq refuted stated then pure positive
+    else
+      let some flipped ← flipEquality positive
+        | throwError "the literals{indentExpr stated}\nand{indentExpr refuted}\n\
+          are not complementary"
+      pure flipped
+  mkAppOptM ``absurd
+    #[some (← inferType positive), some target, some positive, some negative]
+
+/--
 A proof of `target` from one of its literals, found by lookup.
 
 A simplifying or generating inference carries every literal it did not act on

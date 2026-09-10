@@ -50,26 +50,54 @@ def resolution (step : Step) : ReconstructM Expr := do
       elimParts t₂ 0 (fun j h₂ => do
         unless j == resolved₂.toNat do
           return ← place h₂
-        -- Which of the two is the negation of the other is settled by
-        -- comparing them, and an equality can be stated either way round, so
-        -- one of them may have to be turned about first.
-        let (positive, negative) ←
-          if (asNegation (← instantiateMVars (← inferType h₁))).isSome then
-            pure (h₂, h₁)
-          else pure (h₁, h₂)
-        let stated ← instantiateMVars (← inferType positive)
-        let some refuted := asNegation (← instantiateMVars (← inferType negative))
-          | throwError "the literals resolved on are not complementary"
-        let positive ←
-          if ← isDefEq refuted stated then pure positive
-          else
-            let some flipped ← flipEquality positive
-              | throwError "the literals resolved on{indentExpr stated}\nand\
-                  {indentExpr refuted}\nare not complementary"
-            pure flipped
-        mkAppOptM ``absurd
-          #[some (← inferType positive), some target, some positive, some negative])
+        closeComplementary target h₁ h₂)
         p₂) p₁
+    mkLambdaFVars xs body
+
+/--
+`unit_resulting_resolution`: a clause every literal of which but one is
+resolved away against a unit.
+
+`URResolution` resolves each literal of the clause with a unit premise, at most
+one literal surviving, and the unifiers it applies come one at a time; what
+each premise's variables ended up bound to, and which literal of the clause
+each unit resolved away, are recorded rather than found again.
+-/
+def unitResulting (step : Step) : ReconstructM Expr := do
+  let some (mainProof, mainStated) := step.premises[0]?
+    | throwError "unit resulting resolution without a clause"
+  let some main := step.unit.parents[0]?
+    | throwError "unit resulting resolution without a clause"
+  let mainUse ← step.useAt 0
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    -- Every literal but one is resolved away, and with it any variable it was
+    -- the last to mention.
+    let mut vars ← coverVars main kept
+    for parent in step.unit.parents do
+      vars ← coverVars parent vars
+    let (mainAt, mainType) ← instantiateAt main mainUse vars mainProof mainStated
+    -- Which unit resolved away which of the clause's literals.
+    let mut units : Std.HashMap Nat (Expr × Expr) := {}
+    for i in [1:step.premises.size] do
+      let some (proof, stated) := step.premises[i]?
+        | throwError "a premise without a proof"
+      let some parent := step.unit.parents[i]?
+        | throwError "a premise without a step"
+      let use ← step.useAt i
+      let some literal := use.literal
+        | throwError "nothing says which literal the unit in step \
+          {parent.number} resolved away"
+      units := units.insert literal.toNat (← instantiateAt parent use vars proof stated)
+    let place := placeLiteral target
+    let body ← elimParts mainType 0 (fun i h => do
+      match units[i]? with
+      | none => place h
+      | some (unitAt, unitType) =>
+        elimParts unitType 0 (fun _ hu => closeComplementary target h hu) unitAt) mainAt
     mkLambdaFVars xs body
 
 /--
