@@ -5,10 +5,23 @@ namespace Vampire.Preprocess
 
 open Lean Meta Elab
 
-/-- The hypotheses to refute, and the goal they were taken from. -/
+/-- The hypotheses to refute, with their roles, and the goal they came from. -/
 structure Result where
-  hypotheses : Array Expr
+  hypotheses : Array (Expr × Role)
   goal : MVarId
+
+/--
+The name given to the negated goal, so that it can be told apart from the
+axioms after `lean-auto` has monomorphized the context. `collectLctxLemmas`
+records a hypothesis as `DTr.leaf s!"lctxLem {name}"`.
+-/
+private def goalMarker : Name := `_vampireNegatedGoal
+
+private partial def dtrContains (self other : Auto.DTr) : Bool :=
+  if self == other then true
+  else match self with
+    | .leaf _ => false
+    | .node _ dtrs => dtrs.any (dtrContains · other)
 
 /-- Whether `e` is an inhabitation fact, possibly under binders. -/
 private def isInhabitation : Expr → Bool
@@ -44,7 +57,7 @@ private def negateGoal (mv : MVarId) : MetaM (Array Expr × MVarId) := mv.withCo
     return (#[], mv)
   let [mv] ← mv.apply (.const ``Classical.byContradiction [])
     | throwError "could not negate the goal"
-  let (fv, mv) ← mv.intro1
+  let (fv, mv) ← mv.intro goalMarker
   return (#[.fvar fv], mv)
 
 /--
@@ -59,8 +72,12 @@ def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
   let (fvs, mv) ← mv.intros
   let introduced := (← mv.withContext (fvs.filterM isHypothesis)).map Expr.fvar
   let (negated, mv) ← negateGoal mv
-  let hypotheses := (extra ++ introduced ++ negated).toList.eraseDups.toArray
-  return { hypotheses, goal := mv }
+  let axioms := (extra ++ introduced).toList.eraseDups.toArray
+  let axioms := axioms.filter (!negated.contains ·)
+  return {
+    hypotheses := axioms.map (·, .axiom) ++ negated.map (·, .negatedConjecture)
+    goal := mv
+  }
 
 private def toLemma (e : Expr) : MetaM Auto.Lemma := do
   let e ← instantiateMVars e
@@ -77,14 +94,22 @@ def mono (mv : MVarId) (extra : Array Expr) : MetaM Result := do
   let (goalBinders, mv) ← mv.intros
   let [nngoal] ← mv.apply (.const ``Classical.byContradiction [])
     | throwError "could not negate the goal"
-  let (ngoal, absurd) ← MVarId.intro1 nngoal
+  let (ngoal, absurd) ← nngoal.intro goalMarker
   absurd.withContext do
     let lctxLemmas ← Auto.collectLctxLemmas true (goalBinders.push ngoal)
     let lemmas ← (lctxLemmas ++ (← extra.mapM toLemma)).mapM
       (Auto.unfoldConstAndPreprocessLemma #[])
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
-    let (proof, mv, _, _) ← Auto.runMono none lemmas inhFacts
+    let (proof, mv, _, dtrs) ← Auto.runMono none lemmas inhFacts
     absurd.assign proof
-    return { hypotheses := ← propHypotheses mv, goal := mv }
+    let goalDtr := Auto.DTr.leaf s!"lctxLem {goalMarker}"
+    let fromGoal := dtrs.filterMap fun (fv, dtr) =>
+      if dtrContains dtr goalDtr then some (Expr.fvar fv) else none
+    let hypotheses ← propHypotheses mv
+    return {
+      hypotheses := hypotheses.map fun h =>
+        (h, if fromGoal.contains h then .negatedConjecture else .axiom)
+      goal := mv
+    }
 
 end Vampire.Preprocess

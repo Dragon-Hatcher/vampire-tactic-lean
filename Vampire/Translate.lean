@@ -258,16 +258,31 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
 
 end
 
+/--
+The TPTP role of a hypothesis. Vampire treats both as asserted, so this does
+not affect whether a refutation exists, but it drives the goal-directed
+heuristics (set of support, SInE selection, `nongoal_weight_coefficient`) and
+is what makes `inputType` meaningful on the units of a proof.
+-/
+inductive Role where
+  | «axiom»
+  | negatedConjecture
+deriving Inhabited, Repr, BEq
+
+def Role.render : Role → String
+  | .axiom => "axiom"
+  | .negatedConjecture => "negated_conjecture"
+
 /-- The TPTP problem for a set of hypotheses, to be refuted. -/
-def problemOf (hypotheses : Array Expr) : MetaM String := do
+def problemOf (hypotheses : Array (Expr × Role)) : MetaM String := do
   let go : TranslateM (Array String) := do
-    let mut axioms := #[]
-    for (h, i) in hypotheses.zipIdx do
+    let mut formulas := #[]
+    for ((h, role), i) in hypotheses.zipIdx do
       let formula ← translateFormula (← inferType h)
-      axioms := axioms.push s!"tff(h{i}, axiom, {formula})."
-    return axioms
-  let (axioms, state) ← go.run {}
-  let lines := state.decls.types ++ state.decls.symbols ++ axioms
+      formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
+    return formulas
+  let (formulas, state) ← go.run {}
+  let lines := state.decls.types ++ state.decls.symbols ++ formulas
   return String.intercalate "\n" lines.toList ++ "\n"
 
 end Vampire
