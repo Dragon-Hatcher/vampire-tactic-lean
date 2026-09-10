@@ -67,6 +67,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .rectify => Congruence.restated step
   | .definitionFolding => Congruence.unfolded step
   | .purePredicateRemoval => Congruence.weakened step
+  | .reduceFalseTrue => Congruence.weakened step
 
   -- Not implemented yet.
   | .genericFormulaClauseTransformation => unimplemented step
@@ -75,7 +76,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .answerLiteralInputSkolemisation => unimplemented step
   | .claimDefinition => unimplemented step
   | .closure => unimplemented step
-  | .reduceFalseTrue => unimplemented step
   | .theoryNormalization => unimplemented step
   | .alascaIntegerTransformation => unimplemented step
   | .skolemSymbolIntroduction => unimplemented step

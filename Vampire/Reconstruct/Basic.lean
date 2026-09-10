@@ -656,6 +656,17 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
               mkLambdaFVars #[l]
                 (← mkAppOptM ``absurd
                   #[some inner, some target, some (← mkEqRefl a), some l])
+        if inner.isConstOf ``True then
+          return ← withLocalDeclD `l d fun l => do
+            mkLambdaFVars #[l]
+              (← mkAppOptM ``absurd
+                #[some (mkConst ``True), some target,
+                  some (mkConst ``True.intro), some l])
+      -- Simplifying away a truth value leaves nothing of a disjunct that was
+      -- `⊥`, and nothing of one that was `¬⊤`.
+      if d.isConstOf ``False then
+        return ← withLocalDeclD `l d fun l => do
+          mkLambdaFVars #[l] (← mkAppOptM ``False.elim #[some target, some l])
       throwError "implies: the disjunct{indentExpr d}\nis neither among\
         {indentExpr target}\nnor refutable"
     let branches ← (junctionParts ``Or source).mapM branchFor
