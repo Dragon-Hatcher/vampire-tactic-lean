@@ -19,32 +19,6 @@ namespace Vampire.Reconstruct.Skolem
 
 open Lean Meta
 
-/-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
-private def nonempty (τ : Expr) : ReconstructM Expr := do
-  let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
-  match ← trySynthInstance goal with
-  | .some inst => return inst
-  | _ =>
-    throwError "cannot skolemise over{indentExpr τ}\nwithout `Nonempty` for it"
-
-/--
-`(∃ v, p v) ↔ p (Classical.epsilon p)`, with the chosen witness.
-
-Forwards is `epsilon_spec_aux`, which is already the implication and takes the
-`Nonempty` instance explicitly, so the witness it speaks of is the one built
-here. Backwards the witness is that very term.
--/
-private def epsilon (τ p : Expr) : ReconstructM (Expr × Expr) := do
-  let inst ← nonempty τ
-  let witness := mkApp3 (mkConst ``Classical.epsilon [← getLevel τ]) τ inst p
-  let forward ← mkAppOptM ``Classical.epsilon_spec_aux #[some τ, some inst, some p]
-  -- `p` has to be given: `h`'s type is beta-reduced, so it cannot be recovered
-  -- from the arguments by unification.
-  let backward ← withLocalDeclD `h (p.beta #[witness]) fun h => do
-    mkLambdaFVars #[h]
-      (← mkAppOptM ``Exists.intro #[some τ, some p, some witness, some h])
-  return (witness, ← mkAppM ``Iff.intro #[forward, backward])
-
 /--
 `p ↔ c` for two rebuilt literals.
 
@@ -130,22 +104,6 @@ where
       prop := mkApp2 (mkConst fn) p prop
     return (prop, proof)
 
-  /--
-  `⟦∃ bound, body⟧`, the premise's own reading of what is left of a block.
-
-  The witness is chosen from this, so it has to come from the premise alone:
-  the conclusion states the block in terms of the very skolem being introduced,
-  which is not bound until the witness exists.
-  -/
-  premiseProp (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
-      ReconstructM Expr := do
-    match bound with
-    | [] => Reconstruct.formula sorts vars body
-    | (v, sortName) :: rest => do
-      withLocalDeclD (Name.mkSimple s!"X{v}") (← sortType sortName) fun x => do
-        let inner ← premiseProp rest (vars.insert v x) body
-        mkAppM ``Exists #[← mkLambdaFVars #[x] inner]
-
   /-- Takes the existential variables of a block one at a time. -/
   peel (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
       ReconstructM (Expr × Expr) := do
@@ -155,23 +113,9 @@ where
       let τ ← sortType sortName
       -- The predicate the witness is chosen from, as a function of `v`.
       let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-        mkLambdaFVars #[x] (← premiseProp rest (vars.insert v x) body)
+        mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
       let (witness, choice) ← epsilon τ p
-      -- Register the symbol under the arguments vampire gave it, so that the
-      -- conclusion rebuilds to the same term.
-      let some skolemTerm := skolems[v]?
-        | throwError "no skolem recorded for the existential X{v}"
-      let some symbol := skolemTerm.symbol?
-        | throwError "the skolem term for X{v} has no symbol"
-      let args ← skolemTerm.args.mapM fun arg => do
-        unless arg.isVar do
-          throwError "skolem {symbol.name} was applied to {arg}, not a variable"
-        let some x := vars[arg.var]?
-          | throwError "variable X{arg.var} has no recorded sort"
-        return x
-      let definition ← mkLambdaFVars args witness
-      modify fun s =>
-        { s with introduced := s.introduced.insert symbol.name definition }
+      registerSkolem skolems vars v witness
       let (prop, rest') ← peel rest (vars.insert v witness) body
       -- (∃ v, p v) ↔ p ε ↔ prop
       return (prop, ← mkAppM ``Iff.trans #[choice, rest'])

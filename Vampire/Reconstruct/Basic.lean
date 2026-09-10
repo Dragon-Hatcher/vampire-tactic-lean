@@ -53,6 +53,32 @@ def symbolExpr (name : String) : ReconstructM Expr := do
 def resolvesSymbol (name : String) : ReconstructM Bool := do
   return ((← read).symbols.symbols[name]?).isSome || ((← get).introduced[name]?).isSome
 
+/-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
+def nonempty (τ : Expr) : ReconstructM Expr := do
+  let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
+  match ← trySynthInstance goal with
+  | .some inst => return inst
+  | _ =>
+    throwError "cannot skolemise over{indentExpr τ}\nwithout `Nonempty` for it"
+
+/--
+`(∃ v, p v) ↔ p (Classical.epsilon p)`, with the chosen witness.
+
+Forwards is `epsilon_spec_aux`, which is already the implication and takes the
+`Nonempty` instance explicitly, so the witness it speaks of is the one built
+here. Backwards the witness is that very term.
+-/
+def epsilon (τ p : Expr) : ReconstructM (Expr × Expr) := do
+  let inst ← nonempty τ
+  let witness := mkApp3 (mkConst ``Classical.epsilon [← getLevel τ]) τ inst p
+  let forward ← mkAppOptM ``Classical.epsilon_spec_aux #[some τ, some inst, some p]
+  -- `p` has to be given: `h`'s type is beta-reduced, so it cannot be recovered
+  -- from the arguments by unification.
+  let backward ← withLocalDeclD `h (p.beta #[witness]) fun h => do
+    mkLambdaFVars #[h]
+      (← mkAppOptM ``Exists.intro #[some τ, some p, some witness, some h])
+  return (witness, ← mkAppM ``Iff.intro #[forward, backward])
+
 /-- A formula's top-level connective. -/
 def connectiveOf (f : Formula) : ReconstructM Connective :=
   match f.connective with
@@ -157,6 +183,46 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
       | throwIntroduced "the named subformula" raw
     return if negated then mkApp (mkConst ``Not) body else body
   | c => throwError "cannot rebuild a formula with connective {repr c}"
+
+
+/--
+`⟦∃ vs, body⟧`: what a premise says a block of existentials means.
+
+A witness is chosen from this, so it has to come from the premise: a conclusion
+states the block in terms of the skolem that choosing the witness is what
+introduces.
+-/
+partial def existsProp (sorts : Array (UInt32 × String))
+    (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
+    ReconstructM Expr := do
+  match bound with
+  | [] => formula sorts vars body
+  | (v, sortName) :: rest =>
+    withLocalDeclD (Name.mkSimple s!"X{v}") (← sortType sortName) fun x => do
+      let inner ← existsProp sorts rest (vars.insert v x) body
+      mkAppM ``Exists #[← mkLambdaFVars #[x] inner]
+
+
+/--
+Binds the symbol vampire chose for an existential variable to `witness`.
+
+Its arguments are the universals it depends on, taken as vampire recorded them
+rather than re-derived, so that a use of the symbol rebuilds to the same term.
+-/
+def registerSkolem (skolems : Std.HashMap UInt32 Term) (vars : Vars) (v : UInt32)
+    (witness : Expr) : ReconstructM PUnit := do
+  let some skolemTerm := skolems[v]?
+    | throwError "no skolem recorded for the existential X{v}"
+  let some symbol := skolemTerm.symbol?
+    | throwError "the skolem term for X{v} has no symbol"
+  let args ← skolemTerm.args.mapM fun arg => do
+    unless arg.isVar do
+      throwError "skolem {symbol.name} was applied to {arg}, not a variable"
+    let some x := vars[arg.var]?
+      | throwError "variable X{arg.var} has no recorded sort"
+    return x
+  let definition ← mkLambdaFVars args witness
+  modify fun s => { s with introduced := s.introduced.insert symbol.name definition }
 
 /--
 The Lean proposition a step asserts. A clause is implicitly universally

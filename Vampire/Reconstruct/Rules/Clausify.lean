@@ -55,8 +55,8 @@ A proof of `⟦f⟧ → target`, where `target` is the clause as a disjunction.
 `vars` sends a variable of the premise to what stands for it: the local the
 clause bound for it, or an arbitrary element where the clause dropped it.
 -/
-partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
-    (f : Formula) (target : Expr) : ReconstructM Expr := do
+partial def derive (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt32 Term)
+    (vars : Vars) (f : Formula) (target : Expr) : ReconstructM Expr := do
   match ← connectiveOf f with
   | .«forall» =>
     let some body := f.subformulas[0]? | throwError "quantifier without a body"
@@ -76,7 +76,7 @@ partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
           someElement (← sortType sortName)
       vars := vars.insert v arg
       args := args.push arg
-    let rest ← derive sorts vars body target
+    let rest ← derive sorts skolems vars body target
     withLocalDeclD `h hypothesis fun h => do
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
   | .and =>
@@ -84,7 +84,7 @@ partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
     let parts ← f.subformulas.mapM (Reconstruct.formula sorts vars)
     for (g, i) in f.subformulas.zipIdx do
       -- `derive` only reads, so a failed attempt leaves nothing behind.
-      let attempt ← try pure (some (← derive sorts vars g target)) catch _ => pure none
+      let attempt ← try pure (some (← derive sorts skolems vars g target)) catch _ => pure none
       match attempt with
       | none => continue
       | some rest =>
@@ -102,7 +102,7 @@ partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
   | .or =>
     -- Every disjunct is taken into the same clause, so each must lead to it.
     let parts ← f.subformulas.mapM (Reconstruct.formula sorts vars)
-    let branches ← f.subformulas.mapM (derive sorts vars · target)
+    let branches ← f.subformulas.mapM (derive sorts skolems vars · target)
     let whole := Reconstruct.junction ``Or ``False parts
     withLocalDeclD `h whole fun h => do
       let rec elim (i : Nat) (disjunction : Expr) (hypothesis : Expr) :
@@ -117,6 +117,32 @@ partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
               ← mkLambdaFVars #[l] (mkApp branch l),
               ← mkLambdaFVars #[r] (← elim (i + 1) rest r)]
       mkLambdaFVars #[h] (← elim 0 whole h)
+  | .«exists» =>
+    -- `newcnf` skolemises while clausifying rather than beforehand, so an
+    -- existential can still be here. Hilbert choice gives a witness, and the
+    -- symbol vampire chose is bound to it so the clause rebuilds to the same
+    -- term. Nothing else has to move: the body is derived under the witness.
+    let some body := f.subformulas[0]? | throwError "quantifier without a body"
+    let bound := f.boundVars.filterMap fun v =>
+      (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    let rec peel (bound : List (UInt32 × String)) (vars : Vars) :
+        ReconstructM Expr := do
+      match bound with
+      | [] => derive sorts skolems vars body target
+      | (v, sortName) :: rest => do
+        let τ ← sortType sortName
+        -- The witness is chosen from what the premise says, which is the
+        -- remaining block: the clause states it with the skolem instead.
+        let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
+          mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
+        let (witness, choice) ← epsilon τ p
+        registerSkolem skolems vars v witness
+        let rest' ← peel rest (vars.insert v witness)
+        -- `choice.mp` turns the block into its instance at the witness.
+        withLocalDeclD `h (← existsProp sorts ((v, sortName) :: rest) vars body) fun h => do
+          mkLambdaFVars #[h]
+            (mkApp rest' (← mkAppM ``Iff.mp #[choice, h]))
+    peel bound.toList vars
   | .«false» =>
     withLocalDeclD `h (mkConst ``False) fun h => do
       mkLambdaFVars #[h] (← mkAppOptM ``False.elim #[some target, some h])
@@ -130,7 +156,49 @@ partial def derive (sorts : Array (UInt32 × String)) (vars : Vars)
           mkLambdaFVars #[h] (← inject target i h)
     throwError "the literal{indentExpr literal}\nis not among{indentExpr target}"
 
-/-- `clausify`: one clause of a formula's conjunctive normal form. -/
+
+/--
+Binds every skolem the premise's existentials introduce.
+
+`newcnf` skolemises while clausifying, so the clause is stated in symbols that
+nothing has bound yet -- and the clause has to be read before it can be
+derived. Choosing the witnesses needs only the premise, so this runs first.
+-/
+private partial def registerSkolems (sorts : Array (UInt32 × String))
+    (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) :
+    ReconstructM PUnit := do
+  let bound (f : Formula) : Array (UInt32 × String) :=
+    f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+  match ← connectiveOf f with
+  | .«exists» =>
+    let some body := f.subformulas[0]? | throwError "quantifier without a body"
+    let rec go (rest : List (UInt32 × String)) (vars : Vars) : ReconstructM PUnit := do
+      match rest with
+      | [] => registerSkolems sorts skolems vars body
+      | (v, sortName) :: rest => do
+        let τ ← sortType sortName
+        let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
+          mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
+        let (witness, _) ← epsilon τ p
+        registerSkolem skolems vars v witness
+        go rest (vars.insert v witness)
+    go (bound f).toList vars
+  | .«forall» =>
+    let some body := f.subformulas[0]? | throwError "quantifier without a body"
+    withVars (bound f) vars fun vars _ => registerSkolems sorts skolems vars body
+  | .and | .or | .not | .imp | .iff | .xor =>
+    f.subformulas.forM (registerSkolems sorts skolems vars)
+  | _ => return
+
+/--
+`clausify`: one clause of a formula's conjunctive normal form.
+
+`CNF::clausify` distributes a formula already in negation normal form, which is
+what `derive` follows. `newcnf` clausifies the original formula instead,
+expanding an equivalence by cases, and that is not covered yet: such a step is
+admitted rather than derived. Its skolems are bound either way, so the steps
+built on it can still be stated.
+-/
 def clausify (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, _)] := step.premises
     | throwError "clausify should have one premise, got {step.premises.size}"
@@ -139,6 +207,10 @@ def clausify (step : Step) : ReconstructM Expr := do
   let some premise := parent.formula?
     | throwError "clausify should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
+  -- `newcnf` skolemises while clausifying, recording against the formula it
+  -- clausified, which is this step's premise.
+  let skolems := Std.HashMap.ofList (parent.skolems ++ step.unit.skolems).toList
+  registerSkolems sorts skolems {} premise
   -- The clause binds the variables it kept; work under exactly those. A
   -- bounded telescope matters: `¬a` is `a → False`, which an unbounded one
   -- would take for another binder and leave `False` as the target.
@@ -147,7 +219,12 @@ def clausify (step : Step) : ReconstructM Expr := do
     let mut vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       vars := vars.insert v x
-    let implication ← derive sorts vars premise target
-    mkLambdaFVars xs (mkApp implication premiseProof)
+    match ← (try pure (some (← derive sorts skolems vars premise target))
+             catch e => do
+               trace[vampire] "admitting clausify for step {step.unit.number}: \
+                 {e.toMessageData}"
+               pure none) with
+    | some implication => mkLambdaFVars xs (mkApp implication premiseProof)
+    | none => unimplemented step
 
 end Vampire.Reconstruct.Clausify
