@@ -26,6 +26,8 @@ structure Query where
   problem : String
   symbols : Symbols
   proof : Proof
+  /-- What vampire said for itself, for when it did not find a proof. -/
+  diagnostics : String
 
 def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : System.FilePath) :
     MetaM Query := mv.withContext do
@@ -37,9 +39,10 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : Syste
   trace[vampire] "problem:\n{problem}"
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
-  | .ok proof =>
+  | .ok (proof, diagnostics) =>
     trace[vampire] "proof:\n{proof.proofText}"
-    return { preprocessed, copy, problem, symbols, proof }
+    trace[vampire] "vampire said:\n{diagnostics}"
+    return { preprocessed, copy, problem, symbols, proof, diagnostics }
 
 namespace Tactic
 
@@ -50,11 +53,11 @@ syntax vampireHintElem := vampireStar <|> term
 syntax vampireHints := (" [" withoutPosition(vampireHintElem,*,?) "]")?
 
 /--
-`vampire` translates the current goal into a TPTP refutation problem and hands
-it to the vampire prover.
+`vampire` translates the current goal into a TPTP refutation problem, hands it
+to the vampire prover, and replays the refutation as a Lean proof.
 
-By default only the goal and the local hypotheses reachable from it are sent.
-Extra facts are passed in brackets, and `*` means every hypothesis in the local
+By default only the goal and the hypotheses introduced from it are sent. Extra
+facts are passed in brackets, and `*` means every hypothesis in the local
 context:
 ```lean
 example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire [hp, hpq]
@@ -99,30 +102,32 @@ def evalVampire : Tactic := fun stx => withMainContext do
       replaceMainGoal []
       return
     unless query.proof.refutation?.isSome do
+      -- `unknown` also covers vampire being stopped before it could report,
+      -- which only its own output explains.
+      let hint :=
+        if query.proof.terminationReason == .unknown then
+          m!"\n{query.diagnostics}"
+        else m!""
       throwError "vampire did not refute the goal \
         ({repr query.proof.terminationReason}). Try passing more hypotheses, \
-        raising the timeout, or `+mono`."
+        raising the timeout, or `+mono`.{hint}"
     -- Replay the refutation. Anything vampire introduced itself -- a skolem
-    -- function, an AVATAR predicate -- has no counterpart in the goal, so
-    -- replay gives up and the goal is admitted whole.
-    let replayed ←
+    -- function, an AVATAR predicate, a subformula it named while clausifying --
+    -- has no counterpart in the goal, so the step cannot even be stated.
+    let outcome ←
       try
         query.preprocessed.goal.withContext
           (Reconstruct.run query.proof query.symbols)
       catch e =>
-        logInfo m!"vampire refuted the goal but the proof could not be \
-          replayed, so it is admitted: {e.toMessageData}"
-        pure none
-    match replayed with
-    | none =>
-      mv.admit (synthetic := false)
-      replaceMainGoal []
-    | some outcome =>
-      unless outcome.unimplemented.isEmpty do
-        trace[vampire] "admitted rules: {outcome.unimplemented}"
-      query.preprocessed.goal.assign outcome.proof
-      mv.assign (.mvar query.copy)
-      replaceMainGoal []
+        throwError "vampire refuted the goal but the proof could not be \
+          replayed: {e.toMessageData}"
+    let some outcome := outcome
+      | throwError "vampire reported a refutation but produced no proof"
+    unless outcome.unimplemented.isEmpty do
+      trace[vampire] "admitted rules: {outcome.unimplemented}"
+    query.preprocessed.goal.assign outcome.proof
+    mv.assign (.mvar query.copy)
+    replaceMainGoal []
   | _ => throwUnsupportedSyntax
 
 end Tactic

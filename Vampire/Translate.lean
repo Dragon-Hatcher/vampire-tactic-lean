@@ -120,9 +120,14 @@ def freshName (name : String) : TranslateM String := do
 /-- Whether `e` is the type `Prop`. -/
 def isPropType (e : Expr) : Bool := e matches .sort .zero
 
-/-- Whether `e` is a type usable as a TPTP sort, i.e. a `Type _` that is not `Prop`. -/
+/--
+Whether `e` is a type whose elements are TPTP individuals. `Prop` is not one,
+and neither is a universe: an argument of type `Type` is a type argument, which
+carries no first-order content.
+-/
 def isSortType (e : Expr) : MetaM Bool := do
   if isPropType e then return false
+  if e matches .sort _ then return false
   return (← whnf (← inferType e)) matches .sort _
 
 /-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
@@ -141,35 +146,40 @@ def sortName (e : Expr) : TranslateM String := do
   return name
 
 /--
-Splits a signature symbol's Lean type into argument sorts and a result. Returns
-`none` when the type is not first-order over TPTP sorts, e.g. a type class
-instance or a higher-order function.
+The TPTP signature of a symbol's Lean type: the sort names of its arguments and
+of its result, or `none` when the type is not first-order over TPTP sorts.
+
+The sorts are named inside the telescope, since naming them afterwards would
+read expressions mentioning locals that no longer exist. A type that depends on
+its own arguments is rejected outright, which is what keeps type class
+instances and polymorphic constants out; `+mono` is the way to handle those.
 -/
-def firstOrderType (type : Expr) : TranslateM (Option (Array Expr × Expr)) := do
+def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
   forallTelescopeReducing type fun args result => do
-    if args.isEmpty then
-      if isPropType result || (← isSortType result) then return some (#[], result)
-      else return none
+    let locals := args.map (·.fvarId!)
+    let dependent (e : Expr) : Bool := e.hasAnyFVar locals.contains
+    if dependent result then return none
+    unless isPropType result || (← isSortType result) do return none
     let mut argTypes := #[]
     for arg in args do
       let argType ← inferType arg
+      if dependent argType then return none
       unless ← isSortType argType do return none
       argTypes := argTypes.push argType
-    unless isPropType result || (← isSortType result) do return none
-    return some (argTypes, result)
+    let argNames ← argTypes.mapM sortName
+    let resultName ← if isPropType result then pure "$o" else sortName result
+    return some (argNames, resultName)
 
 /-- Returns the TPTP name for a signature symbol, declaring it if new. -/
 def symbolName (e : Expr) (type : Expr) : TranslateM (Option String) := do
   if let some name := (← get).symbols[e]? then
     return some name
-  let some (args, result) ← firstOrderType type | return none
+  let some (argNames, resultName) ← signatureOf type | return none
   let hint ← match e with
     | .fvar fvarId => pure (← fvarId.getUserName).toString
     | .const name _ => pure name.toString
     | _ => pure "f"
   let name ← freshName (sanitize hint false)
-  let resultName ← if isPropType result then pure "$o" else sortName result
-  let argNames ← args.mapM sortName
   let signature :=
     if argNames.isEmpty then resultName
     else if argNames.size == 1 then s!"{argNames[0]!} > {resultName}"
@@ -208,9 +218,8 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
   | .app .. =>
     let fn := e.getAppFn
     let args := e.getAppArgs
-    -- Implicit type arguments carry no first-order content.
-    let args ← args.filterM fun arg => do
-      return !(← isSortType (← inferType arg)) || !(← isSortType arg)
+    -- Type arguments carry no first-order content.
+    let args ← args.filterM fun arg => return !(← isSortType arg)
     let head ← match fn with
       | .fvar fvarId => symbolName fn (← fvarId.getType)
       | .const .. => symbolName fn (← inferType fn)

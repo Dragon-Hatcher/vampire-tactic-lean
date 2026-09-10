@@ -41,8 +41,6 @@
  *   proofText vampire's own rendering of the proof, padded likewise
  */
 
-#include <sys/stat.h>
-
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -464,6 +462,12 @@ int main(int argc, char** argv)
     UIHelper::parseFile(argv[1], env.options->inputSyntax(), false);
     Problem* prb = UIHelper::getInputProblem();
 
+    // On reaching a limit vampire exits from its timer thread, skipping both
+    // the code below and any atexit handler, and re-encoding from that thread
+    // would race with the search. So write a proof-less result now: whatever
+    // happens, the caller finds a decodable file rather than an empty one.
+    emitProof();
+
     if (isPortfolioMode(env.options->mode())) {
       // The slice that succeeds runs in a child of this process and exits
       // there, so it has to do the encoding itself; the parent never sees its
@@ -477,10 +481,10 @@ int main(int argc, char** argv)
       ProvingHelper::runVampireSaturation(*prb, *env.options);
     }
 
-    // In portfolio mode a child has already written the proof; anything this
-    // process could encode now would be an empty derivation on top of it.
-    struct stat ignored;
-    if (stat(g_outPath.c_str(), &ignored) != 0)
+    // A portfolio slice reports for itself, whether it refuted the problem or
+    // showed it satisfiable, and it is the only process that knows; this one
+    // would only overwrite that with what the placeholder already says.
+    if (!isPortfolioMode(env.options->mode()))
       emitProof();
     return 0;
   } catch (Exception& e) {

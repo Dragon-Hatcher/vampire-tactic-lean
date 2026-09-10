@@ -9,7 +9,7 @@ private def problems : List String :=
 private def report (name : String) : IO PUnit := do
   match ← prove (← IO.FS.readFile s!"problems/{name}.p") {timeout := 30} with
   | .error e => IO.println s!"{name}: error: {e}"
-  | .ok p =>
+  | .ok (p, _) =>
     let steps := p.units.size
     match p.refutation? with
     | none => IO.println s!"{name}: {repr p.terminationReason}, no refutation"

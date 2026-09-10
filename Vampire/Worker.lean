@@ -60,7 +60,8 @@ Runs vampire on a TPTP problem and decodes its proof.
 of the file being elaborated.
 -/
 def prove (problem : String) (cfg : Config := {})
-    (searchFrom : System.FilePath := ".") : IO (Except Error Proof) := do
+    (searchFrom : System.FilePath := ".") :
+    IO (Except Error (Proof × String)) := do
   let worker ← match cfg.worker? with
     | some path => pure path
     | none => findWorker searchFrom
@@ -72,11 +73,17 @@ def prove (problem : String) (cfg : Config := {})
       cmd := worker.toString
       args := #[problemFile.toString, outFile.toString] ++ cfg.toArgs
     }
-    if out.exitCode != 0 then
-      return .error (.error s!"{workerName} exited with code {out.exitCode}\n\
-        {out.stderr.trimAscii}")
+    -- Vampire reports on stdout, so both streams matter when explaining itself.
+    let diagnostics :=
+      (String.intercalate "\n" ([out.stdout, out.stderr].filter (!·.isEmpty)))
+        |>.trimAscii |>.toString
+    -- A limit makes vampire exit non-zero from its timer thread, which is an
+    -- ordinary outcome, so the file decides the result rather than the code.
     unless ← outFile.pathExists do
-      return .error (.error s!"{workerName} wrote no proof\n{out.stderr.trimAscii}")
-    return Proof.ofByteArray (← IO.FS.readBinFile outFile)
+      return .error (.error s!"{workerName} produced no result \
+        (exit code {out.exitCode})\n{diagnostics}")
+    match Proof.ofByteArray (← IO.FS.readBinFile outFile) with
+    | .error e => return .error e
+    | .ok proof => return .ok (proof, diagnostics)
 
 end Vampire
