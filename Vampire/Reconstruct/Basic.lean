@@ -196,6 +196,93 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
 
 
 /--
+One step of negation normal form, with a proof that it changes nothing.
+
+`ennf` and `nnf` eliminate implications and equivalences and push negations
+inward. Each case is picked by the shape in hand, and every one moves toward
+the normal form.
+-/
+def nnfStep (e : Expr) : ReconstructM (Option (Expr × Expr)) := do
+  if let .forallE _ d body _ := e then
+    if (← isProp d) && !body.hasLooseBVars then
+      let rewritten := mkApp2 (mkConst ``Or) (mkApp (mkConst ``Not) d) body
+      let decidable ← mkAppOptM ``Classical.propDecidable #[some d]
+      return some (rewritten,
+        ← mkAppOptM ``Decidable.imp_iff_not_or #[some d, some body, some decidable])
+  if let some (x, y) := e.iff? then
+    let rewritten ← mkAppM ``And #[← mkArrow x y, ← mkArrow y x]
+    return some (rewritten,
+      ← mkAppOptM ``iff_iff_implies_and_implies #[some x, some y])
+  if let some inner := e.not? then
+    if let some doubly := inner.not? then
+      return some (doubly, ← mkAppOptM ``Classical.not_not #[some doubly])
+    if let some (x, y) := inner.app2? ``And then
+      let rewritten := mkApp2 (mkConst ``Or)
+        (mkApp (mkConst ``Not) x) (mkApp (mkConst ``Not) y)
+      return some (rewritten,
+        ← mkAppOptM ``Classical.not_and_iff_not_or_not #[some x, some y])
+    if let some (x, y) := inner.app2? ``Or then
+      let rewritten := mkApp2 (mkConst ``And)
+        (mkApp (mkConst ``Not) x) (mkApp (mkConst ``Not) y)
+      return some (rewritten, ← mkAppOptM ``not_or #[some x, some y])
+    if let .forallE n d body bi := inner then
+      unless (← isProp d) && !body.hasLooseBVars do
+        -- `not_forall` speaks of the predicate quantified over, not its
+        -- negation.
+        let quantified := Expr.lam n d body bi
+        let negated := Expr.lam n d (mkApp (mkConst ``Not) body) bi
+        let rewritten ← mkAppM ``Exists #[negated]
+        return some (rewritten,
+          ← mkAppOptM ``Classical.not_forall #[some d, some quantified])
+    if let some (α, p) := inner.app2? ``Exists then
+      let rewritten ← withLocalDeclD `x α fun x => do
+        mkForallFVars #[x] (mkApp (mkConst ``Not) (p.beta #[x]))
+      return some (rewritten, ← mkAppOptM ``not_exists #[some α, some p])
+  return none
+
+/--
+A formula in negation normal form, with a proof that it says the same thing.
+
+The two sides of an `ennf` or `nnf` step are one formula written before and
+after that normalisation, so normalising both and comparing the results is
+what relates them. Every case moves toward the normal form, so it terminates.
+
+Junction nesting is left alone: merging it is a separate step, and comparing
+parts by index already allows for either shape.
+-/
+partial def toNNF (e : Expr) : ReconstructM (Expr × Expr) := do
+  let e ← instantiateMVars e
+  if let some (rewritten, step) ← nnfStep e then
+    let (normal, rest) ← toNNF rewritten
+    return (normal, ← mkAppM ``Iff.trans #[step, rest])
+  for (fn, lemma) in [(``And, ``and_congr), (``Or, ``or_congr)] do
+    if e.isAppOfArity fn 2 then
+      let (l, pl) ← toNNF e.appFn!.appArg!
+      let (r, pr) ← toNNF e.appArg!
+      return (mkApp2 (mkConst fn) l r, ← mkAppM lemma #[pl, pr])
+  if e.not?.isSome then
+    -- Anything but an atom under a negation was taken apart above.
+    return (e, ← mkAppOptM ``Iff.refl #[some e])
+  if e.isAppOfArity ``Exists 2 then
+    match e.appArg! with
+    | .lam n d body bi =>
+      return ← withLocalDeclD `x d fun x => do
+        let (normal, proof) ← toNNF (body.instantiate1 x)
+        let normalLam := Expr.lam n d (normal.abstract #[x]) bi
+        return (← mkAppM ``Exists #[normalLam],
+          ← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof])
+    | _ => return (e, ← mkAppOptM ``Iff.refl #[some e])
+  match e with
+  | .forallE _ d body _ =>
+    if !(← isProp d) || body.hasLooseBVars then
+      return ← withLocalDeclD `x d fun x => do
+        let (normal, proof) ← toNNF (body.instantiate1 x)
+        return (← mkForallFVars #[x] normal,
+          ← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof])
+    return (e, ← mkAppOptM ``Iff.refl #[some e])
+  | _ => return (e, ← mkAppOptM ``Iff.refl #[some e])
+
+/--
 `⟦∃ vs, body⟧`: what a premise says a block of existentials means.
 
 A witness is chosen from this, so it has to come from the premise: a conclusion
@@ -460,7 +547,7 @@ differs from the goal's in the order of every conjunction and disjunction. The
 parts are therefore paired in order and, failing that, in reverse: two fixed
 pairings, not a search among them.
 -/
-partial def equiv (a b : Expr) : ReconstructM Expr := do
+partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   -- A hypothesis reaches here through elaboration, so its type can still be a
   -- metavariable; every recogniser below would miss it.
   let a ← instantiateMVars a
@@ -476,31 +563,31 @@ partial def equiv (a b : Expr) : ReconstructM Expr := do
   if let some ia := a.not? then
     if let some iia := ia.not? then
       return ← mkAppM ``Iff.trans
-        #[← mkAppOptM ``Classical.not_not #[some iia], ← equiv iia b]
+        #[← mkAppOptM ``Classical.not_not #[some iia], ← equivNormal iia b]
   if let some ib := b.not? then
     if let some iib := ib.not? then
       return ← mkAppM ``Iff.trans
-        #[← equiv a iib, ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some iib]]]
+        #[← equivNormal a iib, ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some iib]]]
   if let (some ia, some ib) := (a.not?, b.not?) then
-    return ← mkAppM ``not_congr #[← equiv ia ib]
+    return ← mkAppM ``not_congr #[← equivNormal ia ib]
   if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
-    return ← mkAppM ``iff_congr #[← equiv a₁ b₁, ← equiv a₂ b₂]
+    return ← mkAppM ``iff_congr #[← equivNormal a₁ b₁, ← equivNormal a₂ b₂]
   match a, b with
   | .forallE _ ad ab _, .forallE _ bd bb _ =>
     if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
       -- An arrow: its left side is negative, which is why this is an ↔.
-      return ← mkAppM ``imp_congr #[← equiv ad bd, ← equiv ab bb]
+      return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
     unless ← isDefEq ad bd do
       throwError "equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
     return ← withLocalDeclD `x ad fun x => do
-      let inner ← equiv (ab.instantiate1 x) (bb.instantiate1 x)
+      let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
       mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
   | _, _ =>
     if a.isAppOfArity ``Exists 2 && b.isAppOfArity ``Exists 2 then
       match a.appArg!, b.appArg! with
       | .lam _ ad abody _, .lam _ _ bbody _ =>
         return ← withLocalDeclD `x ad fun x => do
-          let inner ← equiv (abody.instantiate1 x) (bbody.instantiate1 x)
+          let inner ← equivNormal (abody.instantiate1 x) (bbody.instantiate1 x)
           mkAppM ``exists_congr #[← mkLambdaFVars #[x] inner]
       | _, _ => throwError "equiv/exists: cannot relate{indentExpr a}\nto{indentExpr b}"
     for fn in [``And, ``Or] do
@@ -516,7 +603,7 @@ partial def equiv (a b : Expr) : ReconstructM Expr := do
         -- made about which part answers to which. The two sides may associate
         -- differently, which is what flattening changes, so the parts are
         -- reached by index rather than by following either shape.
-        let parts ← ap.zipIdx.mapM fun (x, i) => equiv x bp[i]!
+        let parts ← ap.zipIdx.mapM fun (x, i) => equivNormal x bp[i]!
         if fn == ``And then
           let forward ← withLocalDeclD `h a fun h => do
             mkLambdaFVars #[h] (← introParts b 0 fun j => do
@@ -534,6 +621,18 @@ partial def equiv (a b : Expr) : ReconstructM Expr := do
               injectPart fn a i (← mkAppM ``Iff.mpr #[parts[i]!, hi])) h)
           return ← mkAppM ``Iff.intro #[forward, backward]
     throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
+
+/-- `a ↔ b`, for two ways of writing one formula. -/
+def equiv (a b : Expr) : ReconstructM Expr := do
+  let a ← instantiateMVars a
+  let b ← instantiateMVars b
+  if ← isDefEq a b then
+    return ← mkAppOptM ``Iff.refl #[some a]
+  let (na, pa) ← toNNF a
+  let (nb, pb) ← toNNF b
+  let core ← equivNormal na nb
+  mkAppM ``Iff.trans
+    #[pa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[pb]]]
 
 /--
 The Lean proposition a step asserts. A clause is implicitly universally
