@@ -74,6 +74,20 @@ def namedFormula (name : String) : ReconstructM Expr := do
     | throwIntroduced "the named subformula" name
   return if negated then mkApp (mkConst ``Not) body else body
 
+/--
+What a proposition is the negation of, whether it is written `¬a` or `a → False`
+-- which is the same thing, and which of the two a proof term states depends on
+how it was built.
+-/
+def asNegation (e : Expr) : Option Expr :=
+  match e.not? with
+  | some inner => some inner
+  | none =>
+    match e with
+    | .forallE _ d body _ =>
+      if body.isConstOf ``False && !body.hasLooseBVars then some d else none
+    | _ => none
+
 /-- The name of the negation of what `name` names. -/
 def flippedName (name : String) : String :=
   if name.startsWith "~" then (name.drop 1).toString else "~" ++ name
