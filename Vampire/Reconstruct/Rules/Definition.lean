@@ -16,13 +16,21 @@ namespace Vampire.Reconstruct.Definition
 open Lean Meta
 
 /-- The single literal a definition step states. -/
-private def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
+private partial def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
   if let some c := u.clause? then
     let some l := c.literals[0]?
       | throwError "definition step {u.number} states no literal"
     return l
   if let some f := u.formula? then
-    if let some l := f.literal? then
+    -- A definition can be stated with its variables quantified.
+    let rec descend (f : Formula) : ReconstructM (Option Literal) := do
+      if let some l := f.literal? then
+        return some l
+      if (← connectiveOf f) matches .«forall» then
+        let some body := f.subformulas[0]? | return none
+        return ← descend body
+      return none
+    if let some l ← descend f then
       return l
   throwError "definition step {u.number} does not state an equation"
 

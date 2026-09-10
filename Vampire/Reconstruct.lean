@@ -139,6 +139,10 @@ private partial def bindIntroduced : ReconstructM PUnit := do
         again := again.push u
     pending := again
     unless progressed && !pending.isEmpty do break
+  unless pending.isEmpty do
+    for u in pending do
+      let name := (u.rule?.map (·.name)).getD "unknown"
+      trace[vampire] "could not bind what step {u.number} ({name}) introduces"
   -- Anything left over is reported when its name is first needed.
 
 /--
