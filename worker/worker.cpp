@@ -365,6 +365,13 @@ struct Encoder {
     units[15 * idx + 11] = numSkolems;
     units[15 * idx + 12] = nameOff;
 
+    // Subsumption resolution has several implementations and none of them keeps
+    // the substitution it found, so it is worked out here instead.
+    if (inference.rule() == InferenceRule::FORWARD_SUBSUMPTION_RESOLUTION ||
+        inference.rule() == InferenceRule::BACKWARD_SUBSUMPTION_RESOLUTION) {
+      InferenceStore::instance()->recoverSubsumptionResolutionUses(u);
+    }
+
     uint32_t firstUse = static_cast<uint32_t>(uses.size() / 4);
     uint32_t numUses = 0;
     if (const Stack<InferenceStore::PremiseUse>* recorded =

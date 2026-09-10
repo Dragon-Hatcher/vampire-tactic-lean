@@ -660,6 +660,71 @@ def conclusionOf (u : Vampire.Unit) : ReconstructM Expr := do
   modify fun s => { s with conclusions := s.conclusions.insert u.number c }
   return c
 
+/--
+Instantiates a premise at what the inference bound its variables to.
+
+A variable the inference left alone is bound to itself, and one the conclusion
+did not keep stands for nothing in particular, so `vars` has to cover the
+premise's variables before this is called.
+-/
+def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
+    (proof stated : Expr) : ReconstructM (Expr × Expr) := do
+  let bound := Std.HashMap.ofList use.bindings.toList
+  let mut args := #[]
+  for (v, sortName) in parent.varSorts do
+    match bound[v]? with
+    | some image => args := args.push (← term vars image)
+    | none => args := args.push (← someElement (← sortType sortName))
+  return (mkAppN proof args, ← instantiateForall stated args)
+
+/--
+Something of the right sort for each of a premise's variables the conclusion
+did not keep.
+
+Such a variable is instantiated at an arbitrary element, and both premises have
+to agree on which: a substitution recorded against the premise can mention it.
+-/
+def coverVars (parent : Vampire.Unit) (vars : Vars) : ReconstructM Vars := do
+  let mut vars := vars
+  for (v, sortName) in parent.varSorts do
+    unless vars.contains v do
+      vars := vars.insert v (← someElement (← sortType sortName))
+  return vars
+
+/--
+A proof of the same literal with an equality's arguments the other way round,
+if it is an equality at all.
+
+Vampire's equality literals are unordered: matching one against another tries
+both orientations, so a literal carried into a conclusion or resolved against
+can come back the other way round.
+-/
+def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
+  let stated ← instantiateMVars (← inferType h)
+  if stated.isAppOfArity ``Eq 3 then
+    return some (← mkAppM ``Eq.symm #[h])
+  if let some inner := stated.not? then
+    if inner.isAppOfArity ``Eq 3 then
+      return some (← mkAppM ``Ne.symm #[h])
+  return none
+
+/--
+A proof of `target` from one of its literals, found by lookup.
+
+A simplifying or generating inference carries every literal it did not act on
+into the conclusion unchanged, so where the literal lands is not searched for.
+-/
+def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
+  let parts := junctionParts ``Or target
+  for candidate in #[some h, ← flipEquality h] do
+    let some candidate := candidate | continue
+    let stated ← instantiateMVars (← inferType candidate)
+    for (part, i) in parts.zipIdx do
+      if ← isDefEq part stated then
+        return ← injectPart ``Or target i candidate
+  throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
+    \nis not among{indentExpr target}"
+
 /-- A step of vampire's proof, with everything needed to justify it. -/
 structure Step where
   unit : Vampire.Unit
@@ -669,6 +734,12 @@ structure Step where
 
 /-- The step's conclusion, as a Lean proposition. -/
 def Step.conclusion (step : Step) : ReconstructM Expr := conclusionOf step.unit
+
+/-- How a step used the premise numbered `number`. -/
+def Step.useOf (step : Step) (number : UInt32) : ReconstructM PremiseUse := do
+  let some use := step.unit.premiseUses.find? (·.premise == number)
+    | throwError "step {step.unit.number} did not record how it used step {number}"
+  return use
 
 /--
 Stands in for a rule that has no implementation yet. The step's conclusion is

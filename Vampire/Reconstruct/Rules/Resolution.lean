@@ -15,31 +15,14 @@ namespace Vampire.Reconstruct.Resolution
 
 open Lean Meta
 
-/-- Instantiates a premise at what the unifier bound its variables to. -/
-def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
-    (proof stated : Expr) : ReconstructM (Expr × Expr) := do
-  let bound := Std.HashMap.ofList use.bindings.toList
-  let mut args := #[]
-  for (v, sortName) in parent.varSorts do
-    match bound[v]? with
-    | some image => args := args.push (← term vars image)
-    | none => args := args.push (← someElement (← sortType sortName))
-  return (mkAppN proof args, ← instantiateForall stated args)
-
-/-- How a step used the premise numbered `number`. -/
-def useOf (step : Step) (number : UInt32) : ReconstructM PremiseUse := do
-  let some use := step.unit.premiseUses.find? (·.premise == number)
-    | throwError "step {step.unit.number} did not record how it used step {number}"
-  return use
-
 /-- `resolution`: both premises but for the complementary pair resolved on. -/
 def resolution (step : Step) : ReconstructM Expr := do
   let #[(proof₁, stated₁), (proof₂, stated₂)] := step.premises
     | throwError "resolution should have two premises, got {step.premises.size}"
   let #[parent₁, parent₂] := step.unit.parents
     | throwError "resolution should have two premises"
-  let use₁ ← useOf step parent₁.number
-  let use₂ ← useOf step parent₂.number
+  let use₁ ← step.useOf parent₁.number
+  let use₂ ← step.useOf parent₂.number
   let some resolved₁ := use₁.literal
     | throwError "resolution did not record the literal it resolved on in step \
       {parent₁.number}"
@@ -55,14 +38,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps
     -- it; where it keeps it is a lookup, not a search.
-    let index := (junctionParts ``Or target).zipIdx.foldl
-      (init := ({} : Std.HashMap Expr Nat)) fun acc (p, i) => acc.insert p i
-    let place (h : Expr) : ReconstructM Expr := do
-      let stated ← inferType h
-      let some i := index[stated]?
-        | throwError "the literal{indentExpr stated}\nis not among\
-          {indentExpr target}"
-      injectPart ``Or target i h
+    let place := placeLiteral target
     -- The resolved pair is complementary, which closes that case.
     let body ← elimParts t₁ 0 (fun i h₁ => do
       unless i == resolved₁.toNat do
