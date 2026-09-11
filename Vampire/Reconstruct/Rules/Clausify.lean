@@ -140,7 +140,8 @@ By refutation: suppose it fails, and then the clause it was reached from cannot
 hold either -- every position it kept fails with this one, and the position
 that was replaced fails by the step that replaced it.
 -/
-private partial def prove (r : Replay) (c : GenClause) : ReconstructM Expr := do
+private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr) :
+    ReconstructM Expr := do
   let parts ← genParts r.sorts r.vars c
   let target := junction ``Or ``False parts
   let contradiction ←
@@ -162,13 +163,16 @@ private partial def prove (r : Replay) (c : GenClause) : ReconstructM Expr := do
           let stated ← genParts r.sorts r.vars p
           let some position := c.position?
             | throwError "a clausification step without the position it replaced"
+          let some parentProof := parent?
+            | throwError "a clausification step without a proof of what it \
+              was reached from"
           elimGiven stated (fun i h => do
               if i == position.toNat then
                 replaced r c p position.toNat h refuted
               else
                 -- A position the step kept is one of this clause's own.
                 return mkApp (← refuted (← instantiateMVars (← inferType h))) h)
-            (← prove r p)
+            parentProof
       mkLambdaFVars #[n] body
   mkAppM ``Iff.mp
     #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
@@ -422,6 +426,32 @@ def registerSkolemsOf (u : Vampire.Unit) : ReconstructM PUnit := do
   if skolems.isEmpty then return
   registerAlong (u.parents.flatMap (·.varSorts) ++ u.varSorts) skolems clause
 
+/-- The generalised clauses a clause was reached through, the first one first. -/
+private partial def chainTo (c : GenClause) (chain : Array GenClause := #[]) :
+    Array GenClause :=
+  match c.parent? with
+  | some parent => chainTo parent (chain.push c)
+  | none => (chain.push c).reverse
+
+/--
+A proof of the last clause of a chain, with each clause along the way bound to
+what proves it.
+
+Bound rather than written out: each step supposes its clause fails, and putting
+that supposition through what came before it would walk the whole of it again
+at every step of the chain.
+-/
+private partial def proveChain (r : Replay) (chain : Array GenClause) (i : Nat)
+    (parent? : Option Expr) (bound : Array Expr) : ReconstructM Expr := do
+  let some c := chain[i]?
+    | throwError "a clausification without a clause"
+  let value ← prove r c parent?
+  if i + 1 == chain.size then
+    return ← mkLetFVars bound value (usedLetOnly := false)
+  let stated := junction ``Or ``False (← genParts r.sorts r.vars c)
+  withLetDecl (Name.mkSimple s!"g{i}") stated value fun g =>
+    proveChain r chain (i + 1) (some g) (bound.push g)
+
 /-!
 The other clausifier, `CNF::clausify`, walks a formula in negation normal form
 instead: it takes every disjunct of a disjunction into the clause it is
@@ -507,7 +537,8 @@ def clausify (step : Step) : ReconstructM Expr := do
       -- one the clause kept stands for the local the conclusion binds for it.
       for (v, image) in clause.bindings do
         vars := vars.insert v (← term vars image)
-      let proof ← prove { sorts, vars, premise := premiseProof } clause
+      let proof ← proveChain { sorts, vars, premise := premiseProof }
+        (chainTo clause) 0 none #[]
       let place := placeLiteral target
       mkLambdaFVars xs
         (← elimGiven (← genParts sorts vars clause) (fun _ h => place h) proof)
