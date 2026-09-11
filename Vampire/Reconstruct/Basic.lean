@@ -1321,7 +1321,12 @@ def carryWith (source target proof : Expr)
     let given ←
       try literal i a
       catch _ => return none
-    if ← isDefEq (← instantiateMVars (← inferType given)) t then
+    let says ← instantiateMVars (← inferType given)
+    -- The literal is usually the conclusion's own, which what the two are
+    -- settles before what they mean is asked about.
+    if says == t then
+      return some given
+    if ← isDefEq says t then
       return some given
     -- An equality is stated either way round, and an inference reorients the
     -- one it rewrote; a literal that is the conclusion's the other way round
