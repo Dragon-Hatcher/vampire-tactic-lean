@@ -6,9 +6,6 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
-initialize profRule : IO.Ref String ← IO.mkRef "?"
-initialize profInject : IO.Ref (Std.HashMap String Nat) ← IO.mkRef {}
-
 /-- What reconstruction needs to read a proof back into Lean. -/
 structure Context where
   /-- What the TPTP names in the proof stand for. -/
@@ -505,9 +502,6 @@ partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if !chain.isAppOfArity fn 2 then
     return h
-  do
-    let r ← profRule.get
-    profInject.modify fun m => m.insert r ((m.getD r 0) + 1)
   let left := chain.appFn!.appArg!
   let right := chain.appArg!
   let n := (junctionParts fn left).size
@@ -566,9 +560,6 @@ parts have to be given rather than found.
 partial def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if parts.size <= 1 then return h
-  do
-    let r ← profRule.get
-    profInject.modify fun m => m.insert r ((m.getD r 0) + 1)
   let rest := parts.extract 1 parts.size
   let tail := junction ``Or ``False rest
   if i == 0 then

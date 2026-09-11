@@ -8,22 +8,6 @@ namespace Vampire
 
 open Lean Meta Elab Tactic
 
-/-- Counts the distinct subterms of a proof, by the constant each applies. -/
-private partial def tally (e : Expr) :
-    StateM (Std.HashSet Expr × Std.HashMap Name Nat) PUnit := do
-  if (← get).1.contains e then return
-  modify fun (seen, hist) => (seen.insert e, hist)
-  match e with
-  | .app .. =>
-    if let .const n _ := e.getAppFn then
-      modify fun (seen, hist) => (seen, hist.insert n (hist.getD n 0 + 1))
-    for a in e.getAppArgs do tally a
-  | .lam _ d b _ | .forallE _ d b _ => tally d; tally b
-  | .letE _ t v b _ => tally t; tally v; tally b
-  | .mdata _ b => tally b
-  | .proj _ _ b => tally b
-  | _ => return
-
 /-- Configuration for the `vampire` tactic. -/
 structure TacticConfig extends Config where
   /-- Whether to monomorphize the goal with `lean-auto` before translating it. -/
@@ -53,14 +37,9 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : Syste
   let preprocessed ← if cfg.mono then Preprocess.mono copy hs else Preprocess.intros copy hs
   let (problem, symbols) ← preprocessed.goal.withContext (problemOf preprocessed.hypotheses)
   trace[vampire] "problem:\n{problem}"
-  let searched ← IO.monoMsNow
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
-    if let some path ← IO.getEnv "VAMPIRE_COST" then
-      let h ← IO.FS.Handle.mk path .append
-      h.putStrLn s!"vampire {(← IO.monoMsNow) - searched}"
-      h.flush
     trace[vampire] "proof:\n{proof.proofText}"
     trace[vampire] "vampire said:\n{diagnostics}"
     return { preprocessed, copy, problem, symbols, proof, diagnostics }
@@ -135,7 +114,6 @@ def evalVampire : Tactic := fun stx => withMainContext do
     -- Replay the refutation. Anything vampire introduced itself -- a skolem
     -- function, an AVATAR predicate, a subformula it named while clausifying --
     -- has no counterpart in the goal, so the step cannot even be stated.
-    let replayed ← IO.monoMsNow
     let outcome ←
       try
         query.preprocessed.goal.withContext
@@ -143,22 +121,8 @@ def evalVampire : Tactic := fun stx => withMainContext do
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
-    if let some path ← IO.getEnv "VAMPIRE_COST" then
-      let h ← IO.FS.Handle.mk path .append
-      h.putStrLn s!"replay {(← IO.monoMsNow) - replayed}"
-      h.flush
     let some outcome := outcome
       | throwError "vampire reported a refutation but produced no proof"
-    if let some path ← IO.getEnv "VAMPIRE_COST" then
-      let (_, (seen, hist)) := (tally (← instantiateMVars outcome.proof)).run ({}, {})
-      let top := hist.toArray.qsort (fun a b => a.2 > b.2)
-      let h ← IO.FS.Handle.mk path .append
-      let byRule := (← Reconstruct.profInject.get).toArray.qsort (fun a b => a.2 > b.2)
-      h.putStrLn s!"injections {byRule.take 8}"
-      h.putStrLn s!"nodes {seen.size}"
-      for (n, c) in top.take 14 do
-        h.putStrLn s!"node {n} {c}"
-      h.flush
     unless outcome.unimplemented.isEmpty do
       -- The proof term holds a `sorry` for each of these, so say so rather
       -- than leaving the goal looking closed.

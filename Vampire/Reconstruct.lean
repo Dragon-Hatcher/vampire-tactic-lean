@@ -5,12 +5,6 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
-private def note (msg : String) : MetaM PUnit := do
-  if let some path ← IO.getEnv "VAMPIRE_COST" then
-    let h ← IO.FS.Handle.mk path .append
-    h.putStrLn msg
-    h.flush
-
 /-- Beta-reduces throughout, so that a reported mismatch is a real one. -/
 private def betaAll (e : Expr) : MetaM Expr :=
   Meta.transform e (post := fun e => return .done e.headBeta)
@@ -36,8 +30,6 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
   -- every step using it, so replaying those binds it before it is needed here.
   let premises ← u.parents.mapM fun parent => do
     return (parent, ← step parent, ← conclusionOf parent)
-  let t0 ← IO.monoMsNow
-  profRule.set rule.name
   -- A clause splitting worked on holds only under the names it was split
   -- against, so those are assumed here and discharged into the conclusion. A
   -- premise assumes some of the same names, and is applied to them; one
@@ -81,7 +73,6 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
       {indentExpr (← betaAll (← inferType proof))}\n\
       but the step claims{indentExpr (← betaAll conclusion)}"
   modify fun s => { s with proofs := s.proofs.insert u.number proof }
-  note s!"step {rule.name} {(← IO.monoMsNow) - t0}"
   return proof
 
 /--
@@ -163,7 +154,6 @@ the goal corresponds to it.
 def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
-    note s!"units {proof.units.size}"
     bindIntroduced
     let term ← step refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray }
