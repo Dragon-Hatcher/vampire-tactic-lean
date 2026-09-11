@@ -2,6 +2,7 @@ import Vampire.InferenceRule
 import Vampire.Reconstruct.Basic
 import Vampire.Reconstruct.Rules.Avatar
 import Vampire.Reconstruct.Rules.Clause
+import Vampire.Reconstruct.Rules.Closure
 import Vampire.Reconstruct.Rules.Congruence
 import Vampire.Reconstruct.Rules.Clausify
 import Vampire.Reconstruct.Rules.Definition
@@ -191,7 +192,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .addSortPredicates => unimplemented step
   | .addSortFunctions => unimplemented step
   | .answerLiteralResolver => unimplemented step
-  | .theoryTautologySatConflict => unimplemented step
+  | .theoryTautologySatConflict => Closure.conflict step
   | .genericAvatarInference => unimplemented step
   | .avatarRefutationSmt => unimplemented step
   | .genericAvatarInferenceLast => unimplemented step

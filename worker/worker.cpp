@@ -35,7 +35,8 @@
  *              firstParent, numParents, firstVarSort, numVarSorts,
  *              firstSkolem, numSkolems, name, firstUse, numUses,
  *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
- *              genState, firstChoice, numChoices}
+ *              genState, firstChoice, numChoices, firstCongruence,
+ *              numCongruences}
  *             `genState` is the generalised clause a clause came out of, and
  *             the choices are the conjuncts its clausification went into
  *             `satPremise` is the propositional clause a step derived by SAT
@@ -104,6 +105,19 @@
  *             asserts a component's name and works on with the clause under
  *             that assumption, so what such a clause says is that its literals
  *             follow from the names it is written against
+ *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
+ *             behind a congruence-closure conflict, which is stated as an
+ *             axiom and says only that its literals cannot all be false.
+ *             kind 0 = the equality the clause's `a`th literal denies,
+ *             1 = `f(as) = f(bs)` from `congruenceArgs`, one step for each
+ *             pair of arguments and `NONE` where they are the same term, `a`
+ *             and `b` being the two terms; 2 = steps `a` then `b`; 3 = step
+ *             `a` the other way round; 4 = the clause's `a`th literal is the
+ *             equality step `b` proves; 5 = the clause's `a`th and `b`th
+ *             literals are one atom under both signs, `congruenceArgs` saying
+ *             their arguments are equal. The last step of a unit's run is one
+ *             of the last two kinds
+ *   congruenceArgs indices into `congruences`
  *   skolems   {variable, term} pairs: the existential variable a skolemisation
  *             step replaced, and the term it became. Skolemisation works on
  *             NNF rather than prenex input and a skolem takes only the
@@ -154,14 +168,279 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 14;
+const uint32_t VERSION = 15;
 const uint32_t NONE = 0xFFFFFFFFu;
+
+/*
+ * The reasoning behind a congruence-closure conflict.
+ *
+ * Such a clause is stated as an axiom: it says that its literals cannot all be
+ * false, and nothing in the proof says why. What it takes to see it is short,
+ * and the clause holds all of it -- the equalities it denies, closed under
+ * congruence, make the two sides of the equality it states equal -- so it is
+ * worked out here and written down as the steps of the argument. Replay then
+ * rebuilds those steps rather than looking for them.
+ */
+namespace congruence {
+
+enum Kind : uint32_t {
+  /** The equality the clause's `a`th literal denies. */
+  INPUT,
+  /** `f(as) = f(bs)`, from an equality for each pair of arguments. */
+  CONGRUENCE,
+  /** Steps `a` and `b`, one after the other. */
+  TRANS,
+  /** Step `a`, the other way round. */
+  SYMM,
+  /** The clause's `a`th literal is the equality proved, by step `b`. */
+  GOAL_EQUALITY,
+  /** The clause's `a`th and `b`th literals are one atom under both signs. */
+  GOAL_LITERALS,
+};
+
+struct Step {
+  uint32_t kind = NONE;
+  uint32_t a = NONE;
+  uint32_t b = NONE;
+  /** For a congruence, what says each pair of arguments is equal. */
+  std::vector<uint32_t> args;
+  /** What the step concludes, for the steps that conclude an equality. */
+  TermList lhs;
+  TermList rhs;
+};
+
+/**
+ * Closes a clause's terms under the equalities it denies, keeping a proof of
+ * every equality it derives.
+ *
+ * Each class holds a term of its own that the others are proved equal to, so
+ * merging two classes composes proofs rather than searching for a path; the
+ * cores are a dozen literals and the terms in them are small.
+ */
+class Proof {
+public:
+  /** Whether the clause's literals were shown not to be all false. */
+  bool of(Clause* c)
+  {
+    for (unsigned i = 0; i < c->size(); i++) {
+      Literal* l = (*c)[i];
+      for (unsigned j = 0; j < l->arity(); j++)
+        collect(*l->nthArgument(j));
+    }
+    _representative.resize(_terms.size());
+    _toRepresentative.assign(_terms.size(), NONE);
+    for (unsigned i = 0; i < _terms.size(); i++)
+      _representative[i] = i;
+
+    // A literal denying an equality is an equality to reason with: were it
+    // false, that equality would hold.
+    for (unsigned i = 0; i < c->size(); i++) {
+      Literal* l = (*c)[i];
+      if (!l->isEquality() || l->isPositive())
+        continue;
+      TermList lhs = *l->nthArgument(0);
+      TermList rhs = *l->nthArgument(1);
+      Step step;
+      step.kind = INPUT;
+      step.a = i;
+      step.lhs = lhs;
+      step.rhs = rhs;
+      merge(indexOf(lhs), indexOf(rhs), emit(step));
+    }
+
+    close();
+    return closeOn(c);
+  }
+
+  const std::vector<Step>& steps() const { return _steps; }
+
+private:
+  std::vector<TermList> _terms;
+  std::vector<unsigned> _representative;
+  /** What says a term equals its class's own term; `NONE` for that term. */
+  std::vector<uint32_t> _toRepresentative;
+  std::vector<Step> _steps;
+
+  void collect(TermList t)
+  {
+    if (indexOf(t) == NONE) {
+      if (!t.isVar())
+        for (unsigned i = 0; i < t.term()->arity(); i++)
+          collect(*t.term()->nthArgument(i));
+      _terms.push_back(t);
+    }
+  }
+
+  /** Where a term stands among those met, or `NONE`. */
+  unsigned indexOf(TermList t) const
+  {
+    for (unsigned i = 0; i < _terms.size(); i++)
+      if (_terms[i] == t)
+        return i;
+    return NONE;
+  }
+
+  uint32_t emit(const Step& step)
+  {
+    _steps.push_back(step);
+    return static_cast<uint32_t>(_steps.size() - 1);
+  }
+
+  /** Both steps, one after the other; either may be nothing to say. */
+  uint32_t transitivity(uint32_t p, uint32_t q)
+  {
+    if (p == NONE)
+      return q;
+    if (q == NONE)
+      return p;
+    Step step;
+    step.kind = TRANS;
+    step.a = p;
+    step.b = q;
+    step.lhs = _steps[p].lhs;
+    step.rhs = _steps[q].rhs;
+    return emit(step);
+  }
+
+  uint32_t symmetry(uint32_t p)
+  {
+    if (p == NONE)
+      return NONE;
+    Step step;
+    step.kind = SYMM;
+    step.a = p;
+    step.lhs = _steps[p].rhs;
+    step.rhs = _steps[p].lhs;
+    return emit(step);
+  }
+
+  /** What says two terms of one class are equal. */
+  uint32_t equality(unsigned i, unsigned j)
+  {
+    return transitivity(_toRepresentative[i], symmetry(_toRepresentative[j]));
+  }
+
+  void merge(unsigned i, unsigned j, uint32_t p)
+  {
+    unsigned from = _representative[i];
+    unsigned to = _representative[j];
+    if (from == to)
+      return;
+    uint32_t between = transitivity(symmetry(_toRepresentative[i]),
+                                    transitivity(p, _toRepresentative[j]));
+    for (unsigned k = 0; k < _terms.size(); k++)
+      if (_representative[k] == from) {
+        _toRepresentative[k] = transitivity(_toRepresentative[k], between);
+        _representative[k] = to;
+      }
+  }
+
+  /** What says the arguments of two applications are equal, one by one. */
+  bool argumentsEqual(Term* s, Term* t, std::vector<uint32_t>& out)
+  {
+    for (unsigned k = 0; k < s->arity(); k++) {
+      TermList a = *s->nthArgument(k);
+      TermList b = *t->nthArgument(k);
+      if (a == b) {
+        out.push_back(NONE);
+        continue;
+      }
+      unsigned i = indexOf(a);
+      unsigned j = indexOf(b);
+      if (i == NONE || j == NONE || _representative[i] != _representative[j])
+        return false;
+      out.push_back(equality(i, j));
+    }
+    return true;
+  }
+
+  /** Merges what congruence makes equal, until it makes nothing more. */
+  void close()
+  {
+    bool again = true;
+    while (again) {
+      again = false;
+      for (unsigned i = 0; i < _terms.size(); i++)
+        for (unsigned j = i + 1; j < _terms.size(); j++) {
+          if (_representative[i] == _representative[j])
+            continue;
+          if (_terms[i].isVar() || _terms[j].isVar())
+            continue;
+          Term* s = _terms[i].term();
+          Term* t = _terms[j].term();
+          if (s->functor() != t->functor() || s->arity() != t->arity())
+            continue;
+          std::vector<uint32_t> args;
+          if (!argumentsEqual(s, t, args))
+            continue;
+          Step step;
+          step.kind = CONGRUENCE;
+          step.args = args;
+          step.lhs = _terms[i];
+          step.rhs = _terms[j];
+          merge(i, j, emit(step));
+          again = true;
+        }
+    }
+  }
+
+  /**
+   * The literal of the clause that the equalities settle, if there is one.
+   *
+   * Either an equality it states, both sides of which are now in one class, or
+   * a pair of literals over one predicate and of opposite signs whose
+   * arguments are.
+   */
+  bool closeOn(Clause* c)
+  {
+    for (unsigned i = 0; i < c->size(); i++) {
+      Literal* l = (*c)[i];
+      if (!l->isEquality() || !l->isPositive())
+        continue;
+      unsigned lhs = indexOf(*l->nthArgument(0));
+      unsigned rhs = indexOf(*l->nthArgument(1));
+      if (lhs == NONE || rhs == NONE || _representative[lhs] != _representative[rhs])
+        continue;
+      Step step;
+      step.kind = GOAL_EQUALITY;
+      step.a = i;
+      step.b = equality(lhs, rhs);
+      emit(step);
+      return true;
+    }
+    for (unsigned i = 0; i < c->size(); i++) {
+      Literal* negative = (*c)[i];
+      if (negative->isEquality() || negative->isPositive())
+        continue;
+      for (unsigned j = 0; j < c->size(); j++) {
+        Literal* positive = (*c)[j];
+        if (positive->isEquality() || !positive->isPositive())
+          continue;
+        if (positive->functor() != negative->functor())
+          continue;
+        std::vector<uint32_t> args;
+        if (!argumentsEqual(negative, positive, args))
+          continue;
+        Step step;
+        step.kind = GOAL_LITERALS;
+        step.a = i;
+        step.b = j;
+        step.args = args;
+        emit(step);
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+}  // namespace congruence
 
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
-      genStates, genLits, choices;
+      genStates, genLits, choices, congruences, congruenceArgs;
   std::string strings;
   std::string proofText;
 
@@ -438,8 +717,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 23);
-    units.resize(units.size() + 23, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 25);
+    units.resize(units.size() + 25, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -513,19 +792,19 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[23 * idx + 0] = u->number();
-    units[23 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[23 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[23 * idx + 3] = flags;
-    units[23 * idx + 4] = payload;
-    units[23 * idx + 5] = numLits;
-    units[23 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[23 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[23 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[23 * idx + 9] = numVarSorts;
-    units[23 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[23 * idx + 11] = numSkolems;
-    units[23 * idx + 12] = nameOff;
+    units[25 * idx + 0] = u->number();
+    units[25 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[25 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[25 * idx + 3] = flags;
+    units[25 * idx + 4] = payload;
+    units[25 * idx + 5] = numLits;
+    units[25 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[25 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[25 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
+    units[25 * idx + 9] = numVarSorts;
+    units[25 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[25 * idx + 11] = numSkolems;
+    units[25 * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -554,11 +833,11 @@ struct Encoder {
         numUses++;
       }
     }
-    units[23 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[23 * idx + 14] = numUses;
-    units[23 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[23 * idx + 16] = numSplits;
-    units[23 * idx + 17] =
+    units[25 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[25 * idx + 14] = numUses;
+    units[25 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[25 * idx + 16] = numSplits;
+    units[25 * idx + 17] =
       inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
 
     uint32_t firstNaming = static_cast<uint32_t>(namings.size() / 4);
@@ -576,10 +855,36 @@ struct Encoder {
         numNamings++;
       }
     }
-    units[23 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
-    units[23 * idx + 19] = numNamings;
-    units[23 * idx + 20] =
+    units[25 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
+    units[25 * idx + 19] = numNamings;
+    units[25 * idx + 20] =
       encodeGenClauseState(InferenceStore::instance()->genClauseOfClause(u));
+
+    uint32_t firstCongruence = static_cast<uint32_t>(congruences.size() / 5);
+    uint32_t numCongruences = 0;
+    if (u->isClause() &&
+        inference.rule() == InferenceRule::THEORY_TAUTOLOGY_SAT_CONFLICT) {
+      congruence::Proof derivation;
+      if (derivation.of(u->asClause()))
+        for (const congruence::Step& step : derivation.steps()) {
+          uint32_t firstArg = static_cast<uint32_t>(congruenceArgs.size());
+          for (uint32_t arg : step.args)
+            congruenceArgs.push_back(arg);
+          congruences.push_back(step.kind);
+          if (step.kind == congruence::CONGRUENCE) {
+            congruences.push_back(encodeTerm(step.lhs));
+            congruences.push_back(encodeTerm(step.rhs));
+          } else {
+            congruences.push_back(step.a);
+            congruences.push_back(step.b);
+          }
+          congruences.push_back(step.args.empty() ? NONE : firstArg);
+          congruences.push_back(static_cast<uint32_t>(step.args.size()));
+          numCongruences++;
+        }
+    }
+    units[25 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
+    units[25 * idx + 24] = numCongruences;
 
     uint32_t firstChoice = static_cast<uint32_t>(choices.size() / 2);
     uint32_t numChoices = 0;
@@ -591,8 +896,8 @@ struct Encoder {
         numChoices++;
       }
     }
-    units[23 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
-    units[23 * idx + 22] = numChoices;
+    units[25 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
+    units[25 * idx + 22] = numChoices;
     return idx;
   }
 };
@@ -637,7 +942,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 23));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 25));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
@@ -653,6 +958,8 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.uses.size() / 6));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.congruences.size() / 5));
+  putWord(buf, static_cast<uint32_t>(enc.congruenceArgs.size()));
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
   putWord(buf, static_cast<uint32_t>(enc.proofText.size()));
   // Lets the Lean side notice that its generated `InferenceRule` is stale.
@@ -685,6 +992,8 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.choices);
   putWords(buf, enc.uses);
   putWords(buf, enc.bindings);
+  putWords(buf, enc.congruences);
+  putWords(buf, enc.congruenceArgs);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

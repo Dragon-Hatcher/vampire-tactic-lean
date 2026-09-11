@@ -27,14 +27,8 @@ structure Config where
   mode : String := "portfolio"
   /-- The strategy schedule `portfolio` mode follows. -/
   schedule : String := "casc"
-  /--
-  Options forced on every strategy of the schedule, whatever the strategy says.
-
-  AVATAR's congruence closure concludes a clause whose literals cannot all hold
-  over the theory of equality, and replay has no proof of that to offer, so it
-  is off: what vampire may use is what can be read back.
-  -/
-  forced : Array (String × String) := #[("acc", "off")]
+  /-- Options forced on every strategy of the schedule, whatever it says. -/
+  forced : Array (String × String) := #[]
   /-- Further vampire options, as they would be given on its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/

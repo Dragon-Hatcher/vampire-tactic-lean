@@ -38,6 +38,8 @@ private structure Layout where
   choices : Nat
   uses : Nat
   bindings : Nat
+  congruences : Nat
+  congruenceArgs : Nat
   strings : Nat
   proofText : Nat
   numFunctions : Nat
@@ -121,11 +123,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 14
+private def version : UInt32 := 15
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 34 * 4 then
+  if data.size < 36 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -133,7 +135,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
-  let numRules := word 32
+  let numRules := word 34
   if numRules != InferenceRule.count then
     .error (.error s!"vampire declares {numRules} inference rules but \
       Vampire/InferenceRule.lean has {InferenceRule.count}; \
@@ -163,9 +165,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numChoices := word 27
   let numUses := word 28
   let numBindings := word 29
-  let stringsLen := word 30
-  let proofTextLen := word 31
-  let functions := 34 * 4
+  let numCongruences := word 30
+  let numCongruenceArgs := word 31
+  let stringsLen := word 32
+  let proofTextLen := word 33
+  let functions := 36 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -175,7 +179,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 23 * 4
+  let unitLits := units + numUnits * 25 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -190,7 +194,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let choices := genLits + numGenLits * 2 * 4
   let uses := choices + numChoices * 2 * 4
   let bindings := uses + numUses * 6 * 4
-  let strings := bindings + numBindings * 2 * 4
+  let congruences := bindings + numBindings * 2 * 4
+  let congruenceArgs := congruences + numCongruences * 5 * 4
+  let strings := congruenceArgs + numCongruenceArgs * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -202,12 +208,12 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     (readU32 data 8) "termination reason"
   return {
     data, terminationReason := reason
-    polarityFlipBoundary := readU32 data (33 * 4)
+    polarityFlipBoundary := readU32 data (35 * 4)
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
-      bindings, strings, proofText, numFunctions,
+      bindings, congruences, congruenceArgs, strings, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -293,6 +299,25 @@ structure PremiseUse where
   -/
   rewritesWholePremise : Bool
   bindings : Array (UInt32 × Term)
+
+/--
+One step of the reasoning behind a congruence-closure conflict, which vampire
+states as an axiom: its literals cannot all be false, and the clause itself
+holds what it takes to see that.
+-/
+inductive Congruence where
+  /-- The equality the clause's `literal`th literal denies. -/
+  | input (literal : Nat)
+  /-- `f as = f bs`, from what says each pair of arguments is equal. -/
+  | congruence (lhs rhs : Term) (args : Array (Option Nat))
+  /-- One step and then the other. -/
+  | trans (first second : Nat)
+  /-- A step, the other way round. -/
+  | symm (step : Nat)
+  /-- The clause's `literal`th literal is the equality `step` proves. -/
+  | goalEquality (literal step : Nat)
+  /-- The clause's two literals are one atom under both signs. -/
+  | goalLiterals (negative positive : Nat) (args : Array (Option Nat))
 
 /--
 One state of one of clausification's generalised clauses: a disjunction of
@@ -463,8 +488,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 23 c.idx.toNat 4
-  let count := p.field p.layout.units 23 c.idx.toNat 5
+  let first := p.field p.layout.units 25 c.idx.toNat 4
+  let count := p.field p.layout.units 25 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -557,7 +582,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 23 u.idx.toNat off
+  u.proof.field u.proof.layout.units 25 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -672,6 +697,36 @@ def conjunctChoices (u : Unit) : Array (Formula × UInt32) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.choices + (first.toNat + i.val) * 2 * 4
     (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4))
+
+/--
+The reasoning behind a congruence-closure conflict, the last step of it being
+the literal the reasoning settles.
+-/
+def congruences (u : Unit) : Except Error (Array Congruence) := do
+  let p := u.proof
+  let first := u.field 23
+  let count := u.field 24
+  let mut out := #[]
+  for i in [0 : count.toNat] do
+    let base := p.layout.congruences + (first.toNat + i) * 5 * 4
+    let a := readU32 p.data (base + 4)
+    let b := readU32 p.data (base + 8)
+    let firstArg := readU32 p.data (base + 12)
+    let numArgs := readU32 p.data (base + 16)
+    let args : Array (Option Nat) := Array.ofFn (n := numArgs.toNat) fun j =>
+      let arg := readU32 p.data
+        (p.layout.congruenceArgs + (firstArg.toNat + j.val) * 4)
+      if arg == none32 then none else some arg.toNat
+    out := out.push (←
+      match readU32 p.data base with
+      | 0 => pure (.input a.toNat)
+      | 1 => pure (.congruence ⟨p, a⟩ ⟨p, b⟩ args)
+      | 2 => pure (.trans a.toNat b.toNat)
+      | 3 => pure (.symm a.toNat)
+      | 4 => pure (.goalEquality a.toNat b.toNat)
+      | 5 => pure (.goalLiterals a.toNat b.toNat args)
+      | kind => .error (.error s!"unknown congruence step kind {kind}"))
+  return out
 
 /-- The generalised clause this clause came out of, if clausification made it. -/
 def genClause? (u : Unit) : Option GenClause :=
