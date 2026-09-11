@@ -59,8 +59,17 @@ def weakened (step : Step) : ReconstructM Expr := do
   let #[(proof, stated)] := step.premises
     | throwError "expected one premise, got {step.premises.size}"
   let conclusion ← step.conclusion
-  if ← isDefEq (← instantiateMVars stated) conclusion then
+  let stated ← instantiateMVars stated
+  if ← isDefEq stated conclusion then
     return proof
-  return mkApp (← implies (← instantiateMVars stated) conclusion) proof
+  -- A truth value absorbed inside the formula leaves it saying the same thing,
+  -- which is a congruence; a predicate or a disjunct removed leaves it saying
+  -- less, which is a matter of looking up what is left. Which of the two it is
+  -- the step does not say, so the congruence is built first and the other only
+  -- if there is none.
+  try
+    return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+  catch _ =>
+    return mkApp (← implies stated conclusion) proof
 
 end Vampire.Reconstruct.Congruence

@@ -180,17 +180,16 @@ private def satClause (proved : Std.HashMap UInt32 Expr)
     let some (proof, stated) := origins[origin.number]?
       | throwError "the propositional shadow of step {origin.number}, which is \
         not among the refutation's premises"
-    let place := placeLiteral target
     return ← carryAll stated target proof
   -- Suppose the clause fails; then each of its literals is false, which is to
   -- say that each of their negations holds.
   let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
     let mut known : Std.HashMap String Expr := {}
+    let against := refuters (← c.literals.mapM namedFormula) n
     for (name, i) in c.literals.zipIdx do
       let (_, says) ← flipName name
-      let body ← namedFormula name
-      let refuted ← withLocalDeclD `d body fun d => do
-        mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
+      let some refuted := against[i]?
+        | throwError "no refutation of the clause's literal {i}"
       known := known.insert (flippedName name)
         (← mkAppM ``Iff.mpr #[says, refuted])
     mkLambdaFVars #[n] (← propagate proved known c.premises 0)

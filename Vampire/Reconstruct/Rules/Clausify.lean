@@ -602,6 +602,13 @@ private partial def descend (sorts : Array (UInt32 × String))
   | .or =>
     -- Every disjunct is taken into the same clause, so each must lead to it.
     let parts ← partsOf ``Or stated f.subformulas.size
+    -- A disjunction of literals is the clause itself, up to the order its
+    -- literals are in, and is carried into it following the shape of both.
+    let literals ← f.subformulas.allM fun g => do
+      return !((← connectiveOf g) matches .«forall» | .and | .or | .«false»)
+    if literals then
+      return ← withLocalDeclD `h stated fun h => do
+        mkLambdaFVars #[h] (← carryAll stated target h)
     let branches ← f.subformulas.zipIdx.mapM fun (g, i) => do
       let some part := parts[i]? | throwError "a missing disjunct"
       descend sorts choices vars g part target

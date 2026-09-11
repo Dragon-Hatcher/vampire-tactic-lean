@@ -756,6 +756,35 @@ partial def elimOr (chain : Expr) (handlers : Array Expr) (h : Expr) (i : Nat :=
         ← mkLambdaFVars #[a] (mkApp handler a),
         ← mkLambdaFVars #[b] (← elimOr rest handlers b (i + 1))]
 
+/--
+`⟦parts⟧ ↔ ⟦the parts that are not the junction's unit⟧`, with those parts.
+
+Absorbing a truth value leaves a junction with fewer parts than it found, which
+is what simplifying one does wherever in a formula it sits.
+-/
+private partial def withoutUnits (fn unit : Name) (parts : Array Expr) :
+    ReconstructM (Array Expr × Expr) := do
+  let some head := parts[0]?
+    | return (#[], ← mkAppOptM ``Iff.refl #[some (mkConst unit)])
+  if parts.size == 1 then
+    return (if head.isConstOf unit then #[] else #[head],
+      ← mkAppOptM ``Iff.refl #[some head])
+  let congruence := if fn == ``And then ``and_congr else ``or_congr
+  let absorbHead := if fn == ``And then ``true_and else ``false_or
+  let absorbTail := if fn == ``And then ``and_true else ``or_false
+  let rest := parts.extract 1 parts.size
+  let tail := junction fn unit rest
+  let (keptRest, saysRest) ← withoutUnits fn unit rest
+  if head.isConstOf unit then
+    return (keptRest, ← mkAppM ``Iff.trans
+      #[← mkAppM ``iff_of_eq #[mkApp (mkConst absorbHead) tail], saysRest])
+  let onTail ← mkAppM congruence
+    #[← mkAppOptM ``Iff.refl #[some head], saysRest]
+  if keptRest.isEmpty then
+    return (#[head], ← mkAppM ``Iff.trans
+      #[onTail, ← mkAppM ``iff_of_eq #[mkApp (mkConst absorbTail) head]])
+  return (#[head] ++ keptRest, onTail)
+
 /-- Whether a junction is the right-nested one over exactly these parts. -/
 private def rightNested (fn : Name) (e : Expr) (parts : Array Expr) : Bool :=
   Id.run do
@@ -860,6 +889,16 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         let ap := junctionParts fn a
         let bp := junctionParts fn b
         unless ap.size == bp.size do
+          -- One side has a truth value the other has absorbed.
+          let unit := if fn == ``And then ``True else ``False
+          if rightNested fn a ap && rightNested fn b bp then
+            let (aKept, aSays) ← withoutUnits fn unit ap
+            let (bKept, bSays) ← withoutUnits fn unit bp
+            if aKept.size == bKept.size && !aKept.isEmpty then
+              let core ← equivNormal (junction fn unit aKept) (junction fn unit bKept)
+              return ← mkAppM ``Iff.trans
+                #[aSays, ← mkAppM ``Iff.trans
+                  #[core, ← mkAppM ``Iff.symm #[bSays]]]
           throwError "junctions have {ap.size} and {bp.size} parts:\
             {indentExpr a}\nand{indentExpr b}"
         -- Part by part, in order. The translation emits a junction in the
@@ -1156,6 +1195,32 @@ def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
       return placed
   throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
     \nis not among{indentExpr target}"
+
+/--
+`¬pᵢ` for each part of a disjunction, from a refutation of the whole.
+
+Putting a part back into the disjunction to refute it takes a constructor for
+each part before it, so refuting every part of a clause costs the square of its
+width; each of these is one step from the one beside it.
+-/
+def refuters (parts : Array Expr) (against : Expr) : Array Expr := Id.run do
+  if parts.size == 0 then return #[]
+  if parts.size == 1 then return #[against]
+  -- `tails[i]` is what the parts from `i` on say, each built from the next.
+  let mut tails := parts
+  for i in [0 : parts.size - 1] do
+    let j := parts.size - 2 - i
+    tails := tails.set! j (mkApp2 (mkConst ``Or) parts[j]! tails[j + 1]!)
+  let mut out := #[]
+  let mut against := against
+  for i in [0 : parts.size - 1] do
+    out := out.push (.lam `d parts[i]!
+      (mkApp against (mkApp3 (mkConst ``Or.inl) parts[i]! tails[i + 1]! (.bvar 0)))
+      .default)
+    against := .lam `x tails[i + 1]!
+      (mkApp against (mkApp3 (mkConst ``Or.inr) parts[i]! tails[i + 1]! (.bvar 0)))
+      .default
+  return out.push against
 
 /--
 `source → target`, following the shape of both at once.
