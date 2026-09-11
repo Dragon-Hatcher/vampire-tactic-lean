@@ -44,6 +44,8 @@ structure State where
   conclusions : Std.HashMap UInt32 Expr := {}
   /-- The one term standing for each shape a rebuilt term has taken. -/
   shared : Std.HashMap Expr Expr := {}
+  /-- What says a sort is inhabited, for the sorts skolemisation has needed. -/
+  nonempty : Std.HashMap Expr Expr := {}
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
@@ -154,9 +156,13 @@ def shared (e : Expr) : ReconstructM Expr := do
 
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
+  if let some inst := (← get).nonempty[τ]? then
+    return inst
   let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
   match ← trySynthInstance goal with
-  | .some inst => return inst
+  | .some inst =>
+    modify fun s => { s with nonempty := s.nonempty.insert τ inst }
+    return inst
   | _ =>
     throwError "cannot skolemise over{indentExpr τ}\nwithout `Nonempty` for it"
 
@@ -168,15 +174,18 @@ Forwards is `epsilon_spec_aux`, which is already the implication and takes the
 here. Backwards the witness is that very term.
 -/
 def epsilon (τ p : Expr) : ReconstructM (Expr × Expr) := do
+  let level ← getLevel τ
   let inst ← nonempty τ
-  let witness ← shared (mkApp3 (mkConst ``Classical.epsilon [← getLevel τ]) τ inst p)
-  let forward ← mkAppOptM ``Classical.epsilon_spec_aux #[some τ, some inst, some p]
-  -- `p` has to be given: `h`'s type is beta-reduced, so it cannot be recovered
-  -- from the arguments by unification.
-  let backward ← withLocalDeclD `h (p.beta #[witness]) fun h => do
-    mkLambdaFVars #[h]
-      (← mkAppOptM ``Exists.intro #[some τ, some p, some witness, some h])
-  return (witness, ← mkAppM ``Iff.intro #[forward, backward])
+  let witness ← shared (mkApp3 (mkConst ``Classical.epsilon [level]) τ inst p)
+  -- Written out rather than found: a clausification asks for one of these at
+  -- every quantifier of every clause it passes through.
+  let forward := mkApp3 (mkConst ``Classical.epsilon_spec_aux [level]) τ inst p
+  let satisfied := p.beta #[witness]
+  let backward := .lam `h satisfied
+    (mkApp4 (mkConst ``Exists.intro [level]) τ p witness (.bvar 0)) .default
+  let existence := mkApp2 (mkConst ``Exists [level]) τ p
+  return (witness,
+    mkApp4 (mkConst ``Iff.intro) existence satisfied forward backward)
 
 /-- A formula's top-level connective. -/
 def connectiveOf (f : Formula) : ReconstructM Connective :=

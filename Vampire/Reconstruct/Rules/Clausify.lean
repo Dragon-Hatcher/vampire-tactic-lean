@@ -102,6 +102,8 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
       let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
         mkLambdaFVars #[x] (← blockProp positive sorts rest (vars.insert v x) body)
       let (witness, choice) ← epsilon τ predicate
+      let level ← getLevel τ
+      let existenceProp := mkApp2 (mkConst ``Exists [level]) τ predicate
       -- At negative polarity what is at hand refutes a universal, and that a
       -- universal fails is that something fails it.
       let existence ←
@@ -111,10 +113,15 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
             | throwError "a universal block is not refuted by{indentExpr h}"
           let .forallE n τ' inner bi := quantified
             | throwError "a universal block is not one:{indentExpr quantified}"
-          mkAppM ``Iff.mp
-            #[← mkAppOptM ``Classical.not_forall
-                #[some τ', some (Expr.lam n τ' inner bi)], h]
-      go rest (vars.insert v witness) (← mkAppM ``Iff.mp #[choice, existence])
+          let over := Expr.lam n τ' inner bi
+          pure (mkApp4 (mkConst ``Iff.mp)
+            (mkApp (mkConst ``Not) quantified)
+            (mkApp2 (mkConst ``Exists [← getLevel τ'])
+              τ' (.lam n τ' (mkApp (mkConst ``Not) inner) bi))
+            (mkApp2 (mkConst ``Classical.not_forall [← getLevel τ']) τ' over) h)
+      go rest (vars.insert v witness)
+        (mkApp4 (mkConst ``Iff.mp) existenceProp (predicate.beta #[witness])
+          choice existence)
   go (boundOf sorts f).toList vars h
 
 /--
@@ -348,7 +355,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
       | throwError "a refutation is not one"
     let some innermost := asNegation inner
       | throwError "a refutation of a negation is not one"
-    mkAppM ``Iff.mp #[← mkAppOptM ``Classical.not_not #[some innermost], negation]
+    return ofNotNot innermost negation
   match ← connectiveOf g with
   | .and =>
     if sign then
@@ -383,8 +390,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
             | throwError "the failing of an exclusive or is not a negation"
           let some innermost := inner.not?
             | throwError "the failing of an exclusive or is not a negation"
-          mkAppM ``Iff.mp
-            #[← mkAppOptM ``Classical.not_not #[some innermost], h]
+          pure (ofNotNot innermost h)
       else pure h
     let isIff := (← connectiveOf g) matches .iff
     if isIff == sign then
