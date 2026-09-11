@@ -567,6 +567,7 @@ partial def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
   else
     return mkApp3 (mkConst ``Or.inr) parts[0]! tail (← injectGiven rest (i - 1) h)
 
+
 /-- `elimFunction`, for a disjunction whose parts are given rather than found. -/
 partial def elimGivenFunction (parts : Array Expr) (offset : Nat)
     (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :
@@ -722,6 +723,17 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
 
 
 
+/--
+`a` from `¬¬a`, with both written out.
+
+`mkAppM` would find them again from the proof it is given, which for a proof
+the size of a clausification's is the whole of it.
+-/
+def ofNotNot (a : Expr) (h : Expr) : Expr :=
+  let negated := mkApp (mkConst ``Not) a
+  mkApp4 (mkConst ``Iff.mp) (mkApp (mkConst ``Not) negated) a
+    (mkApp (mkConst ``Classical.not_not) a) h
+
 /-- A proof of a right-folded conjunction from proofs of its parts. -/
 def introAnd (parts : Array Expr) : ReconstructM Expr := do
   if parts.isEmpty then
@@ -743,6 +755,16 @@ partial def elimOr (chain : Expr) (handlers : Array Expr) (h : Expr) (i : Nat :=
       mkAppM ``Or.elim #[h,
         ← mkLambdaFVars #[a] (mkApp handler a),
         ← mkLambdaFVars #[b] (← elimOr rest handlers b (i + 1))]
+
+/-- Whether a junction is the right-nested one over exactly these parts. -/
+private def rightNested (fn : Name) (e : Expr) (parts : Array Expr) : Bool :=
+  Id.run do
+    let mut rest := e
+    for i in [0 : parts.size - 1] do
+      unless rest.isAppOfArity fn 2 && rest.appFn!.appArg! == parts[i]! do
+        return false
+      rest := rest.appArg!
+    return parts.back? == some rest
 
 /--
 `k`'s result, with each of `values` standing behind a local of the given type
@@ -847,6 +869,23 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         -- differently, which is what flattening changes, so the parts are
         -- reached by index rather than by following either shape.
         let values ← ap.zipIdx.mapM fun (x, i) => equivNormal x bp[i]!
+        -- Both sides right-nested over the same parts: the congruence follows
+        -- their shape, one step per part. Taking them apart and putting them
+        -- back together a part at a time would cost the square of their width,
+        -- and a formula's own disjunction can be hundreds of literals wide.
+        if rightNested fn a ap && rightNested fn b bp then
+          let congruence := if fn == ``And then ``and_congr else ``or_congr
+          let mut aTail := ap.back!
+          let mut bTail := bp.back!
+          let mut proof := values.back!
+          for i in [0 : ap.size - 1] do
+            let j := ap.size - 2 - i
+            proof ← mkAppOptM congruence
+              #[some ap[j]!, some bp[j]!, some aTail, some bTail,
+                some values[j]!, some proof]
+            aTail := mkApp2 (mkConst fn) ap[j]! aTail
+            bTail := mkApp2 (mkConst fn) bp[j]! bTail
+          return proof
         let types := ap.zipIdx.map fun (x, i) => mkApp2 (mkConst ``Iff) x bp[i]!
         return ← shared types values fun parts => do
           let mp (i : Nat) (h : Expr) : Expr :=
@@ -1028,6 +1067,15 @@ def witnessAgainst (against : Expr) : ReconstructM (Expr × Expr) := do
   let (witness, choice) ← epsilon τ refuting
   return (witness, ← mkAppM ``Iff.mp #[choice, existence])
 
+/-- `a` with its double negations stripped. -/
+private partial def stripped (a : Expr) : Expr :=
+  match a.not? with
+  | some inner =>
+    match inner.not? with
+    | some innermost => stripped innermost
+    | none => a
+  | none => a
+
 /-- `a` with its double negations stripped, and that it says the same. -/
 private partial def strippedOf (a : Expr) : ReconstructM (Expr × Expr) := do
   if let some inner := a.not? then
@@ -1045,9 +1093,12 @@ has unwrapped a negation into the sign it carries, so the two can meet with a
 double negation between them.
 -/
 def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
-  let (strippedA, saysA) ← strippedOf a
-  let (strippedB, saysB) ← strippedOf b
-  unless ← isDefEq strippedA strippedB do return none
+  -- Asked of every literal of a clause against every literal of the clause it
+  -- was reached from, so what says the two are the same is built only once one
+  -- knows they are.
+  unless ← isDefEq (stripped a) (stripped b) do return none
+  let (_, saysA) ← strippedOf a
+  let (_, saysB) ← strippedOf b
   return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])
 
 /--
@@ -1082,12 +1133,27 @@ into the conclusion unchanged, so where the literal lands is not searched for.
 -/
 def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
   let parts := junctionParts ``Or target
-  for candidate in #[some h, ← flipEquality h] ++ (← doubleNegations h).map some do
-    let some candidate := candidate | continue
+  -- The literal is usually the very one the conclusion was built from, so it
+  -- is looked for as it stands before anything is made of it: a clause of a
+  -- few hundred literals is placed a literal at a time, and building the ways
+  -- a literal can be stated differently for each of them costs more than the
+  -- inferences do.
+  let place (candidate : Expr) : ReconstructM (Option Expr) := do
     let stated ← instantiateMVars (← inferType candidate)
+    if let some i := parts.findIdx? (· == stated) then
+      return some (← injectPart ``Or target i candidate)
     for (part, i) in parts.zipIdx do
       if ← isDefEq part stated then
-        return ← injectPart ``Or target i candidate
+        return some (← injectPart ``Or target i candidate)
+    return none
+  if let some placed ← place h then
+    return placed
+  if let some flipped ← flipEquality h then
+    if let some placed ← place flipped then
+      return placed
+  for candidate in ← doubleNegations h do
+    if let some placed ← place candidate then
+      return placed
   throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
     \nis not among{indentExpr target}"
 
@@ -1171,16 +1237,29 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
     let targetParts ← conclusion.literals.mapM (Reconstruct.literal vars)
+    -- As in `placeLiteral`: a literal is looked for as it stands before the
+    -- other ways of stating it are built, which for a clause of a few hundred
+    -- literals is the whole cost of the step.
+    let place (candidate : Expr) : ReconstructM (Option Expr) := do
+      let says ← instantiateMVars (← inferType candidate)
+      if let some i := targetParts.findIdx? (· == says) then
+        return some (← injectGiven targetParts i candidate)
+      for (part, i) in targetParts.zipIdx do
+        if ← isDefEq part says then
+          return some (← injectGiven targetParts i candidate)
+      return none
     let body ← elimGiven sourceParts (fun _ h => do
       -- Every literal the step kept is one of the conclusion's; one it dropped
       -- has to be refutable on its own, as `t ≠ t` is.
       let stated ← instantiateMVars (← inferType h)
-      for candidate in #[h] ++ (← doubleNegations h) ++
-          ((← flipEquality h).toArray) do
-        let says ← instantiateMVars (← inferType candidate)
-        for (part, i) in targetParts.zipIdx do
-          if ← isDefEq part says then
-            return ← injectGiven targetParts i candidate
+      if let some placed ← place h then
+        return placed
+      for candidate in ← doubleNegations h do
+        if let some placed ← place candidate then
+          return placed
+      if let some flipped ← flipEquality h then
+        if let some placed ← place flipped then
+          return placed
       if let some inner := asNegation stated then
         if let some (_, lhs, rhs) := inner.eq? then
           if ← isDefEq lhs rhs then

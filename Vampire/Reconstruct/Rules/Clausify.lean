@@ -33,6 +33,26 @@ private def genParts (sorts : Array (UInt32 × String)) (vars : Vars)
     (c : GenClause) : ReconstructM (Array Expr) :=
   c.literals.mapM (genLit sorts vars)
 
+/--
+What a generalised clause says, taking each position the step before it left
+alone from the clause it was reached from.
+
+A position is a subformula, not a literal, and the clauses along a
+clausification differ in one position each; rebuilding the rest for every one
+of them costs more than the clausification does -- and leaves the two clauses
+saying the same thing in terms that have to be compared rather than recognised.
+-/
+private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
+    (c : GenClause) (parent : Array (Formula × Bool)) (parentParts : Array Expr) :
+    ReconstructM (Array Expr) :=
+  c.literals.mapM fun l => do
+    match parent.findIdx? (· == l) with
+    | some i =>
+      match parentParts[i]? with
+      | some part => pure part
+      | none => genLit sorts vars l
+    | none => genLit sorts vars l
+
 /-- The variables a quantifier binds, with their sorts. -/
 private def boundOf (sorts : Array (UInt32 × String)) (f : Formula) :
     Array (UInt32 × String) :=
@@ -117,6 +137,25 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
       go rest (vars.insert v witness) (← mkAppM ``Iff.mp #[choice, existence])
   go (boundOf sorts f).toList vars h
 
+/--
+The parts of a junction of `count` of them, taken apart rather than rebuilt.
+
+A formula's own parts are all built the moment any one of them is, so a clause
+that came from one conjunct would otherwise pay for the whole formula, and the
+formula is clausified into as many clauses as it has.
+-/
+private def partsOf (fn : Name) (whole : Expr) (count : Nat) :
+    ReconstructM (Array Expr) := do
+  if count == 0 then return #[]
+  let mut parts := #[]
+  let mut rest := whole
+  for _ in [0 : count - 1] do
+    unless rest.isAppOfArity fn 2 do
+      throwError "a junction of {count} parts is not one:{indentExpr whole}"
+    parts := parts.push rest.appFn!.appArg!
+    rest := rest.appArg!
+  return parts.push rest
+
 /-- Which of `parts` says what `e` does. -/
 private def indexOfPart (parts : Array Expr) (e : Expr) : ReconstructM Nat := do
   for (part, i) in parts.zipIdx do
@@ -140,13 +179,18 @@ By refutation: suppose it fails, and then the clause it was reached from cannot
 hold either -- every position it kept fails with this one, and the position
 that was replaced fails by the step that replaced it.
 -/
-private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr) :
-    ReconstructM Expr := do
-  let parts ← genParts r.sorts r.vars c
+private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
+    (parts : Array Expr) (parentParts : Array Expr) : ReconstructM Expr := do
   let target := junction ``Or ``False parts
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
       let refuted (e : Expr) : ReconstructM Expr := do
+        -- The clause usually says just what the step put in it, so that is
+        -- looked for first: a clause of a few hundred literals is refuted a
+        -- literal at a time, once for every step of the clausification.
+        if let some i := parts.findIdx? (· == e) then
+          return ← withLocalDeclD `p e fun p => do
+            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
         -- What a step put in a clause is recorded before the clausifier's own
         -- normalisation has unwrapped a negation into the sign it carries.
         for (part, i) in parts.zipIdx do
@@ -160,7 +204,7 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr) :
         match c.parent? with
         | none => root r parts refuted
         | some p => do
-          let stated ← genParts r.sorts r.vars p
+          let stated := parentParts
           let some position := c.position?
             | throwError "a clausification step without the position it replaced"
           let some parentProof := parent?
@@ -168,14 +212,13 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr) :
               was reached from"
           elimGiven stated (fun i h => do
               if i == position.toNat then
-                replaced r c p position.toNat h refuted
+                replaced r c p position.toNat parts parentParts h refuted
               else
                 -- A position the step kept is one of this clause's own.
                 return mkApp (← refuted (← instantiateMVars (← inferType h))) h)
             parentProof
       mkLambdaFVars #[n] body
-  mkAppM ``Iff.mp
-    #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
+  return ofNotNot target contradiction
 
 /--
 The clauses clausification begins at: the formula itself, and, for a subformula
@@ -204,17 +247,33 @@ The step that replaced one position: what was put there follows from what was
 there, so refuting all of it refutes what was there.
 -/
 private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
+    (childParts parentParts : Array Expr)
     (h : Expr) (refuted : Expr → ReconstructM Expr) : ReconstructM Expr := do
   let some (g, sign) := p.literals[position]?
     | throwError "a clausification step replaced a position that is not there"
-  let stated ← genLit r.sorts r.vars (g, sign)
+  -- Both clauses have said what they say already, so a position is read off
+  -- them rather than rebuilt: rebuilding gives a second term saying the same
+  -- thing, which then has to be compared rather than recognised.
+  let literalOf (all : Array (Formula × Bool)) (built : Array Expr)
+      (l : Formula × Bool) : ReconstructM Expr := do
+    match all.findIdx? (· == l) with
+    | some i =>
+      match built[i]? with
+      | some part => pure part
+      | none => genLit r.sorts r.vars l
+    | none => genLit r.sorts r.vars l
+  let stated ←
+    match parentParts[position]? with
+    | some part => pure part
+    | none => genLit r.sorts r.vars (g, sign)
   let replacement := c.replacement
   -- What the step put there, refuted.
-  let against ← replacement.mapM fun l => do refuted (← genLit r.sorts r.vars l)
+  let against ← replacement.mapM fun l => do
+    refuted (← literalOf c.literals childParts l)
   -- Naming, and the shuffling of a negation between a formula and its sign,
   -- leave what is said untouched.
   if h' : replacement.size = 1 then
-    if ← isDefEq (← genLit r.sorts r.vars replacement[0]) stated then
+    if ← isDefEq (← literalOf c.literals childParts replacement[0]) stated then
       return mkApp against[0]! h
   if replacement.isEmpty then
     -- A constant: either the clause said `False`, or it said `¬True`.
@@ -225,7 +284,24 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         return mkApp h (mkConst ``True.intro)
     throwError "a clausification step replaced{indentExpr stated}\nby nothing"
   let subs := g.subformulas
-  let parts ← subs.mapM (Reconstruct.formula r.sorts r.vars)
+  -- The parts of what was replaced are its own parts, taken apart rather than
+  -- built a second time.
+  let body := if sign then stated else (stated.not?).getD stated
+  let parts ←
+    match ← connectiveOf g with
+    | .and => partsOf ``And body subs.size
+    | .or => partsOf ``Or body subs.size
+    | .iff =>
+      if body.isAppOfArity ``Iff 2 then pure #[body.appFn!.appArg!, body.appArg!]
+      else subs.mapM (Reconstruct.formula r.sorts r.vars)
+    | .xor =>
+      match body.not? with
+      | some inner =>
+        if inner.isAppOfArity ``Iff 2 then
+          pure #[inner.appFn!.appArg!, inner.appArg!]
+        else subs.mapM (Reconstruct.formula r.sorts r.vars)
+      | none => subs.mapM (Reconstruct.formula r.sorts r.vars)
+    | _ => subs.mapM (Reconstruct.formula r.sorts r.vars)
   -- Which of the step's replacements is a given subformula of `g`. The
   -- replacements come in the order the clausifier built them, which is not the
   -- order of the subformulas, so they are told apart by which formula they are.
@@ -442,15 +518,21 @@ that supposition through what came before it would walk the whole of it again
 at every step of the chain.
 -/
 private partial def proveChain (r : Replay) (chain : Array GenClause) (i : Nat)
-    (parent? : Option Expr) (bound : Array Expr) : ReconstructM Expr := do
+    (parent? : Option Expr) (parentParts : Array Expr) (bound : Array Expr) :
+    ReconstructM Expr := do
   let some c := chain[i]?
     | throwError "a clausification without a clause"
-  let value ← prove r c parent?
+  -- Each clause of the chain says what it says once: it is the conclusion of
+  -- one step and the premise of the next.
+  let parts ←
+    match c.parent? with
+    | some p => genPartsFrom r.sorts r.vars c p.literals parentParts
+    | none => genParts r.sorts r.vars c
+  let value ← prove r c parent? parts parentParts
   if i + 1 == chain.size then
     return ← mkLetFVars bound value (usedLetOnly := false)
-  let stated := junction ``Or ``False (← genParts r.sorts r.vars c)
-  withLetDecl (Name.mkSimple s!"g{i}") stated value fun g =>
-    proveChain r chain (i + 1) (some g) (bound.push g)
+  withLetDecl (Name.mkSimple s!"g{i}") (junction ``Or ``False parts) value fun g =>
+    proveChain r chain (i + 1) (some g) parts (bound.push g)
 
 /-!
 The other clausifier, `CNF::clausify`, walks a formula in negation normal form
@@ -460,16 +542,19 @@ clause of its own. So a clause is one path through the conjunctions, and which
 conjunct each of them contributed comes recorded.
 -/
 
-/-- A proof of `⟦f⟧ → target`, along the recorded path through `f`. -/
+/--
+A proof of `stated → target`, along the recorded path through `f`.
+
+`stated` is what `f` says, which is given rather than built: every step of the
+descent has it to hand already, in the shape the formula the clausification
+began at was stated in.
+-/
 private partial def descend (sorts : Array (UInt32 × String))
     (choices : Array (Formula × UInt32)) (vars : Vars) (f : Formula)
-    (target : Expr) : ReconstructM Expr := do
+    (stated : Expr) (target : Expr) : ReconstructM Expr := do
   match ← connectiveOf f with
   | .«forall» =>
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
-    -- Read the quantifier before extending `vars`, so its own binders are the
-    -- ones `formula` introduces rather than anything instantiated below.
-    let hypothesis ← Reconstruct.formula sorts vars f
     -- Instantiate rather than bind: the clause has its own binders already.
     let mut vars := vars
     let mut args := #[]
@@ -483,27 +568,30 @@ private partial def descend (sorts : Array (UInt32 × String))
           someElement (← sortType sortName)
       vars := vars.insert v arg
       args := args.push arg
-    let rest ← descend sorts choices vars body target
-    withLocalDeclD `h hypothesis fun h => do
+    let rest ← descend sorts choices vars body
+      (← instantiateForall stated args) target
+    withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
   | .and =>
     -- The clause came from one conjunct, the recorded one.
-    let parts ← f.subformulas.mapM (Reconstruct.formula sorts vars)
+    let parts ← partsOf ``And stated f.subformulas.size
     let some (_, argument) := choices.find? fun (node, _) => node == f
-      | throwError "nothing says which conjunct of{indentExpr
-          (Reconstruct.junction ``And ``True parts)}\nthis clause came from"
+      | throwError "nothing says which conjunct of{indentExpr stated}\nthis \
+          clause came from"
     let some conjunct := f.subformulas[argument.toNat]?
       | throwError "a clause came from conjunct {argument}, which is not there"
-    let rest ← descend sorts choices vars conjunct target
-    let whole := Reconstruct.junction ``And ``True parts
-    withLocalDeclD `h whole fun h => do
+    let some part := parts[argument.toNat]?
+      | throwError "a clause came from conjunct {argument}, which is not there"
+    let rest ← descend sorts choices vars conjunct part target
+    withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (← projectGiven parts argument.toNat h))
   | .or =>
     -- Every disjunct is taken into the same clause, so each must lead to it.
-    let parts ← f.subformulas.mapM (Reconstruct.formula sorts vars)
-    let branches ← f.subformulas.mapM (descend sorts choices vars · target)
-    let whole := Reconstruct.junction ``Or ``False parts
-    withLocalDeclD `h whole fun h => do
+    let parts ← partsOf ``Or stated f.subformulas.size
+    let branches ← f.subformulas.zipIdx.mapM fun (g, i) => do
+      let some part := parts[i]? | throwError "a missing disjunct"
+      descend sorts choices vars g part target
+    withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h]
         (← elimGiven parts (fun i hi => do
           let some branch := branches[i]? | throwError "a missing disjunct"
@@ -513,13 +601,12 @@ private partial def descend (sorts : Array (UInt32 × String))
       mkLambdaFVars #[h] (← mkAppOptM ``False.elim #[some target, some h])
   | _ =>
     -- A literal, which the clause has to contain.
-    let literal ← Reconstruct.formula sorts vars f
-    withLocalDeclD `h literal fun h => do
+    withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (← placeLiteral target h)
 
 /-- `clausify`: one clause of a formula's conjunctive normal form. -/
 def clausify (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, _)] := step.premises
+  let #[(premiseProof, premiseStated)] := step.premises
     | throwError "clausify should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
     | throwError "clausify without a premise"
@@ -538,12 +625,12 @@ def clausify (step : Step) : ReconstructM Expr := do
       for (v, image) in clause.bindings do
         vars := vars.insert v (← term vars image)
       let proof ← proveChain { sorts, vars, premise := premiseProof }
-        (chainTo clause) 0 none #[]
+        (chainTo clause) 0 none #[] #[]
       let place := placeLiteral target
       mkLambdaFVars xs
         (← elimGiven (← genParts sorts vars clause) (fun _ h => place h) proof)
     | none =>
-      let implication ←
-        descend sorts step.unit.conjunctChoices vars premise target
+      let implication ← descend sorts step.unit.conjunctChoices vars premise
+        (← instantiateMVars premiseStated) target
       mkLambdaFVars xs (mkApp implication premiseProof)
 end Vampire.Reconstruct.Clausify
