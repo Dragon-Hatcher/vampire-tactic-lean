@@ -288,12 +288,15 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
     let vars ← coverVars parent kept
-    let place := placeLiteral target
-    let body ← elimParts (← instantiateForall (← conclusionOf parent)
+    let body ← carryWith (← instantiateForall (← conclusionOf parent)
         (← parent.varSorts.mapM fun (v, sortName) => do
           match vars[v]? with
           | some x => pure x
-          | none => someElement (← sortType sortName))) 0
+          | none => someElement (← sortType sortName))) target
+      (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
+        match vars[v]? with
+        | some x => pure x
+        | none => someElement (← sortType sortName)))
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
@@ -314,11 +317,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
         let atom ←
           if ← literalPolarity l then pure congruence
           else mkCongrArg (mkConst ``Not) congruence
-        place (← mkAppM ``Eq.mp #[atom, h]))
-      (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
-        match vars[v]? with
-        | some x => pure x
-        | none => someElement (← sortType sortName)))
+        mkAppM ``Eq.mp #[atom, h])
     mkLambdaFVars xs body
 
 /--

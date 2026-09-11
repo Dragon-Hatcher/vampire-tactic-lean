@@ -628,7 +628,8 @@ def clausify (step : Step) : ReconstructM Expr := do
         (chainTo clause) 0 none #[] #[]
       let place := placeLiteral target
       mkLambdaFVars xs
-        (← elimGiven (← genParts sorts vars clause) (fun _ h => place h) proof)
+        (← carryAll (junction ``Or ``False (← genParts sorts vars clause))
+          target proof)
     | none =>
       let implication ← descend sorts step.unit.conjunctChoices vars premise
         (← instantiateMVars premiseStated) target

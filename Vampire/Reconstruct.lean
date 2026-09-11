@@ -37,6 +37,7 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
   let premises ← u.parents.mapM fun parent => do
     return (parent, ← step parent, ← conclusionOf parent)
   let t0 ← IO.monoMsNow
+  profRule.set rule.name
   -- A clause splitting worked on holds only under the names it was split
   -- against, so those are assumed here and discharged into the conclusion. A
   -- premise assumes some of the same names, and is applied to them; one

@@ -62,7 +62,7 @@ def component (step : Step) : ReconstructM Expr := do
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
     let place := placeLiteral target
-    mkLambdaFVars xs (← elimParts stated 0 (fun _ h => place h) instance_)
+    mkLambdaFVars xs (← carryAll stated target instance_)
 
 /--
 `avatar_contradiction_clause`: the names a refuted clause held under cannot all
@@ -181,7 +181,7 @@ private def satClause (proved : Std.HashMap UInt32 Expr)
       | throwError "the propositional shadow of step {origin.number}, which is \
         not among the refutation's premises"
     let place := placeLiteral target
-    return ← elimParts stated 0 (fun _ h => place h) proof
+    return ← carryAll stated target proof
   -- Suppose the clause fails; then each of its literals is false, which is to
   -- say that each of their negations holds.
   let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do

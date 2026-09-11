@@ -6,6 +6,9 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
+initialize profRule : IO.Ref String ← IO.mkRef "?"
+initialize profInject : IO.Ref (Std.HashMap String Nat) ← IO.mkRef {}
+
 /-- What reconstruction needs to read a proof back into Lean. -/
 structure Context where
   /-- What the TPTP names in the proof stand for. -/
@@ -502,6 +505,9 @@ partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if !chain.isAppOfArity fn 2 then
     return h
+  do
+    let r ← profRule.get
+    profInject.modify fun m => m.insert r ((m.getD r 0) + 1)
   let left := chain.appFn!.appArg!
   let right := chain.appArg!
   let n := (junctionParts fn left).size
@@ -560,6 +566,9 @@ parts have to be given rather than found.
 partial def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if parts.size <= 1 then return h
+  do
+    let r ← profRule.get
+    profInject.modify fun m => m.insert r ((m.getD r 0) + 1)
   let rest := parts.extract 1 parts.size
   let tail := junction ``Or ``False rest
   if i == 0 then
@@ -1157,6 +1166,85 @@ def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
   throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
     \nis not among{indentExpr target}"
 
+/--
+`source → target`, following the shape of both at once.
+
+Putting a clause's literals back into the conclusion one at a time writes out
+a constructor for each literal before the one being placed, so carrying a
+clause of `k` literals costs `k²` -- at every step that clause takes part in.
+Walking the two disjunctions together costs `k`.
+
+`inStep i a t` says what the `i`th literal of `source` gives for `t`, the
+literal of `target` the walk has reached. A literal that gives something else
+is left to `whole`, which has to account for it against all of `target` that
+is left; where it cannot, the two do not run in step and `none` says so.
+-/
+partial def carrying (source target : Expr) (i : Nat)
+    (inStep : Nat → Expr → Expr → ReconstructM (Option Expr))
+    (whole : Nat → Expr → Expr → ReconstructM (Option Expr)) :
+    ReconstructM (Option Expr) := do
+  let stepping (from_ t : Expr) : ReconstructM (Option Expr) :=
+    withLocalDeclD `a from_ fun a => do
+      match ← inStep i a t with
+      | some p => return some (← mkLambdaFVars #[a] p)
+      | none => return none
+  let accounting (from_ : Expr) : ReconstructM (Option Expr) :=
+    withLocalDeclD `a from_ fun a => do
+      match ← whole i a target with
+      | some p => return some (← mkLambdaFVars #[a] p)
+      | none => return none
+  unless source.isAppOfArity ``Or 2 do
+    if target.isAppOfArity ``Or 2 then
+      let t := target.appFn!.appArg!
+      let restT := target.appArg!
+      if let some f ← stepping source t then
+        return some (.lam `x source
+          (mkApp3 (mkConst ``Or.inl) t restT (mkApp f (.bvar 0))) .default)
+    return ← accounting source
+  let s := source.appFn!.appArg!
+  let restS := source.appArg!
+  if target.isAppOfArity ``Or 2 then
+    let t := target.appFn!.appArg!
+    let restT := target.appArg!
+    if let some f ← stepping s t then
+      let some rest ← carrying restS restT (i + 1) inStep whole | return none
+      return some (mkApp6 (mkConst ``Or.imp) s t restS restT f rest)
+  -- Not the literal the target has reached: this one has to be accounted for
+  -- against what is left of it, which stays where it is.
+  let some f ← accounting s | return none
+  let some rest ← carrying restS target (i + 1) inStep whole | return none
+  return some (.lam `x source
+    (mkApp6 (mkConst ``Or.elim) s restS target (.bvar 0) f rest) .default)
+
+/--
+`target` from a proof of `source`, whose literals the step carried into it.
+
+The two say the same thing unless the step changed a literal, so the common
+case is that nothing has to be done at all.
+-/
+def carryWith (source target proof : Expr)
+    (literal : Nat → Expr → ReconstructM Expr) : ReconstructM Expr := do
+  let inStep : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i a t => do
+    let given ←
+      try literal i a
+      catch _ => return none
+    if ← isDefEq (← instantiateMVars (← inferType given)) t then
+      return some given
+    return none
+  let whole : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i a rest => do
+    try return some (← placeLiteral rest (← literal i a))
+    catch _ => return none
+  match ← carrying source target 0 inStep whole with
+  | some f => return mkApp f proof
+  | none =>
+    elimParts source 0 (fun i h => do placeLiteral target (← literal i h)) proof
+
+/-- `carryWith`, for a step that left every literal as it was. -/
+def carryAll (source target proof : Expr) : ReconstructM Expr := do
+  if ← isDefEq source target then
+    return proof
+  carryWith source target proof fun _ h => pure h
+
 /-- A step of vampire's proof, with everything needed to justify it. -/
 structure Step where
   unit : Vampire.Unit
@@ -1240,34 +1328,55 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- As in `placeLiteral`: a literal is looked for as it stands before the
     -- other ways of stating it are built, which for a clause of a few hundred
     -- literals is the whole cost of the step.
-    let place (candidate : Expr) : ReconstructM (Option Expr) := do
+    let placeIn (chain candidate : Expr) : ReconstructM (Option Expr) := do
+      let parts := if chain == target then targetParts else junctionParts ``Or chain
       let says ← instantiateMVars (← inferType candidate)
-      if let some i := targetParts.findIdx? (· == says) then
-        return some (← injectGiven targetParts i candidate)
-      for (part, i) in targetParts.zipIdx do
+      if let some i := parts.findIdx? (· == says) then
+        return some (← injectGiven parts i candidate)
+      for (part, i) in parts.zipIdx do
         if ← isDefEq part says then
-          return some (← injectGiven targetParts i candidate)
+          return some (← injectGiven parts i candidate)
       return none
-    let body ← elimGiven sourceParts (fun _ h => do
-      -- Every literal the step kept is one of the conclusion's; one it dropped
-      -- has to be refutable on its own, as `t ≠ t` is.
-      let stated ← instantiateMVars (← inferType h)
-      if let some placed ← place h then
-        return placed
-      for candidate in ← doubleNegations h do
-        if let some placed ← place candidate then
-          return placed
-      if let some flipped ← flipEquality h then
-        if let some placed ← place flipped then
-          return placed
+    -- Every literal the step kept is one of the conclusion's; one it dropped
+    -- has to be refutable on its own, as `t ≠ t` is.
+    let says (candidate : Expr) : ReconstructM Expr := do
+      instantiateMVars (← inferType candidate)
+    -- A literal the clause repeats is left where it is until its last
+    -- occurrence, so that the earlier ones still have it to be placed at.
+    let recurs := sourceParts.mapIdx fun i part =>
+      (sourceParts.extract (i + 1) sourceParts.size).contains part
+    let inStep : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i h t => do
+      if recurs[i]! then return none
+      for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
+        if ← isDefEq (← says candidate) t then
+          return some candidate
+      return none
+    let accountedFor (h rest : Expr) : ReconstructM (Option Expr) := do
+      let stated ← says h
+      for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
+        if let some placed ← placeIn rest candidate then
+          return some placed
       if let some inner := asNegation stated then
         if let some (_, lhs, rhs) := inner.eq? then
           if ← isDefEq lhs rhs then
-            return ← mkAppOptM ``absurd
-              #[some inner, some target, some (← mkEqRefl lhs), some h]
+            return some (← mkAppOptM ``absurd
+              #[some inner, some rest, some (← mkEqRefl lhs), some h])
       if stated.isConstOf ``False then
-        return ← mkAppOptM ``False.elim #[some target, some h]
-      throwError "the literal{indentExpr stated}\nis neither among        {indentExpr target}\nnor refutable on its own")
+        return some (← mkAppOptM ``False.elim #[some rest, some h])
+      return none
+    -- The literals usually run in step, and then the clause is carried across
+    -- following the shape of both rather than put back a literal at a time.
+    let whole : Nat → Expr → Expr → ReconstructM (Option Expr) :=
+      fun _ h rest => accountedFor h rest
+    if let some carried ←
+        carrying (junction ``Or ``False sourceParts) target 0 inStep whole then
+      return ← mkLambdaFVars xs (mkApp carried (mkAppN premiseProof args))
+    let body ← elimGiven sourceParts (fun _ h => do
+      match ← accountedFor h target with
+      | some placed => return placed
+      | none =>
+        throwError "the literal{indentExpr (← says h)}\nis neither among\
+          {indentExpr target}\nnor refutable on its own")
       (mkAppN premiseProof args)
     mkLambdaFVars xs body
 

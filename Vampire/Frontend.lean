@@ -153,6 +153,8 @@ def evalVampire : Tactic := fun stx => withMainContext do
       let (_, (seen, hist)) := (tally (← instantiateMVars outcome.proof)).run ({}, {})
       let top := hist.toArray.qsort (fun a b => a.2 > b.2)
       let h ← IO.FS.Handle.mk path .append
+      let byRule := (← Reconstruct.profInject.get).toArray.qsort (fun a b => a.2 > b.2)
+      h.putStrLn s!"injections {byRule.take 8}"
       h.putStrLn s!"nodes {seen.size}"
       for (n, c) in top.take 14 do
         h.putStrLn s!"node {n} {c}"

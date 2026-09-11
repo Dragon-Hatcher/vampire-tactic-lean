@@ -122,7 +122,7 @@ def factoring (step : Step) : ReconstructM Expr := do
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     let place := placeLiteral target
-    mkLambdaFVars xs (← elimParts premiseType 0 (fun _ h => place h) premiseAt)
+    mkLambdaFVars xs (← carryAll premiseType target premiseAt)
 
 /--
 `equality_resolution_with_deletion`: the premise at the binding one of its
