@@ -216,6 +216,24 @@ private def definitions (step : Step) :
   return out
 
 /--
+What a symbol applies to its arguments, for a congruence over them.
+
+For a symbol the goal gave a meaning to that is the symbol itself; for one TPTP
+interprets, it is whatever Lean writes the operation with, which is read off an
+application of it -- `$sum` of two terms is `HAdd.hAdd` at their type, and the
+type and the instance belong to the head rather than to the arguments.
+-/
+private def headOf (name : String) (arity : Nat) (args : Array Expr) :
+    ReconstructM Expr := do
+  match ← interpreted name args with
+  | some applied =>
+    let applied ← instantiateMVars applied
+    let whole := applied.getAppArgs
+    if whole.size < arity then return applied
+    return mkAppN applied.getAppFn (whole.extract 0 (whole.size - arity))
+  | none => symbolExpr name
+
+/--
 `t` at the unfolded definitions, with a proof that it equals what unfolding
 makes of it.
 
@@ -232,7 +250,7 @@ private partial def unfold
     return (e, ← mkEqRefl e)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
-  let head ← symbolExpr symbol.name
+  let head ← headOf symbol.name t.args.size (← t.args.mapM (term vars))
   let mut args := #[]
   let mut congruence ← mkEqRefl head
   for arg in t.args do
@@ -309,7 +327,8 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
           else
             let some symbol := l.symbol?
               | throwError "literal has unknown predicate {l.predicate}"
-            mkEqRefl (← symbolExpr symbol.name)
+            mkEqRefl (← headOf symbol.name l.args.size
+              (← l.args.mapM (term vars)))
         for arg in l.args do
           let (unfolded, proof) ← unfold defs vars arg
           args := args.push unfolded

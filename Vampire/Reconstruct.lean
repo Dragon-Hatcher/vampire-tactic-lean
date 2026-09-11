@@ -181,7 +181,9 @@ Replays a refutation as a Lean proof of `False`.
 Fails if the proof mentions a name vampire introduced itself, since nothing in
 the goal corresponds to it.
 -/
-def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
+def run (proof : Proof) (symbols : Symbols)
+    (contradiction : Array Expr → Option Expr → MetaM Expr) :
+    MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
     bindIntroduced
@@ -196,7 +198,8 @@ def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, flipped := proof.polarityFlipBoundary }).run {}
+    (go.run { symbols, proof, givens, contradiction
+              flipped := proof.polarityFlipBoundary }).run {}
   return some outcome
 
 end Vampire.Reconstruct

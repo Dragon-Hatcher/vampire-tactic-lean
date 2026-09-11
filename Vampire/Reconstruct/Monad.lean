@@ -36,6 +36,18 @@ structure Context where
   the time the proof is put together, and nothing of it can be used here.
   -/
   givens : Array Expr := #[]
+  /--
+  What proves `False` from facts that cannot all hold of any numbers.
+
+  Vampire's arithmetic rules record nothing of why they are sound -- for it,
+  soundness is the calculus rather than a derivation -- so those are the one
+  kind of step whose conclusion replay has to prove for itself, which for
+  arithmetic is what a decision procedure is for. It is handed in rather than
+  called directly: `omega` and `linarith` are the procedures, and `linarith`
+  lives in a library whose keywords this one cannot afford to have.
+  -/
+  contradiction : Array Expr → Option Expr → MetaM Expr := fun _ _ =>
+    throwError "no way to prove an arithmetic step was given to replay"
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/
@@ -69,8 +81,14 @@ def throwIntroduced (kind name : String) : ReconstructM α :=
 
 /-- The Lean type a TPTP sort stands for. -/
 def sortType (name : String) : ReconstructM Expr := do
-  let some τ := (← read).symbols.sorts[name]? | throwIntroduced "the sort" name
-  return τ
+  if let some τ := (← read).symbols.sorts[name]? then
+    return τ
+  -- TPTP's own arithmetic types, which a proof can reach for even where the
+  -- goal did not: reasoning about the rationals states integer bounds.
+  if name == "$int" then return mkConst ``Int
+  if name == "$rat" then return mkConst `Rat
+  if name == "$real" then return mkConst `Real
+  throwIntroduced "the sort" name
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

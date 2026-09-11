@@ -179,16 +179,16 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- literals is the whole cost of the step.
     let placeIn (chain candidate : Expr) : ReconstructM (Option Expr) := do
       let parts := if chain == target then targetParts else junctionParts ``Or chain
-      let says ← instantiateMVars (← inferType candidate)
-      if let some i := parts.findIdx? (· == says) then
+      let stated ← instantiateMVars (← inferType candidate)
+      if let some i := parts.findIdx? (· == stated) then
         return some (← injectGiven parts i candidate)
       for (part, i) in parts.zipIdx do
-        if ← isDefEq part says then
+        if ← isDefEq part stated then
           return some (← injectGiven parts i candidate)
       return none
     -- Every literal the step kept is one of the conclusion's; one it dropped
     -- has to be refutable on its own, as `t ≠ t` is.
-    let says (candidate : Expr) : ReconstructM Expr := do
+    let stating (candidate : Expr) : ReconstructM Expr := do
       instantiateMVars (← inferType candidate)
     -- A literal the clause repeats is left where it is until its last
     -- occurrence, so that the earlier ones still have it to be placed at.
@@ -197,11 +197,11 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     let inStep : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i h t => do
       if recurs[i]! then return none
       for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
-        if ← isDefEq (← says candidate) t then
+        if ← isDefEq (← stating candidate) t then
           return some candidate
       return none
     let accountedFor (h rest : Expr) : ReconstructM (Option Expr) := do
-      let stated ← says h
+      let stated ← stating h
       for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
         if let some placed ← placeIn rest candidate then
           return some placed
@@ -224,7 +224,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       match ← accountedFor h target with
       | some placed => return placed
       | none =>
-        throwError "the literal{indentExpr (← says h)}\nis neither among\
+        throwError "the literal{indentExpr (← stating h)}\nis neither among\
           {indentExpr target}\nnor refutable on its own")
       (mkAppN premiseProof args)
     mkLambdaFVars xs body

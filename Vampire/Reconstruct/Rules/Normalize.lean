@@ -280,7 +280,15 @@ private def normalizeStep (expand : Bool) (step : Step) : ReconstructM Expr := d
     | throwError "normalisation should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
   let (_, _, proof) ← normalize expand sorts {} premise true
-  mkAppM ``Iff.mp #[proof, premiseProof]
+  let normalised ← mkAppM ``Iff.mp #[proof, premiseProof]
+  -- Normalising here settles what the formula becomes, but not the order
+  -- vampire keeps a junction's arguments in, which is its own; so what the
+  -- step claims is what this is stated as.
+  let conclusion ← step.conclusion
+  let stated ← inferType normalised
+  if ← isDefEq stated conclusion then
+    return normalised
+  mkAppM ``Iff.mp #[← equiv stated conclusion, normalised]
 
 /-- `ennf`: negations pushed inward, with equivalences left standing. -/
 def ennf (step : Step) : ReconstructM Expr := normalizeStep false step

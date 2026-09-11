@@ -1,5 +1,6 @@
 import Lean
 import Auto.Tactic
+import Vampire.Arith
 import Vampire.Preprocess
 import Vampire.Reconstruct
 import Vampire.Worker
@@ -107,8 +108,10 @@ def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Expr)
   | `(vampireHintElem| *) => do
     return (← Preprocess.propHypotheses (← getMainGoal)).filter Expr.isFVar
   | `(vampireHintElem| $h:term) => do
-    let lemma ← Auto.Prep.elabLemma h (.leaf s!"❰{h}❱")
-    return #[lemma.proof]
+    -- Named `fact` rather than `lemma`, which `linarith`'s library makes a
+    -- keyword and this file now reaches for.
+    let fact ← Auto.Prep.elabLemma h (.leaf s!"❰{h}❱")
+    return #[fact.proof]
   | _ => throwUnsupportedSyntax
 
 def elabHints : TSyntax ``vampireHints → TacticM (Array Expr)
@@ -154,7 +157,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let outcome ←
       try
         query.preprocessed.goal.withContext
-          (Reconstruct.run query.proof query.symbols)
+          (Reconstruct.run query.proof query.symbols Arith.contradiction)
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
