@@ -108,53 +108,36 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
 private def satClauseStates (c : SatClause) : ReconstructM Expr := do
   return junction ``Or ``False (← c.literals.mapM namedFormula)
 
-mutual
-
 /--
-A proof of what a propositional clause says.
+The clauses a propositional refutation rests on, each after the ones it was
+derived from.
 
-A clause is either a first-order clause's propositional shadow, and then it says
-what that clause says, up to the order of the names; or the solver derived it,
-and then it follows from the clauses it was derived from by unit propagation:
-supposing its own literals false, each clause in turn has all but one of its
-literals false, so that one holds -- and the last has none left.
+The solver reuses a clause in as many derivations as it likes, so the clauses
+form a graph rather than a tree; walking it once and proving each clause once
+is what keeps the refutation the size the solver made it.
 -/
-private partial def satClause (origins : Std.HashMap UInt32 (Expr × Expr))
-    (known : Std.HashMap String Expr) (c : SatClause) : ReconstructM Expr := do
-  let target ← satClauseStates c
-  if let some origin := c.origin? then
-    let some (proof, stated) := origins[origin.number]?
-      | throwError "the propositional shadow of step {origin.number}, which is \
-        not among the refutation's premises"
-    let place := placeLiteral target
-    return ← elimParts stated 0 (fun _ h => place h) proof
-  -- Suppose the clause fails; then each of its literals is false, which is to
-  -- say that each of their negations holds.
-  let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
-    let mut known := known
-    for (name, i) in c.literals.zipIdx do
-      let (_, says) ← flipName name
-      let body ← namedFormula name
-      let refuted ← withLocalDeclD `d body fun d => do
-        mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
-      known := known.insert (flippedName name)
-        (← mkAppM ``Iff.mpr #[says, refuted])
-    mkLambdaFVars #[n] (← propagate origins known c.premises 0)
-  mkAppM ``Iff.mp #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
+private partial def satOrder (c : SatClause) :
+    StateM (Std.HashSet UInt32 × Array SatClause) PUnit := do
+  if (← get).1.contains c.index then return
+  modify fun (seen, order) => (seen.insert c.index, order)
+  for premise in c.premises do
+    satOrder premise
+  modify fun (seen, order) => (seen, order.push c)
 
 /--
 `False`, by unit propagation through the clauses a derived clause was derived
 from: each of them has all but one of its literals already false, and the last
 of them has none left.
 -/
-private partial def propagate (origins : Std.HashMap UInt32 (Expr × Expr))
+private partial def propagate (proved : Std.HashMap UInt32 Expr)
     (known : Std.HashMap String Expr) (premises : Array SatClause) (i : Nat) :
     ReconstructM Expr := do
   let some premise := premises[i]?
     | throwError "the clauses a propositional step was derived from left \
       nothing to contradict"
   let names := premise.literals
-  let proof ← satClause origins known premise
+  let some proof := proved[premise.index]?
+    | throwError "a propositional clause used before it was proved"
   let stated ← satClauseStates premise
   elimParts stated 0 (fun j h => do
     let some name := names[j]? | throwError "missing literal"
@@ -177,9 +160,63 @@ private partial def propagate (origins : Std.HashMap UInt32 (Expr × Expr))
       mkAppOptM ``absurd
         #[some (← inferType positive), some (mkConst ``False), some positive,
           some negation]
-    | none => propagate origins (known.insert name h) premises (i + 1)) proof
+    | none => propagate proved (known.insert name h) premises (i + 1)) proof
 
-end
+/--
+A proof of what a propositional clause says, from proofs of the clauses it was
+derived from.
+
+A clause is either a first-order clause's propositional shadow, and then it says
+what that clause says, up to the order of the names; or the solver derived it,
+and then it follows from the clauses it was derived from by unit propagation:
+supposing its own literals false, each clause in turn has all but one of its
+literals false, so that one holds -- and the last has none left.
+-/
+private def satClause (proved : Std.HashMap UInt32 Expr)
+    (origins : Std.HashMap UInt32 (Expr × Expr)) (c : SatClause) :
+    ReconstructM Expr := do
+  let target ← satClauseStates c
+  if let some origin := c.origin? then
+    let some (proof, stated) := origins[origin.number]?
+      | throwError "the propositional shadow of step {origin.number}, which is \
+        not among the refutation's premises"
+    let place := placeLiteral target
+    return ← elimParts stated 0 (fun _ h => place h) proof
+  -- Suppose the clause fails; then each of its literals is false, which is to
+  -- say that each of their negations holds.
+  let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
+    let mut known : Std.HashMap String Expr := {}
+    for (name, i) in c.literals.zipIdx do
+      let (_, says) ← flipName name
+      let body ← namedFormula name
+      let refuted ← withLocalDeclD `d body fun d => do
+        mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
+      known := known.insert (flippedName name)
+        (← mkAppM ``Iff.mpr #[says, refuted])
+    mkLambdaFVars #[n] (← propagate proved known c.premises 0)
+  mkAppM ``Iff.mp #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
+
+/--
+The refutation, with every clause it rests on bound to what proves it.
+
+Bound rather than written out: a clause a dozen derivations use would otherwise
+be proved into each of them, and every binder of the proof being built would
+have to be put through the whole of what it already holds.
+-/
+private partial def satBound (origins : Std.HashMap UInt32 (Expr × Expr))
+    (order : Array SatClause) (i : Nat) (proved : Std.HashMap UInt32 Expr)
+    (bound : Array Expr) : ReconstructM Expr := do
+  if h : i < order.size then
+    let c := order[i]
+    let value ← satClause proved origins c
+    withLetDecl (Name.mkSimple s!"c{i}") (← satClauseStates c) value fun s =>
+      satBound origins order (i + 1) (proved.insert c.index s) (bound.push s)
+  else
+    let some root := order.back?
+      | throwError "a propositional refutation without a clause"
+    let some proof := proved[root.index]?
+      | throwError "the refuting clause was not proved"
+    mkLetFVars bound proof (usedLetOnly := false)
 
 /--
 `avatar_split_clause`: a clause holds only if one of its components does.
@@ -348,6 +385,7 @@ def refutation (step : Step) : ReconstructM Expr := do
   let mut origins : Std.HashMap UInt32 (Expr × Expr) := {}
   for (parent, premise) in step.unit.parents.zip step.premises do
     origins := origins.insert parent.number premise
-  satClause origins {} root
+  let (_, order) := ((satOrder root).run ({}, #[])).2
+  satBound origins order 0 {} #[]
 
 end Vampire.Reconstruct.Avatar

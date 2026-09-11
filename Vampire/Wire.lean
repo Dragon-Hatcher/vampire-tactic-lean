@@ -792,6 +792,9 @@ def premises (c : SatClause) : Array SatClause :=
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.satPremises + (first.toNat + i.val) * 4)⟩
 
+/-- The clause's place among the proof's propositional clauses. -/
+def index (c : SatClause) : UInt32 := c.idx
+
 /-- The step this clause is the propositional shadow of, if it is one. -/
 def origin? (c : SatClause) : Option Unit :=
   let idx := c.field 4
