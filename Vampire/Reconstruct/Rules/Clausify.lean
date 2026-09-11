@@ -322,7 +322,18 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
       | throwError "a quantifier replaced by nothing"
     if skolemises (← connectiveOf g) sign then
       let (_, body) ← peelBlock r.sorts sign r.vars g h
-      return mkApp negation body
+      -- What the block leaves and what the step recorded in its place can meet
+      -- with a double negation between them, for the same reason a literal can:
+      -- the record is taken before the clausifier's own normalisation.
+      let some refuted := asNegation (← instantiateMVars (← inferType negation))
+        | throwError "a quantifier's replacement is not refuted"
+      let stated ← instantiateMVars (← inferType body)
+      if ← isDefEq refuted stated then
+        return mkApp negation body
+      let some says ← sameUpToDoubleNegation stated refuted
+        | throwError "a skolemised block leaves{indentExpr stated}\nwhich is \
+          not what the step put in its place"
+      return mkApp negation (← mkAppM ``Iff.mp #[says, body])
     else
       -- The quantifier is instantiated, at the variables the clause keeps.
       let args ← bound.mapM fun (v, sortName) => do
@@ -331,10 +342,24 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         | none => someElement (← sortType sortName)
       if isExists then
         -- Nothing satisfies it, and yet the step says something does of the
-        -- variables the clause keeps.
+        -- variables the clause keeps. What each witness is a witness to is
+        -- read off the quantifier: the body may not mention the variable, or
+        -- may mention the same term elsewhere, and then nothing about the
+        -- proof says which occurrences the quantifier stood over.
+        let some body := g.subformulas[0]? | throwError "a quantifier without a body"
+        let mut instantiated := r.vars
+        for ((v, _), arg) in bound.zip args do
+          instantiated := instantiated.insert v arg
         let mut witnessed ← held false negation
-        for arg in args.reverse do
-          witnessed ← mkAppM ``Exists.intro #[arg, witnessed]
+        for j in (List.range bound.size).reverse do
+          let some (v, sortName) := bound[j]? | throwError "a quantifier's variable"
+          let τ ← sortType sortName
+          let rest := (bound.extract (j + 1) bound.size).toList
+          let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
+            mkLambdaFVars #[x]
+              (← blockProp true r.sorts rest (instantiated.insert v x) body)
+          witnessed ← mkAppOptM ``Exists.intro
+            #[some τ, some predicate, some args[j]!, some witnessed]
         return mkApp h witnessed
       else
         return mkApp negation (mkAppN h args)
@@ -359,6 +384,15 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
     | throwError "a clausification step replaced a position that is not there"
   unless skolemises (← connectiveOf replaced) sign do return
   let bound := boundOf sorts replaced
+  -- The same variable is skolemised once for each occurrence of the quantifier
+  -- that calls for it, and to a symbol of its own each time, so which symbol
+  -- this occurrence introduced is read off the clause it left it bound in
+  -- rather than off the step, which records them all under the one variable.
+  let occurrence := Std.HashMap.ofList c.bindings.toList
+  let skolems := bound.foldl (init := skolems) fun acc (v, _) =>
+    match occurrence[v]? with
+    | some image => acc.insert v image
+    | none => acc
   -- A variable the quantifier's body mentions is either an argument of the
   -- symbols being introduced, and stands for itself, or one the clause has
   -- already bound, and stands for what it was bound to -- which is why the
@@ -462,33 +496,23 @@ def clausify (step : Step) : ReconstructM Expr := do
   let some premise := parent.formula?
     | throwError "clausify should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
-  let derived : ReconstructM Expr :=
-    forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-        fun xs target => do
-      let mut vars : Vars := {}
-      for (x, (v, _)) in xs.zip step.unit.varSorts do
-        vars := vars.insert v x
-      match step.unit.genClause? with
-      | some clause =>
-        -- A variable the clause quantifies stands for what it was bound to;
-        -- one the clause kept stands for the local the conclusion binds for it.
-        for (v, image) in clause.bindings do
-          vars := vars.insert v (← term vars image)
-        let proof ← prove { sorts, vars, premise := premiseProof } clause
-        let place := placeLiteral target
-        mkLambdaFVars xs
-          (← elimGiven (← genParts sorts vars clause) (fun _ h => place h) proof)
-      | none =>
-        let implication ←
-          descend sorts step.unit.conjunctChoices vars premise target
-        mkLambdaFVars xs (mkApp implication premiseProof)
-  -- A step of a shape that has no replay yet is admitted rather than aborting
-  -- the whole proof: what it concludes is still stated.
-  match ← (try pure (some (← derived)) catch e => do
-             trace[vampire] "admitting clausify for step {step.unit.number}: \
-               {e.toMessageData}"
-             pure none) with
-  | some proof => pure proof
-  | none => unimplemented step
-
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut vars : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      vars := vars.insert v x
+    match step.unit.genClause? with
+    | some clause =>
+      -- A variable the clause quantifies stands for what it was bound to;
+      -- one the clause kept stands for the local the conclusion binds for it.
+      for (v, image) in clause.bindings do
+        vars := vars.insert v (← term vars image)
+      let proof ← prove { sorts, vars, premise := premiseProof } clause
+      let place := placeLiteral target
+      mkLambdaFVars xs
+        (← elimGiven (← genParts sorts vars clause) (fun _ h => place h) proof)
+    | none =>
+      let implication ←
+        descend sorts step.unit.conjunctChoices vars premise target
+      mkLambdaFVars xs (mkApp implication premiseProof)
 end Vampire.Reconstruct.Clausify
