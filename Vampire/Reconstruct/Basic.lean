@@ -1375,11 +1375,59 @@ def carryPast (source target proof : Expr) (special : Nat → Bool)
       if special i then onSpecial i h target
       else placeLiteral target (← onKept i h)) proof
 
-/-- `carryWith`, for a step that left every literal as it was. -/
-def carryAll (source target proof : Expr) : ReconstructM Expr := do
+/--
+`s → t` for one literal a step carried, or `none` if it did not carry it
+there.
+
+Built with the bound variable in place: a clause of a few hundred literals is
+carried by every step it takes part in, and introducing a local to stand for
+each literal of each of them costs more than everything else the carry does.
+-/
+private def carriedAlike (s t : Expr) : ReconstructM (Option Expr) := do
+  if s == t then
+    return some (.lam `a s (.bvar 0) .default)
+  -- An equality is stated either way round.
+  let atom (e : Expr) : Option (Expr × Expr × Expr × Bool) :=
+    let (inner, negated) := match e.not? with
+      | some inner => (inner, true)
+      | none => (e, false)
+    if inner.isAppOfArity ``Eq 3 then
+      match inner.getAppArgs with
+      | #[τ, lhs, rhs] => some (τ, lhs, rhs, negated)
+      | _ => none
+    else none
+  if let (some (τ, lhs, rhs, negated), some (τ', lhs', rhs', negated')) :=
+      (atom s, atom t) then
+    if τ == τ' && lhs == rhs' && rhs == lhs' && negated == negated' then
+      let symm := if negated then ``Ne.symm else ``Eq.symm
+      return some (.lam `a s
+        (mkApp4 (mkConst symm [← getLevel τ]) τ lhs rhs (.bvar 0)) .default)
+  if ← isDefEq s t then
+    return some (.lam `a s (.bvar 0) .default)
+  return none
+
+/--
+`carryWith`, for a step that left every literal as it was.
+
+The literals of the two clauses are walked together, which is all the carry is
+when nothing was done to any of them.
+-/
+partial def carryAll (source target proof : Expr) : ReconstructM Expr := do
   if ← isDefEq source target then
     return proof
-  carryWith source target proof fun _ h => pure h
+  let rec alike (source target : Expr) : ReconstructM (Option Expr) := do
+    if source.isAppOfArity ``Or 2 && target.isAppOfArity ``Or 2 then
+      let s := source.appFn!.appArg!
+      let restS := source.appArg!
+      let t := target.appFn!.appArg!
+      let restT := target.appArg!
+      let some here ← carriedAlike s t | return none
+      let some rest ← alike restS restT | return none
+      return some (mkApp6 (mkConst ``Or.imp) s t restS restT here rest)
+    carriedAlike source target
+  match ← alike source target with
+  | some f => return mkApp f proof
+  | none => carryWith source target proof fun _ h => pure h
 
 /-- A step of vampire's proof, with everything needed to justify it. -/
 structure Step where

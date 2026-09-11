@@ -97,7 +97,10 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
       let some proof := (← get).proofs[refutation.number]?
         | throwError "the refutation was not replayed"
       return ← mkLetFVars bound proof (usedLetOnly := false)
+  let started ← IO.monoMsNow
   let (value, stated) ← replay u
+  trace[vampire] "step {(u.rule?.map (·.name)).getD "?"} took \
+{(← IO.monoMsNow) - started}ms"
   withLetDecl (Name.mkSimple s!"s{u.number}") stated value fun s => do
     modify fun st => { st with proofs := st.proofs.insert u.number s }
     replayAll steps (i + 1) (bound.push s) refutation
