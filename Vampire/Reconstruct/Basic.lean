@@ -184,21 +184,6 @@ def connectiveOf (f : Formula) : ReconstructM Connective :=
   | .ok c => return c
   | .error e => throwError "{e}"
 
-/--
-A clause with each of its literals the one term of its shape.
-
-Instantiating a clause at a substitution builds its literals afresh, so they
-are no longer the terms the conclusion was built from, and every literal
-carried across the inference is then compared by its shape rather than by its
-address.
--/
-partial def sharedClause (e : Expr) : ReconstructM Expr := do
-  if e.isAppOfArity ``Or 2 then
-    let left ← sharedClause e.appFn!.appArg!
-    let right ← sharedClause e.appArg!
-    return ← shared (mkApp2 (mkConst ``Or) left right)
-  shared e
-
 /-- The local standing for each of a step's variables. -/
 abbrev Vars := Std.HashMap UInt32 Expr
 
@@ -253,9 +238,24 @@ def junction (fn unit : Name) (args : Array Expr) : Expr :=
   else
     args.pop.foldr (fun a acc => mkApp2 (mkConst fn) a acc) args.back!
 
+/--
+A clause with each of its literals the one term of its shape.
+
+Instantiating a clause at a substitution builds its literals afresh, so they
+are no longer the terms the conclusion was built from, and every literal
+carried across the inference is then compared by its shape rather than by its
+address.
+-/
+partial def sharedClause (e : Expr) : ReconstructM Expr := do
+  if e.isAppOfArity ``Or 2 then
+    let left ← sharedClause e.appFn!.appArg!
+    let right ← sharedClause e.appArg!
+    return ← shared (mkApp2 (mkConst ``Or) left right)
+  shared e
+
 /-- Rebuilds a clause as the disjunction of its literals. -/
 def clause (vars : Vars) (c : Clause) : ReconstructM Expr := do
-  return junction ``Or ``False (← c.literals.mapM (literal vars))
+  sharedClause (junction ``Or ``False (← c.literals.mapM (literal vars)))
 
 /-- Introduces a local for each variable in `sorts`, in order. -/
 def withVars (sorts : Array (UInt32 × String)) (vars : Vars)
