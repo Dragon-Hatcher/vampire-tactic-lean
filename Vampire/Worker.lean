@@ -34,8 +34,15 @@ structure Config where
   any use, so naming it here is the same run without the ones before it.
   -/
   strategy : String := ""
-  /-- Options forced on every strategy of the schedule, whatever it says. -/
-  forced : Array (String × String) := #[]
+  /--
+  Options forced on every strategy of the schedule, whatever it says.
+
+  Shuffling is off. It permutes a formula's junctions, its quantifiers'
+  variables and the sides of its equalities before the search, to give a
+  strategy a different run of luck; the proof then speaks of a formula that is
+  the goal's under a permutation nothing records, which is no use to replay.
+  -/
+  forced : Array (String × String) := #[("si", "off")]
   /-- Further vampire options, as they would be given on its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/

@@ -40,10 +40,7 @@ end Tm
 namespace Fm
 
 private def renderVars (vars : Array (String × String)) : String :=
-  -- Reversed, as a junction's arguments are: vampire keeps a quantifier's
-  -- variables in the reverse of the order it read them, and emitting them so
-  -- is what makes its reading of a formula agree with the goal's.
-  String.intercalate ", " (vars.toList.reverse.map fun (v, ty) => s!"{v}: {ty}")
+  String.intercalate ", " (vars.toList.map fun (v, ty) => s!"{v}: {ty}")
 
 protected partial def render : Fm → String
   | .top => "$true"
@@ -256,14 +253,13 @@ def castInto (sort : String) : String :=
 mutual
 
 /--
-The arguments of a nested conjunction or disjunction, flattened, in the order
-vampire will keep them.
+The arguments of a nested conjunction or disjunction, flattened.
 
-Vampire's parser flattens a junction however it was nested and keeps the first
-argument where it is while reversing the rest, so that is what is emitted --
-the first as it stands and the rest reversed -- and its reading of the formula
-then agrees with the goal's. Were that to stop holding, an `input` step would
-say so: it would no longer prove what the goal states.
+In the order they are written: vampire's parser flattens a junction however it
+was nested and keeps its arguments in the order it read them, so its reading of
+the formula agrees with the goal's. (Its *printing* reverses them, which is
+only a thing to know when reading a proof by eye.) Were that to stop holding,
+an `input` step would say so: it would no longer prove what the goal states.
 -/
 partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
   -- Both sides, not just the right: vampire's parser flattens a junction
@@ -274,10 +270,7 @@ partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
       parts e.appFn!.appArg! ++ parts e.appArg!
     else
       #[e]
-  let flattened ← (parts e).mapM translateFormula
-  return match flattened[0]? with
-    | some first => #[first] ++ (flattened.extract 1 flattened.size).reverse
-    | none => flattened
+  (parts e).mapM translateFormula
 
 /--
 A Lean arithmetic operation as TPTP writes it, or `none` if the expression is
