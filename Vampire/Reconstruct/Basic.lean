@@ -1093,11 +1093,15 @@ can come back the other way round.
 -/
 def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
   let stated ← instantiateMVars (← inferType h)
+  -- Written out rather than found: this is asked of every literal of every
+  -- clause an inference carries, and what it is asked of says it already.
   if stated.isAppOfArity ``Eq 3 then
-    return some (← mkAppM ``Eq.symm #[h])
+    let #[τ, lhs, rhs] := stated.getAppArgs | return none
+    return some (mkApp4 (mkConst ``Eq.symm [← getLevel τ]) τ lhs rhs h)
   if let some inner := stated.not? then
     if inner.isAppOfArity ``Eq 3 then
-      return some (← mkAppM ``Ne.symm #[h])
+      let #[τ, lhs, rhs] := inner.getAppArgs | return none
+      return some (mkApp4 (mkConst ``Ne.symm [← getLevel τ]) τ lhs rhs h)
   return none
 
 /--
@@ -1319,6 +1323,12 @@ def carryWith (source target proof : Expr)
       catch _ => return none
     if ← isDefEq (← instantiateMVars (← inferType given)) t then
       return some given
+    -- An equality is stated either way round, and an inference reorients the
+    -- one it rewrote; a literal that is the conclusion's the other way round
+    -- still runs in step with it.
+    let some flipped ← flipEquality given | return none
+    if ← isDefEq (← instantiateMVars (← inferType flipped)) t then
+      return some flipped
     return none
   let whole : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i a rest => do
     try return some (← placeLiteral rest (← literal i a))

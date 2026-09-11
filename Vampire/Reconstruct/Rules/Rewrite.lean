@@ -157,6 +157,37 @@ private def clauseAbstracting (rw : Rewritten) (vars : Vars) (x : Option Expr) :
       literalAt vars rw.bindings l none
   sharedClause (junction ``Or ``False parts)
 
+/-- The literals of a clause of `count` of them, taken apart rather than built. -/
+private def clausePartsOf (whole : Expr) (count : Nat) :
+    ReconstructM (Array Expr) := do
+  if count == 0 then return #[]
+  let mut parts := #[]
+  let mut rest := whole
+  for _ in [0 : count - 1] do
+    unless rest.isAppOfArity ``Or 2 do
+      throwError "a clause of {count} literals is not one:{indentExpr whole}"
+    parts := parts.push rest.appFn!.appArg!
+    rest := rest.appArg!
+  return parts.push rest
+
+/--
+What the premise says once the rewrite is made: its own literals, with the one
+the inference rewrote in replaced.
+
+Taken from what the premise says rather than built again: a clause of a few
+hundred literals is rewritten along its whole length, and stating all of them
+for each rewrite costs more than the rewriting does.
+-/
+private def clauseRewritten (rw : Rewritten) (vars : Vars) (stated to : Expr) :
+    ReconstructM Expr := do
+  if rw.wholePremise then
+    return ← clauseAbstracting rw vars (some to)
+  let parts ← clausePartsOf stated rw.literals.size
+  let some l := rw.literals[rw.literal]?
+    | throwError "the premise has no literal {rw.literal}"
+  let rewritten ← literalAt vars rw.bindings l (some (rw.target, to))
+  sharedClause (junction ``Or ``False (parts.set! rw.literal rewritten))
+
 /-- `forward_demodulation`: the premise with one literal rewritten. -/
 def demodulation (step : Step) : ReconstructM Expr := do
   let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
@@ -180,12 +211,12 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let «from» := rw.target.toExpr
     let τ ← inferType «from»
     let motive ← withLocalDeclD `x τ fun x => do
-      mkLambdaFVars #[x] (← clauseAbstracting rw vars (some x))
+      mkLambdaFVars #[x] (← clauseRewritten rw vars mainType x)
     let rewritten ← mkAppOptM ``Eq.subst
       #[some τ, some motive, some «from», some to, some heq, some mainAt]
     -- What the premise says once rewritten, which is what the conclusion says
     -- up to the order its literals come in.
-    let says ← sharedClause ((mkApp motive to).headBeta)
+    let says ← clauseRewritten rw vars mainType to
     mkLambdaFVars xs (← carryAll says target rewritten)
 
 /--
