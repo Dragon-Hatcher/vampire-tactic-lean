@@ -33,26 +33,6 @@ private def genParts (sorts : Array (UInt32 × String)) (vars : Vars)
     (c : GenClause) : ReconstructM (Array Expr) :=
   c.literals.mapM (genLit sorts vars)
 
-/--
-What a generalised clause says, taking each position the step before it left
-alone from the clause it was reached from.
-
-A position is a subformula, not a literal, and the clauses along a
-clausification differ in one position each; rebuilding the rest for every one
-of them costs more than the clausification does -- and leaves the two clauses
-saying the same thing in terms that have to be compared rather than recognised.
--/
-private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
-    (c : GenClause) (parent : Array (Formula × Bool)) (parentParts : Array Expr) :
-    ReconstructM (Array Expr) :=
-  c.literals.mapM fun l => do
-    match parent.findIdx? (· == l) with
-    | some i =>
-      match parentParts[i]? with
-      | some part => pure part
-      | none => genLit sorts vars l
-    | none => genLit sorts vars l
-
 /-- The variables a quantifier binds, with their sorts. -/
 private def boundOf (sorts : Array (UInt32 × String)) (f : Formula) :
     Array (UInt32 × String) :=
@@ -155,6 +135,55 @@ private def partsOf (fn : Name) (whole : Expr) (count : Nat) :
     parts := parts.push rest.appFn!.appArg!
     rest := rest.appArg!
   return parts.push rest
+
+/--
+The parts of a signed subformula, taken apart rather than built again.
+
+What a step put in a clause is a part of what it replaced, so the clause it
+reached says nothing the clause it came from had not said already.
+-/
+private def subformulaParts (sorts : Array (UInt32 × String)) (vars : Vars)
+    (g : Formula) (sign : Bool) (stated : Expr) : ReconstructM (Array Expr) := do
+  let body := if sign then stated else (stated.not?).getD stated
+  let subs := g.subformulas
+  let rebuilt : ReconstructM (Array Expr) :=
+    subs.mapM (Reconstruct.formula sorts vars)
+  match ← connectiveOf g with
+  | .and => partsOf ``And body subs.size
+  | .or => partsOf ``Or body subs.size
+  | .iff =>
+    if body.isAppOfArity ``Iff 2 then pure #[body.appFn!.appArg!, body.appArg!]
+    else rebuilt
+  | .xor =>
+    match body.not? with
+    | some inner =>
+      if inner.isAppOfArity ``Iff 2 then
+        pure #[inner.appFn!.appArg!, inner.appArg!]
+      else rebuilt
+    | none => rebuilt
+  | .not => if let some inner := body.not? then pure #[inner] else rebuilt
+  | _ => rebuilt
+
+private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
+    (c : GenClause) (parent : Array (Formula × Bool)) (parentParts : Array Expr) :
+    ReconstructM (Array Expr) := do
+  -- What the step replaced, and the parts of it, which are what it put there.
+  let replaced ← do
+    let some position := c.position? | pure none
+    let some (g, sign) := parent[position.toNat]? | pure none
+    let some part := parentParts[position.toNat]? | pure none
+    match ← connectiveOf g with
+    | .«forall» | .«exists» | .name | .literal => pure none
+    | _ => pure (some (g.subformulas, ← subformulaParts sorts vars g sign part))
+  c.literals.mapM fun l => do
+    if let some i := parent.findIdx? (· == l) then
+      if let some part := parentParts[i]? then
+        return part
+    if let some (subs, parts) := replaced then
+      if let some j := subs.findIdx? (· == l.1) then
+        if let some part := parts[j]? then
+          return if l.2 then part else mkApp (mkConst ``Not) part
+    genLit sorts vars l
 
 /-- Which of `parts` says what `e` does. -/
 private def indexOfPart (parts : Array Expr) (e : Expr) : ReconstructM Nat := do
@@ -286,22 +315,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
   let subs := g.subformulas
   -- The parts of what was replaced are its own parts, taken apart rather than
   -- built a second time.
-  let body := if sign then stated else (stated.not?).getD stated
-  let parts ←
-    match ← connectiveOf g with
-    | .and => partsOf ``And body subs.size
-    | .or => partsOf ``Or body subs.size
-    | .iff =>
-      if body.isAppOfArity ``Iff 2 then pure #[body.appFn!.appArg!, body.appArg!]
-      else subs.mapM (Reconstruct.formula r.sorts r.vars)
-    | .xor =>
-      match body.not? with
-      | some inner =>
-        if inner.isAppOfArity ``Iff 2 then
-          pure #[inner.appFn!.appArg!, inner.appArg!]
-        else subs.mapM (Reconstruct.formula r.sorts r.vars)
-      | none => subs.mapM (Reconstruct.formula r.sorts r.vars)
-    | _ => subs.mapM (Reconstruct.formula r.sorts r.vars)
+  let parts ← subformulaParts r.sorts r.vars g sign stated
   -- Which of the step's replacements is a given subformula of `g`. The
   -- replacements come in the order the clausifier built them, which is not the
   -- order of the subformulas, so they are told apart by which formula they are.
