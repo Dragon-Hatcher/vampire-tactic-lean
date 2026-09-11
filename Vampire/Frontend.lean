@@ -37,9 +37,11 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : Syste
   let preprocessed ← if cfg.mono then Preprocess.mono copy hs else Preprocess.intros copy hs
   let (problem, symbols) ← preprocessed.goal.withContext (problemOf preprocessed.hypotheses)
   trace[vampire] "problem:\n{problem}"
+  let before ← IO.monoMsNow
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
+    trace[vampire] "vampire searched for {(← IO.monoMsNow) - before}ms"
     trace[vampire] "proof:\n{proof.proofText}"
     trace[vampire] "vampire said:\n{diagnostics}"
     return { preprocessed, copy, problem, symbols, proof, diagnostics }
@@ -114,6 +116,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     -- Replay the refutation. Anything vampire introduced itself -- a skolem
     -- function, an AVATAR predicate, a subformula it named while clausifying --
     -- has no counterpart in the goal, so the step cannot even be stated.
+    let before ← IO.monoMsNow
     let outcome ←
       try
         query.preprocessed.goal.withContext
@@ -121,6 +124,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
+    trace[vampire] "replay took {(← IO.monoMsNow) - before}ms"
     let some outcome := outcome
       | throwError "vampire reported a refutation but produced no proof"
     unless outcome.unimplemented.isEmpty do
