@@ -1230,6 +1230,38 @@ def carryWith (source target proof : Expr)
   | none =>
     elimParts source 0 (fun i h => do placeLiteral target (← literal i h)) proof
 
+/--
+`target` from a proof of `source`, where the step acted on some of its
+literals and carried the rest.
+
+`onSpecial i h rest` accounts for one it acted on against all of `target` that
+is left; `onKept i h` says what one it carried gives.
+-/
+def carryPast (source target proof : Expr) (special : Nat → Bool)
+    (onSpecial : Nat → Expr → Expr → ReconstructM Expr)
+    (onKept : Nat → Expr → ReconstructM Expr := fun _ h => pure h) :
+    ReconstructM Expr := do
+  let inStep : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i a t => do
+    if special i then return none
+    let given ←
+      try onKept i a
+      catch _ => return none
+    if ← isDefEq (← instantiateMVars (← inferType given)) t then
+      return some given
+    return none
+  let whole : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i a rest => do
+    try
+      if special i then
+        return some (← onSpecial i a rest)
+      return some (← placeLiteral rest (← onKept i a))
+    catch _ => return none
+  match ← carrying source target 0 inStep whole with
+  | some f => return mkApp f proof
+  | none =>
+    elimParts source 0 (fun i h => do
+      if special i then onSpecial i h target
+      else placeLiteral target (← onKept i h)) proof
+
 /-- `carryWith`, for a step that left every literal as it was. -/
 def carryAll (source target proof : Expr) : ReconstructM Expr := do
   if ← isDefEq source target then

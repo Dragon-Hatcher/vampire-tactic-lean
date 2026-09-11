@@ -153,12 +153,11 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let (_, to, heq) ← orientedEquation sideUse vars sideAt sideType
-    let place := placeLiteral target
-    let body ← elimParts mainType 0 (fun i h => do
+    let body ← carryWith mainType target mainAt fun i h => do
       if i == rw.literal || rw.wholePremise then
-        place (← rewriteWith rw vars heq to i h)
+        rewriteWith rw vars heq to i h
       else
-        place h) mainAt
+        pure h
     mkLambdaFVars xs body
 
 /--
@@ -183,19 +182,16 @@ def superposition (step : Step) : ReconstructM Expr := do
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let place := placeLiteral target
     -- The equation is a literal of its own premise, so the case where it holds
     -- is the one that rewrites; its other literals are literals of the
     -- conclusion, as are the ones the rewritten premise keeps.
-    let body ← elimParts mainType 0 (fun i h => do
-      if i == rw.literal || rw.wholePremise then
-        elimParts sideType 0 (fun j hSide => do
-          unless j == equationLiteral.toNat do
-            return ← place hSide
-          let (_, to, heq) ← orientedEquation sideUse vars hSide (← inferType hSide)
-          place (← rewriteWith rw vars heq to i h)) sideAt
-      else
-        place h) mainAt
+    let body ← carryPast mainType target mainAt
+      (fun i => i == rw.literal || rw.wholePremise)
+      (fun i h rest =>
+        carryPast sideType rest sideAt (· == equationLiteral.toNat)
+          (fun _ hSide inner => do
+            let (_, to, heq) ← orientedEquation sideUse vars hSide (← inferType hSide)
+            placeLiteral inner (← rewriteWith rw vars heq to i h)))
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Rewrite

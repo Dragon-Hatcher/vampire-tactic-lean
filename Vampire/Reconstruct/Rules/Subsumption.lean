@@ -52,31 +52,30 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     let vars ← coverVars mainParent kept
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let place := placeLiteral target
-    let body ← elimParts mainType 0 (fun i h => do
-      unless i == resolved.toNat do
-        return ← place h
-      elimParts sideType 0 (fun _ hSide => do
-        let removed ← instantiateMVars (← inferType h)
-        -- The one literal of the side premise the substitution makes
-        -- complementary to the removed one closes the case; the rest are
-        -- literals of the conclusion.
-        for candidate in #[some hSide, ← flipEquality hSide] do
-          let some candidate := candidate | continue
-          let stated ← instantiateMVars (← inferType candidate)
-          let complementary ←
-            match asNegation stated, asNegation removed with
-            | some inner, _ => isDefEq inner removed
-            | _, some inner => isDefEq inner stated
-            | _, _ => pure false
-          unless complementary do
-            continue
-          let (positive, negative) :=
-            if (asNegation stated).isSome then (h, candidate) else (candidate, h)
-          return ← mkAppOptM ``absurd
-            #[some (← inferType positive), some target, some positive, some negative]
-        place hSide)
-        sideAt) mainAt
+    let body ← carryPast mainType target mainAt (· == resolved.toNat)
+      (fun _ h rest =>
+        carryPast sideType rest sideAt (fun _ => true)
+          (fun _ hSide inner => do
+            let removed ← instantiateMVars (← inferType h)
+            -- The one literal of the side premise the substitution makes
+            -- complementary to the removed one closes the case; the rest are
+            -- literals of the conclusion.
+            for candidate in #[some hSide, ← flipEquality hSide] do
+              let some candidate := candidate | continue
+              let stated ← instantiateMVars (← inferType candidate)
+              let complementary ←
+                match asNegation stated, asNegation removed with
+                | some inner, _ => isDefEq inner removed
+                | _, some inner => isDefEq inner stated
+                | _, _ => pure false
+              unless complementary do
+                continue
+              let (positive, negative) :=
+                if (asNegation stated).isSome then (h, candidate) else (candidate, h)
+              return ← mkAppOptM ``absurd
+                #[some (← inferType positive), some inner, some positive,
+                  some negative]
+            placeLiteral inner hSide))
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Subsumption

@@ -733,6 +733,9 @@ private def lits (p : Proof) (first count : UInt32) :
     let base := p.layout.genLits + (first.toNat + i.val) * 2 * 4
     (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4) != 0)
 
+/-- The clause's place among the proof's generalised clauses. -/
+def index (c : GenClause) : UInt32 := c.idx
+
 /-- The state this one was reached from, `none` for one clausification began at. -/
 def parent? (c : GenClause) : Option GenClause :=
   let idx := c.field 0

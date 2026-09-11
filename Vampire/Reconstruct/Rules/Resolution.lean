@@ -42,16 +42,10 @@ def resolution (step : Step) : ReconstructM Expr := do
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps
     -- it; where it keeps it is a lookup, not a search.
-    let place := placeLiteral target
     -- The resolved pair is complementary, which closes that case.
-    let body ← elimParts t₁ 0 (fun i h₁ => do
-      unless i == resolved₁.toNat do
-        return ← place h₁
-      elimParts t₂ 0 (fun j h₂ => do
-        unless j == resolved₂.toNat do
-          return ← place h₂
-        closeComplementary target h₁ h₂)
-        p₂) p₁
+    let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
+      (fun _ h₁ rest => carryPast t₂ rest p₂ (· == resolved₂.toNat)
+        (fun _ h₂ _ => closeComplementary rest h₁ h₂))
     mkLambdaFVars xs body
 
 /--
@@ -92,12 +86,12 @@ def unitResulting (step : Step) : ReconstructM Expr := do
         | throwError "nothing says which literal the unit in step \
           {parent.number} resolved away"
       units := units.insert literal.toNat (← instantiateAt parent use vars proof stated)
-    let place := placeLiteral target
-    let body ← elimParts mainType 0 (fun i h => do
-      match units[i]? with
-      | none => place h
-      | some (unitAt, unitType) =>
-        elimParts unitType 0 (fun _ hu => closeComplementary target h hu) unitAt) mainAt
+    let body ← carryPast mainType target mainAt (units.contains ·)
+      (fun i h rest => do
+        let some (unitAt, unitType) := units[i]?
+          | throwError "no unit resolved literal {i} away"
+        carryPast unitType rest unitAt (fun _ => true)
+          (fun _ hu _ => closeComplementary rest h hu))
     mkLambdaFVars xs body
 
 /--
@@ -151,18 +145,16 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     let vars ← coverVars parent kept
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    let place := placeLiteral target
-    let body ← elimParts premiseType 0 (fun i h => do
-      unless i == resolved.toNat do
-        return ← place h
-      -- The binding is what makes the two sides of the inequality one term.
-      let stated ← instantiateMVars (← inferType h)
-      let some inner := stated.not?
-        | throwError "the literal resolved on is not a negation:{indentExpr stated}"
-      let some (_, lhs, _) := inner.eq?
-        | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-      mkAppOptM ``absurd
-        #[some inner, some target, some (← mkEqRefl lhs), some h]) premiseAt
+    let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
+      (fun _ h rest => do
+        -- The binding is what makes the two sides of the inequality one term.
+        let stated ← instantiateMVars (← inferType h)
+        let some inner := stated.not?
+          | throwError "the literal resolved on is not a negation:{indentExpr stated}"
+        let some (_, lhs, _) := inner.eq?
+          | throwError "the literal resolved on is not an equality:{indentExpr inner}"
+        mkAppOptM ``absurd
+          #[some inner, some rest, some (← mkEqRefl lhs), some h])
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Resolution
