@@ -185,11 +185,11 @@ private def satClause (proved : Std.HashMap UInt32 Expr)
   -- say that each of their negations holds.
   let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
     let mut known : Std.HashMap String Expr := {}
-    let against := refuters (← c.literals.mapM namedFormula) n
     for (name, i) in c.literals.zipIdx do
       let (_, says) ← flipName name
-      let some refuted := against[i]?
-        | throwError "no refutation of the clause's literal {i}"
+      let body ← namedFormula name
+      let refuted ← withLocalDeclD `d body fun d => do
+        mkLambdaFVars #[d] (mkApp n (← injectPart ``Or target i d))
       known := known.insert (flippedName name)
         (← mkAppM ``Iff.mpr #[says, refuted])
     mkLambdaFVars #[n] (← propagate proved known c.premises 0)

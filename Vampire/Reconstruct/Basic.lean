@@ -42,6 +42,8 @@ structure State where
   named : Std.HashMap String Expr := {}
   /-- The proposition rebuilt for each step, by vampire's number for it. -/
   conclusions : Std.HashMap UInt32 Expr := {}
+  /-- The one term standing for each shape a rebuilt term has taken. -/
+  shared : Std.HashMap Expr Expr := {}
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
@@ -167,6 +169,36 @@ def connectiveOf (f : Formula) : ReconstructM Connective :=
   | .ok c => return c
   | .error e => throwError "{e}"
 
+/--
+The one term of this shape, so that two rebuildings of it are the same term.
+
+A proof states the same literals over and over -- every step of it says what
+its premises and its conclusion are -- and each rebuilding otherwise makes its
+own copy. Lean shares the subterms of what it is handed before checking it, and
+compares terms by their address before their shape, so what the copies cost is
+paid many times over.
+-/
+def shared (e : Expr) : ReconstructM Expr := do
+  if let some one := (← get).shared[e]? then
+    return one
+  modify fun s => { s with shared := s.shared.insert e e }
+  return e
+
+/--
+A clause with each of its literals the one term of its shape.
+
+Instantiating a clause at a substitution builds its literals afresh, so they
+are no longer the terms the conclusion was built from, and every literal
+carried across the inference is then compared by its shape rather than by its
+address.
+-/
+partial def sharedClause (e : Expr) : ReconstructM Expr := do
+  if e.isAppOfArity ``Or 2 then
+    let left ← sharedClause e.appFn!.appArg!
+    let right ← sharedClause e.appArg!
+    return ← shared (mkApp2 (mkConst ``Or) left right)
+  shared e
+
 /-- The local standing for each of a step's variables. -/
 abbrev Vars := Std.HashMap UInt32 Expr
 
@@ -178,7 +210,7 @@ partial def term (vars : Vars) (t : Term) : ReconstructM Expr := do
     return x
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
-  return mkAppN (← symbolExpr symbol.name) (← t.args.mapM (term vars))
+  shared (mkAppN (← symbolExpr symbol.name) (← t.args.mapM (term vars)))
 
 /--
 Whether a literal occurs positively, as the step it belongs to means it.
@@ -208,7 +240,7 @@ def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       pure (mkAppN (← symbolExpr symbol.name) args)
-  return if polarity then atom else mkApp (mkConst ``Not) atom
+  shared (if polarity then atom else mkApp (mkConst ``Not) atom)
 
 /--
 Folds an n-ary junction, right-associated as Lean writes them. Vampire's
@@ -803,8 +835,8 @@ A congruence over a junction needs each part's equivalence twice, once each way
 round, so writing them out doubles the term at every level of nesting. Bound
 once and applied, the term stays the size of the proof it stands for.
 -/
-def shared (types values : Array Expr) (k : Array Expr → ReconstructM Expr) :
-    ReconstructM Expr := do
+def standingFor (types values : Array Expr)
+    (k : Array Expr → ReconstructM Expr) : ReconstructM Expr := do
   let decls := types.mapIdx fun i τ => (Name.mkSimple s!"e{i}", fun _ => pure τ)
   let abstracted ← withLocalDeclsD decls fun locals => do
     mkLambdaFVars locals (← k locals)
@@ -926,7 +958,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
             bTail := mkApp2 (mkConst fn) bp[j]! bTail
           return proof
         let types := ap.zipIdx.map fun (x, i) => mkApp2 (mkConst ``Iff) x bp[i]!
-        return ← shared types values fun parts => do
+        return ← standingFor types values fun parts => do
           let mp (i : Nat) (h : Expr) : Expr :=
             mkApp4 (mkConst ``Iff.mp) ap[i]! bp[i]! parts[i]! h
           let mpr (i : Nat) (h : Expr) : Expr :=
@@ -1020,7 +1052,7 @@ def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
     match bound[v]? with
     | some image => args := args.push (← term vars image)
     | none => args := args.push (← someElement (← sortType sortName))
-  return (mkAppN proof args, ← instantiateForall stated args)
+  return (mkAppN proof args, ← sharedClause (← instantiateForall stated args))
 
 /--
 What each of a premise's variables stands for under the substitution recorded

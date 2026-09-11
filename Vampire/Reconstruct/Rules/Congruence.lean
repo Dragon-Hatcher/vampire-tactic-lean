@@ -62,14 +62,13 @@ def weakened (step : Step) : ReconstructM Expr := do
   let stated ← instantiateMVars stated
   if ← isDefEq stated conclusion then
     return proof
-  -- A truth value absorbed inside the formula leaves it saying the same thing,
-  -- which is a congruence; a predicate or a disjunct removed leaves it saying
-  -- less, which is a matter of looking up what is left. Which of the two it is
-  -- the step does not say, so the congruence is built first and the other only
-  -- if there is none.
+  -- What remains is what the premise said, less some of it, which `implies`
+  -- settles by looking each part up. A truth value absorbed inside the formula
+  -- is the other case: nothing is missing from the top, and the two are
+  -- related by a congruence that descends to where it was absorbed.
   try
-    return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
-  catch _ =>
     return mkApp (← implies stated conclusion) proof
+  catch _ =>
+    return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
 
 end Vampire.Reconstruct.Congruence

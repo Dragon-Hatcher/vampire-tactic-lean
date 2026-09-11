@@ -8,6 +8,28 @@ namespace Vampire
 
 open Lean Meta Elab Tactic
 
+/--
+The distinct subterms of a proof, and how many apply each constant.
+
+What Lean spends on a replayed proof after the tactic hands it back -- sharing
+its subterms, checking it -- goes by its size, so this is what to look at when
+that is what is slow.
+-/
+private partial def subterms (e : Expr) :
+    StateM (Std.HashSet Expr × Std.HashMap Name Nat) PUnit := do
+  if (← get).1.contains e then return
+  modify fun (seen, applied) => (seen.insert e, applied)
+  match e with
+  | .app .. =>
+    if let .const n _ := e.getAppFn then
+      modify fun (seen, applied) => (seen, applied.insert n (applied.getD n 0 + 1))
+    for a in e.getAppArgs do subterms a
+  | .lam _ d b _ | .forallE _ d b _ => subterms d; subterms b
+  | .letE _ t v b _ => subterms t; subterms v; subterms b
+  | .mdata _ b => subterms b
+  | .proj _ _ b => subterms b
+  | _ => return
+
 /-- Configuration for the `vampire` tactic. -/
 structure TacticConfig extends Config where
   /-- Whether to monomorphize the goal with `lean-auto` before translating it. -/
@@ -125,6 +147,13 @@ def evalVampire : Tactic := fun stx => withMainContext do
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
     trace[vampire] "replay took {(← IO.monoMsNow) - before}ms"
+    if ← isTracingEnabledFor `vampire then
+      if let some outcome := outcome then
+        let (_, (seen, applied)) :=
+          (subterms (← instantiateMVars outcome.proof)).run ({}, {})
+        let most := applied.toArray.qsort (fun a b => a.2 > b.2)
+        trace[vampire] "the proof has {seen.size} subterms, \
+          most of them {most.take 8}"
     let some outcome := outcome
       | throwError "vampire reported a refutation but produced no proof"
     unless outcome.unimplemented.isEmpty do
