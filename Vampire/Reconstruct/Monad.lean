@@ -27,6 +27,15 @@ structure Context where
   literals inverted, which is what makes the flipping itself say nothing.
   -/
   flipping : Bool := false
+  /--
+  What the goal holds, for when something of a sort is needed and no instance
+  says the sort is inhabited.
+
+  Taken once, before any step is replayed: what a rule brings into scope while
+  it works -- a clause's variables, a hypothesis it assumes -- is gone again by
+  the time the proof is put together, and nothing of it can be used here.
+  -/
+  givens : Array Expr := #[]
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/
@@ -44,7 +53,7 @@ structure State where
   conclusions : Std.HashMap UInt32 Expr := {}
   /-- The one term standing for each shape a rebuilt term has taken. -/
   shared : Std.HashMap Expr Expr := {}
-  /-- What says a sort is inhabited, for the sorts skolemisation has needed. -/
+  /-- What says a sort is inhabited, for the sorts that have needed it. -/
   nonempty : Std.HashMap Expr Expr := {}
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)

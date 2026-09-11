@@ -4,17 +4,36 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
+/--
+Something of the sort that the goal itself holds.
+
+A sort is a type the goal speaks of and vampire's domains are never empty, so
+where an instance does not say a sort is inhabited the goal may still say it: a
+variable or hypothesis of that type says as much, and a goal can well have the
+one without the other.
+-/
+private def given (τ : Expr) : ReconstructM (Option Expr) := do
+  for e in (← read).givens do
+    if ← isDefEq (← inferType e) τ then
+      return some e
+  return none
+
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   if let some inst := (← get).nonempty[τ]? then
     return inst
   let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
-  match ← trySynthInstance goal with
-  | .some inst =>
-    modify fun s => { s with nonempty := s.nonempty.insert τ inst }
-    return inst
-  | _ =>
-    throwError "cannot skolemise over{indentExpr τ}\nwithout `Nonempty` for it"
+  let inst ←
+    match ← trySynthInstance goal with
+    | .some inst => pure inst
+    | _ =>
+      match ← given τ with
+      | some element => mkAppOptM ``Nonempty.intro #[some τ, some element]
+      | none =>
+        throwError "nothing says{indentExpr τ}\nis inhabited: there is no \
+          `Nonempty` instance for it and the goal holds nothing of it"
+  modify fun s => { s with nonempty := s.nonempty.insert τ inst }
+  return inst
 
 /--
 `(∃ v, p v) ↔ p (Classical.epsilon p)`, with the chosen witness.
@@ -65,13 +84,7 @@ A universal can bind more than the clause kept, and instantiating it needs
 some element; vampire's domains are never empty.
 -/
 def someElement (τ : Expr) : ReconstructM Expr := do
-  let goal := mkApp (mkConst ``Nonempty [← getLevel τ]) τ
-  match ← trySynthInstance goal with
-  | .some inst =>
-    mkAppOptM ``Classical.choice #[some τ, some inst]
-  | _ =>
-    throwError "cannot instantiate a quantifier over{indentExpr τ}\n\
-      without `Nonempty` for it"
+  mkAppOptM ``Classical.choice #[some τ, some (← nonempty τ)]
 
 /--
 `⟦∃ vs, body⟧`: what a premise says a block of existentials means.

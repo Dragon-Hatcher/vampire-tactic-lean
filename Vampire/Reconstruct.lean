@@ -188,7 +188,15 @@ def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
     let (_, steps) := ((order refutation).run ({}, #[])).2
     let term ← replayAll steps 0 #[] refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray }
-  let (outcome, _) ← (go.run { symbols, proof, flipped := proof.polarityFlipBoundary }).run {}
+  -- Taken here, where the context is the goal's: from here on the context is
+  -- whatever a rule has introduced on top of it.
+  let context ← getLCtx
+  let givens := context.getFVarIds.filterMap fun id =>
+    match context.find? id with
+    | some decl => if decl.isImplementationDetail then none else some decl.toExpr
+    | none => none
+  let (outcome, _) ←
+    (go.run { symbols, proof, givens, flipped := proof.polarityFlipBoundary }).run {}
   return some outcome
 
 end Vampire.Reconstruct
