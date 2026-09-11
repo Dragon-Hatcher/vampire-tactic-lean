@@ -12,7 +12,9 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    34 words, see `write`
+ *   header    37 words, see `write`. The last word is the string offset of
+ *             the strategy the proof was found by, and `NONE` when there is no
+ *             proof: the same run can be had again from that alone
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
  *             flags: 1 = polarity flipping flipped this predicate, so that
@@ -168,7 +170,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 15;
+const uint32_t VERSION = 16;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -443,6 +445,8 @@ struct Encoder {
       genStates, genLits, choices, congruences, congruenceArgs;
   std::string strings;
   std::string proofText;
+  /** The strategy this proof was found by, as `strategy` reads it. */
+  uint32_t strategy = NONE;
 
   std::unordered_map<uint64_t, uint32_t> termSeen, sortSeen;
   std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen,
@@ -966,6 +970,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(
     InferenceRule::FUNCTIONAL_EXTENSIONALITY_AXIOM) + 1);
   putWord(buf, InferenceStore::instance()->polarityFlipBoundary());
+  putWord(buf, enc.strategy);
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1022,6 +1027,10 @@ void emitProof()
   uint32_t refutation = NONE;
   if (Unit* r = env.statistics->refutation) {
     refutation = enc.encodeUnit(r);
+    // The options this process is running under are the strategy that found
+    // the proof: in portfolio mode this is the winning slice itself, which is
+    // the only process that knows which one it was.
+    enc.strategy = enc.addString(env.options->generateEncodedOptions());
     std::ostringstream proof;
     InferenceStore::instance()->outputProof(proof, r);
     enc.proofText = proof.str();

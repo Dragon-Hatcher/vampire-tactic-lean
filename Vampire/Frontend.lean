@@ -64,6 +64,8 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : Syste
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
     trace[vampire] "vampire searched for {(← IO.monoMsNow) - before}ms"
+    if let some strategy := proof.strategy? then
+      trace[vampire] "found by {strategy}"
     trace[vampire] "proof:\n{proof.proofText}"
     trace[vampire] "vampire said:\n{diagnostics}"
     return { preprocessed, copy, problem, symbols, proof, diagnostics }
@@ -75,6 +77,15 @@ syntax vampireStar := "*"
 syntax vampireHintElem := vampireStar <|> term
 
 syntax vampireHints := (" [" withoutPosition(vampireHintElem,*,?) "]")?
+
+/--
+Whether a successful `vampire` says which strategy found the proof, offering to
+pin it. `vampire?` asks for that once.
+-/
+register_option vampire.suggestStrategy : Bool := {
+  defValue := false
+  descr := "after a proof, suggest pinning the strategy vampire found it with"
+}
 
 /--
 `vampire` translates the current goal into a TPTP refutation problem, hands it
@@ -92,8 +103,16 @@ dependent type theory to something first-order; `vampire +showQuery` prints the
 TPTP problem instead of running the prover. Other fields of
 `Vampire.TacticConfig` are available in the same way, e.g.
 `vampire (timeout := 60)`.
+
+Vampire works through a schedule of a few hundred strategies and only the one
+that succeeds is any use. `vampire?` reports the one that did and offers to
+write it into the call, which skips the others next time; `set_option
+vampire.suggestStrategy true` asks that of every call.
 -/
 syntax (name := vampireStx) "vampire" optConfig vampireHints : tactic
+
+@[inherit_doc vampireStx]
+syntax (name := vampireAskStx) "vampire?" optConfig vampireHints : tactic
 
 declare_config_elab elabConfig TacticConfig
 
@@ -111,12 +130,15 @@ def elabHints : TSyntax ``vampireHints → TacticM (Array Expr)
   | `(vampireHints| ) => return #[]
   | _ => throwUnsupportedSyntax
 
-@[tactic vampireStx]
+@[tactic vampireStx, tactic vampireAskStx]
 def evalVampire : Tactic := fun stx => withMainContext do
+  -- `vampire?` is `vampire` that says which strategy found the proof.
+  let asked := stx.isOfKind ``vampireAskStx
   match stx with
-  | `(tactic| vampire $cfg:optConfig $hs:vampireHints) => do
-    let cfg ← elabConfig cfg
-    let hs ← elabHints hs
+  | `(tactic| vampire $cfgStx:optConfig $hsStx:vampireHints)
+  | `(tactic| vampire? $cfgStx:optConfig $hsStx:vampireHints) => do
+    let cfg ← elabConfig cfgStx
+    let hs ← elabHints hsStx
     let mv ← getMainGoal
     let searchFrom := (← getFileName : System.FilePath).parent.getD "."
     let query ← run cfg mv hs searchFrom
@@ -132,9 +154,15 @@ def evalVampire : Tactic := fun stx => withMainContext do
         if query.proof.terminationReason == .unknown then
           m!"\n{query.diagnostics}"
         else m!""
+      -- A named strategy is the only one that runs, so it is the first thing
+      -- to doubt: the goal it was found for may not be this one any more.
+      let pinned :=
+        if cfg.strategy.isEmpty then m!""
+        else m!" This call names a strategy, and that is the only one vampire \
+          tried; removing it puts the whole schedule back."
       throwError "vampire did not refute the goal \
         ({repr query.proof.terminationReason}). Try passing more hypotheses, \
-        raising the timeout, or `+mono`.{hint}"
+        raising the timeout, or `+mono`.{pinned}{hint}"
     -- Replay the refutation. Anything vampire introduced itself -- a skolem
     -- function, an AVATAR predicate, a subformula it named while clausifying --
     -- has no counterpart in the goal, so the step cannot even be stated.
@@ -164,6 +192,21 @@ def evalVampire : Tactic := fun stx => withMainContext do
     query.preprocessed.goal.assign outcome.proof
     mv.assign (.mvar query.copy)
     replaceMainGoal []
+    -- The strategy is worth reporting only if the call does not already name
+    -- one, and only once it is known that its proof can be replayed -- which
+    -- a proof holding a `sorry` cannot be said to be.
+    if asked || (← getOptions).getBool `vampire.suggestStrategy then
+      if cfg.strategy.isEmpty && outcome.unimplemented.isEmpty then
+        if let some strategy := query.proof.strategy? then
+          let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
+            match s.reprint with
+            | some text => let text := text.trim; if text.isEmpty then none else some text
+            | none => none
+          let call := " ".intercalate
+            (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
+          Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
+            (header := "vampire found the proof with one strategy of its \
+              schedule; naming it skips the others next time:")
   | _ => throwUnsupportedSyntax
 
 end Tactic

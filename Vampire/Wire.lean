@@ -123,11 +123,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 15
+private def version : UInt32 := 16
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 36 * 4 then
+  if data.size < 37 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -169,7 +169,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numCongruenceArgs := word 31
   let stringsLen := word 32
   let proofTextLen := word 33
-  let functions := 36 * 4
+  let functions := 37 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -228,6 +228,17 @@ private def string (p : Proof) (off : UInt32) : String :=
     | fuel + 1 => if p.data[start + i]! == 0 then i else len (i + 1) fuel
   let n := len 0 (p.data.size - start)
   String.fromUTF8! (p.data.extract start (start + n))
+
+/--
+The strategy the proof was found by, as vampire's `strategy` option reads it,
+and `none` when there is no proof.
+
+In portfolio mode the strategy that wins is one of a schedule of them, and
+running it on its own is the same run without the ones it won against.
+-/
+def strategy? (p : Proof) : Option String :=
+  let off := readU32 p.data (36 * 4)
+  if off == none32 then none else some (p.string off)
 
 /-- Vampire's own rendering of the proof, empty when there is no refutation. -/
 def proofText (p : Proof) : String :=

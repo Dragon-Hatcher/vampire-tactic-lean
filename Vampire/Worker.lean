@@ -27,6 +27,13 @@ structure Config where
   mode : String := "portfolio"
   /-- The strategy schedule `portfolio` mode follows. -/
   schedule : String := "casc"
+  /--
+  One strategy to run instead of the schedule, as the tactic reports it.
+
+  The schedule is a few hundred strategies and only the one that succeeds is
+  any use, so naming it here is the same run without the ones before it.
+  -/
+  strategy : String := ""
   /-- Options forced on every strategy of the schedule, whatever it says. -/
   forced : Array (String × String) := #[]
   /-- Further vampire options, as they would be given on its command line. -/
@@ -40,6 +47,7 @@ namespace Config
 def toArgs (cfg : Config) : Array String :=
   #[s!"time_limit={cfg.timeout}", s!"mode={cfg.mode}", s!"schedule={cfg.schedule}",
     s!"heartbeats={cfg.heartbeats}", s!"wall_limit={cfg.wallLimit}"]
+    ++ (if cfg.strategy.isEmpty then #[] else #[s!"strategy={cfg.strategy}"])
     ++ (if cfg.forced.isEmpty then #[] else
       #[s!"forced_options={String.intercalate ":" (cfg.forced.map
         (fun (n, v) => s!"{n}={v}") |>.toList)}"])
