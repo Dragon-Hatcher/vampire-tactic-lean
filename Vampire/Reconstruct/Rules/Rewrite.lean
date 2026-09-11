@@ -59,11 +59,17 @@ private partial def Tree.replacing (target : Tree) (x : Expr) : Tree → Tree
   | t@(.app head args) =>
     if t == target then .leaf x else .app head (args.map (Tree.replacing target x))
 
-/-- A premise's literal at the recorded substitution, with `target` abstracted. -/
-private def literalAbstracting (vars : Vars) (bindings : Std.HashMap UInt32 Term)
-    (l : Literal) (target : Tree) (x : Expr) : ReconstructM Expr := do
-  let args ← l.args.mapM fun a =>
-    return (Tree.replacing target x (← treeOf vars bindings a)).toExpr
+/--
+A premise's literal at the recorded substitution, with `hole`'s term abstracted
+where it is given.
+-/
+private def literalAt (vars : Vars) (bindings : Std.HashMap UInt32 Term)
+    (l : Literal) (hole : Option (Tree × Expr)) : ReconstructM Expr := do
+  let args ← l.args.mapM fun a => do
+    let tree ← treeOf vars bindings a
+    match hole with
+    | some (target, x) => return (Tree.replacing target x tree).toExpr
+    | none => return tree.toExpr
   let atom ←
     if l.isEquality then
       let some sortName := l.sort?
@@ -75,7 +81,7 @@ private def literalAbstracting (vars : Vars) (bindings : Std.HashMap UInt32 Term
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       pure (mkAppN (← symbolExpr symbol.name) args)
-  return if ← literalPolarity l then atom else mkApp (mkConst ``Not) atom
+  shared (if ← literalPolarity l then atom else mkApp (mkConst ``Not) atom)
 
 /--
 The equation a premise use points at, as an oriented rewrite: the side the
@@ -131,8 +137,25 @@ private def rewriteWith (rw : Rewritten) (vars : Vars) (heq to : Expr) (i : Nat)
   let «from» := rw.target.toExpr
   let τ ← inferType «from»
   let motive ← withLocalDeclD `x τ fun x => do
-    mkLambdaFVars #[x] (← literalAbstracting vars rw.bindings l rw.target x)
+    mkLambdaFVars #[x] (← literalAt vars rw.bindings l (some (rw.target, x)))
   mkAppOptM ``Eq.subst #[some τ, some motive, some «from», some to, some heq, some h]
+
+/--
+The premise's clause, with the term the inference rewrote abstracted from the
+literal it rewrote it in.
+
+A rewrite happens inside a clause, so the clause is rewritten where it stands
+rather than taken apart and put back together: the conclusion of a step over a
+clause of a hundred literals is then one substitution rather than a hundred.
+-/
+private def clauseAbstracting (rw : Rewritten) (vars : Vars) (x : Option Expr) :
+    ReconstructM Expr := do
+  let parts ← rw.literals.zipIdx.mapM fun (l, i) => do
+    if (i == rw.literal || rw.wholePremise) && x.isSome then
+      literalAt vars rw.bindings l (x.map (rw.target, ·))
+    else
+      literalAt vars rw.bindings l none
+  sharedClause (junction ``Or ``False parts)
 
 /-- `forward_demodulation`: the premise with one literal rewritten. -/
 def demodulation (step : Step) : ReconstructM Expr := do
@@ -153,12 +176,17 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let (_, to, heq) ← orientedEquation sideUse vars sideAt sideType
-    let body ← carryWith mainType target mainAt fun i h => do
-      if i == rw.literal || rw.wholePremise then
-        rewriteWith rw vars heq to i h
-      else
-        pure h
-    mkLambdaFVars xs body
+    -- The rewrite happens inside the clause, so it is made where it stands.
+    let «from» := rw.target.toExpr
+    let τ ← inferType «from»
+    let motive ← withLocalDeclD `x τ fun x => do
+      mkLambdaFVars #[x] (← clauseAbstracting rw vars (some x))
+    let rewritten ← mkAppOptM ``Eq.subst
+      #[some τ, some motive, some «from», some to, some heq, some mainAt]
+    -- What the premise says once rewritten, which is what the conclusion says
+    -- up to the order its literals come in.
+    let says ← sharedClause ((mkApp motive to).headBeta)
+    mkLambdaFVars xs (← carryAll says target rewritten)
 
 /--
 `superposition`: the clause being rewritten and the equation rewriting it, both
