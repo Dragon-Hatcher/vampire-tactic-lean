@@ -17,19 +17,28 @@ structure Outcome where
   unimplemented : Array String
 
 /--
-Replays a step, after its premises. Steps are shared, so each is replayed once
-and remembered by vampire's number for it.
+The steps a refutation rests on, each after the ones it was inferred from.
+
+A step is shared by as many steps as were inferred from it, so the derivation
+is a graph rather than a tree; it is walked once.
 -/
-partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
-  if let some p := (← get).proofs[u.number]? then
-    return p
+private partial def order (u : Vampire.Unit) :
+    StateM (Std.HashSet UInt32 × Array Vampire.Unit) PUnit := do
+  if (← get).1.contains u.number then return
+  modify fun (seen, order) => (seen.insert u.number, order)
+  for parent in u.parents do
+    order parent
+  modify fun (seen, order) => (seen, order.push u)
+
+/-- Replays a step, from what proves the steps it was inferred from. -/
+private def replay (u : Vampire.Unit) : ReconstructM (Expr × Expr) := reading u do
   let some rule := u.rule?
     | throwError "step {u.number} has unknown inference rule {u.ruleIndex}"
-  -- Premises first: a name vampire introduced is defined by a step that
-  -- splitting and definition introduction both place among the premises of
-  -- every step using it, so replaying those binds it before it is needed here.
   let premises ← u.parents.mapM fun parent => do
-    return (parent, ← step parent, ← conclusionOf parent)
+    let some proof := (← get).proofs[parent.number]?
+      | throwError "step {u.number} was reached before step {parent.number}, \
+        which it was inferred from"
+    return (parent, proof, ← conclusionOf parent)
   -- A clause splitting worked on holds only under the names it was split
   -- against, so those are assumed here and discharged into the conclusion. A
   -- premise assumes some of the same names, and is applied to them; one
@@ -72,8 +81,26 @@ partial def step (u : Vampire.Unit) : ReconstructM Expr := reading u do
     throwError "reconstruction of {rule.name} for step {u.number} proves\
       {indentExpr (← betaAll (← inferType proof))}\n\
       but the step claims{indentExpr (← betaAll conclusion)}"
-  modify fun s => { s with proofs := s.proofs.insert u.number proof }
-  return proof
+  return (proof, conclusion)
+
+/--
+Every step of a refutation, each bound to what proves it.
+
+Bound rather than written out: a step a dozen others were inferred from is
+otherwise checked against what each of them expects of it, and what they expect
+is a clause, which is not a small thing to compare.
+-/
+private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
+    (bound : Array Expr) (refutation : Vampire.Unit) : ReconstructM Expr := do
+  let some u := steps[i]?
+    | do
+      let some proof := (← get).proofs[refutation.number]?
+        | throwError "the refutation was not replayed"
+      return ← mkLetFVars bound proof (usedLetOnly := false)
+  let (value, stated) ← replay u
+  withLetDecl (Name.mkSimple s!"s{u.number}") stated value fun s => do
+    modify fun st => { st with proofs := st.proofs.insert u.number s }
+    replayAll steps (i + 1) (bound.push s) refutation
 
 /--
 Binds every name the proof introduces, before any step is replayed.
@@ -155,7 +182,8 @@ def run (proof : Proof) (symbols : Symbols) : MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
     bindIntroduced
-    let term ← step refutation
+    let (_, steps) := ((order refutation).run ({}, #[])).2
+    let term ← replayAll steps 0 #[] refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray }
   let (outcome, _) ← (go.run { symbols, proof, flipped := proof.polarityFlipBoundary }).run {}
   return some outcome

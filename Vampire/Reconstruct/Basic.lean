@@ -137,6 +137,21 @@ def flipName (name : String) : ReconstructM (Expr × Expr) := do
       ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some flippedBody]])
   throwError "`{name}` and `{flipped}` are not each other's negation"
 
+/--
+The one term of this shape, so that two rebuildings of it are the same term.
+
+A proof states the same literals over and over -- every step of it says what
+its premises and its conclusion are -- and each rebuilding otherwise makes its
+own copy. Lean shares the subterms of what it is handed before checking it, and
+compares terms by their address before their shape, so what the copies cost is
+paid many times over.
+-/
+def shared (e : Expr) : ReconstructM Expr := do
+  if let some one := (← get).shared[e]? then
+    return one
+  modify fun s => { s with shared := s.shared.insert e e }
+  return e
+
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
@@ -154,7 +169,7 @@ here. Backwards the witness is that very term.
 -/
 def epsilon (τ p : Expr) : ReconstructM (Expr × Expr) := do
   let inst ← nonempty τ
-  let witness := mkApp3 (mkConst ``Classical.epsilon [← getLevel τ]) τ inst p
+  let witness ← shared (mkApp3 (mkConst ``Classical.epsilon [← getLevel τ]) τ inst p)
   let forward ← mkAppOptM ``Classical.epsilon_spec_aux #[some τ, some inst, some p]
   -- `p` has to be given: `h`'s type is beta-reduced, so it cannot be recovered
   -- from the arguments by unification.
@@ -168,21 +183,6 @@ def connectiveOf (f : Formula) : ReconstructM Connective :=
   match f.connective with
   | .ok c => return c
   | .error e => throwError "{e}"
-
-/--
-The one term of this shape, so that two rebuildings of it are the same term.
-
-A proof states the same literals over and over -- every step of it says what
-its premises and its conclusion are -- and each rebuilding otherwise makes its
-own copy. Lean shares the subterms of what it is handed before checking it, and
-compares terms by their address before their shape, so what the copies cost is
-paid many times over.
--/
-def shared (e : Expr) : ReconstructM Expr := do
-  if let some one := (← get).shared[e]? then
-    return one
-  modify fun s => { s with shared := s.shared.insert e e }
-  return e
 
 /--
 A clause with each of its literals the one term of its shape.
@@ -286,25 +286,26 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
         let some g := f.subformulas[0]? | throwError "quantifier without a body"
         pure g)
       bind locals body
-  match ← connectiveOf f with
-  | .literal =>
-    let some l := f.literal? | throwError "atom without a literal"
-    literal vars l
-  | .«true» => return mkConst ``True
-  | .«false» => return mkConst ``False
-  | .not => return mkApp (mkConst ``Not) (← sub 0)
-  | .and => return junction ``And ``True (← all)
-  | .or => return junction ``Or ``False (← all)
-  | .imp => mkArrow (← sub 0) (← sub 1)
-  | .iff => binary ``Iff
-  | .xor => return mkApp (mkConst ``Not) (← binary ``Iff)
-  | .«forall» => quantified fun locals body => mkForallFVars locals body
-  | .«exists» => quantified fun locals body => do
-    locals.foldrM (fun x body => do mkAppM ``Exists #[← mkLambdaFVars #[x] body]) body
-  | .name =>
-    let some raw := f.name? | throwError "named formula without a name"
-    namedFormula raw
-  | c => throwError "cannot rebuild a formula with connective {repr c}"
+  shared (← do
+    match ← connectiveOf f with
+    | .literal =>
+      let some l := f.literal? | throwError "atom without a literal"
+      literal vars l
+    | .«true» => return mkConst ``True
+    | .«false» => return mkConst ``False
+    | .not => return mkApp (mkConst ``Not) (← sub 0)
+    | .and => return junction ``And ``True (← all)
+    | .or => return junction ``Or ``False (← all)
+    | .imp => mkArrow (← sub 0) (← sub 1)
+    | .iff => binary ``Iff
+    | .xor => return mkApp (mkConst ``Not) (← binary ``Iff)
+    | .«forall» => quantified fun locals body => mkForallFVars locals body
+    | .«exists» => quantified fun locals body => do
+      locals.foldrM (fun x body => do mkAppM ``Exists #[← mkLambdaFVars #[x] body]) body
+    | .name =>
+      let some raw := f.name? | throwError "named formula without a name"
+      namedFormula raw
+    | c => throwError "cannot rebuild a formula with connective {repr c}")
 
 
 /--
