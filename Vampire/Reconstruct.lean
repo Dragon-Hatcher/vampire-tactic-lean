@@ -30,8 +30,15 @@ private partial def order (u : Vampire.Unit) :
     order parent
   modify fun (seen, order) => (seen, order.push u)
 
-/-- Replays a step, from what proves the steps it was inferred from. -/
-private def replay (u : Vampire.Unit) : ReconstructM (Expr × Expr) := reading u do
+/--
+Replays a step, from what proves the steps it was inferred from.
+
+@b context is the context the whole proof is built in: the goal's, plus a local
+for each step already replayed. Anything else a step's term mentions is a local
+some rule made and failed to abstract.
+-/
+private def replay (u : Vampire.Unit) (context : LocalContext) :
+    ReconstructM (Expr × Expr) := reading u do
   let some rule := u.rule?
     | throwError "step {u.number} has unknown inference rule {u.ruleIndex}"
   let premises ← u.parents.mapM fun parent => do
@@ -75,8 +82,30 @@ private def replay (u : Vampire.Unit) : ReconstructM (Expr × Expr) := reading u
       conclusionOf u
     catch e =>
       throwError "stating step {u.number} ({rule.name}): {e.toMessageData}"
-  -- The rules are trusted to return a proof of what the step claims; check it,
-  -- so a wrong implementation is caught here rather than at `assign`.
+  -- A rule that leaks a local it introduced -- a clause's variable, a
+  -- hypothesis it assumed -- builds a term the elaborator still accepts, since
+  -- `inferType` reads that local's type out of the context it was made in. The
+  -- kernel does not, and rejects the whole proof with no step to point at, so
+  -- the leak is caught here, where the step and the rule are known.
+  let leaked := (Lean.collectFVars {} (← instantiateMVars proof)).fvarIds.filter
+    fun id => (context.find? id).isNone
+  unless leaked.isEmpty do
+    throwError "reconstruction of {rule.name} for step {u.number} leaked the \
+      local{indentD (.joinSep (leaked.toList.map fun id => m!"{Expr.fvar id}") ", ")}\n\
+      which is out of scope in the proof it was built for"
+  -- That the term is well-typed at all, which is not what `inferType` says: a
+  -- term built with `mkApp` gets its type read off the head's signature and the
+  -- arguments given for the head's own binders, so an argument of the wrong
+  -- type is not looked at. The kernel does look, and rejects the finished proof
+  -- with nothing in it to say which of a few hundred steps was wrong. Checking
+  -- here costs a few per cent of the replay and names the rule.
+  try
+    Meta.check proof
+  catch e =>
+    throwError "reconstruction of {rule.name} for step {u.number} is \
+      ill-typed: {e.toMessageData}"
+  -- And that it is a proof of what the step claims, which being well-typed does
+  -- not say; a wrong implementation is then caught here rather than at `assign`.
   unless ← isDefEq (← inferType proof) conclusion do
     throwError "reconstruction of {rule.name} for step {u.number} proves\
       {indentExpr (← betaAll (← inferType proof))}\n\
@@ -98,7 +127,7 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
         | throwError "the refutation was not replayed"
       return ← mkLetFVars bound proof (usedLetOnly := false)
   let started ← IO.monoMsNow
-  let (value, stated) ← replay u
+  let (value, stated) ← replay u (← getLCtx)
   trace[vampire] "step {(u.rule?.map (·.name)).getD "?"} took \
 {(← IO.monoMsNow) - started}ms"
   withLetDecl (Name.mkSimple s!"s{u.number}") stated value fun s => do
