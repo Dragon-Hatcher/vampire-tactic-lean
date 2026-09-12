@@ -42,10 +42,12 @@ def resolution (step : Step) : ReconstructM Expr := do
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps
     -- it; where it keeps it is a lookup, not a search.
-    -- The resolved pair is complementary, which closes that case.
+    -- The resolved pair is complementary, which closes that case -- against
+    -- what the two carries have left of the conclusion, which is what the
+    -- innermost of them says it is and not what the outer one was given.
     let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
       (fun _ h₁ rest => carryPast t₂ rest p₂ (· == resolved₂.toNat)
-        (fun _ h₂ _ => closeComplementary rest h₁ h₂))
+        (fun _ h₂ inner => closeComplementary inner h₁ h₂))
     mkLambdaFVars xs body
 
 /--
@@ -91,7 +93,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
         let some (unitAt, unitType) := units[i]?
           | throwError "no unit resolved literal {i} away"
         carryPast unitType rest unitAt (fun _ => true)
-          (fun _ hu _ => closeComplementary rest h hu))
+          (fun _ hu inner => closeComplementary inner h hu))
     mkLambdaFVars xs body
 
 /--
@@ -115,7 +117,6 @@ def factoring (step : Step) : ReconstructM Expr := do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    let place := placeLiteral target
     mkLambdaFVars xs (← carryAll premiseType target premiseAt)
 
 /--
