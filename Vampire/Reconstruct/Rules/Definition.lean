@@ -1,4 +1,5 @@
 import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Clause
 
 /-!
 Rules that introduce a name and say what it means. Nothing further constrains
@@ -369,6 +370,26 @@ private partial def weaken (premise stated conclusion : Expr) :
   throwError "cannot keep{indentExpr conclusion}\nof{indentExpr stated}"
 
 /--
+`pure_predicate_removal`: a step that does not follow from its premise.
+
+`PredicateDefinition::replacePurePredicates` replaces a predicate occurring
+with a single polarity by the truth value that satisfies its occurrences. That
+preserves satisfiability, which is all a refutation needs, but it is not an
+entailment: `¬(A ∧ ¬P)` becomes `¬A`, which does not follow from it. What makes
+it sound is reinterpreting `P`, and a proof of the goal as it stands cannot do
+that.
+
+So there is nothing here to build, now or later, and the tactic forces the pass
+off (`updr=off`) rather than meeting the step. Reaching it means the forcing was
+undone.
+-/
+def purePredicateRemoval (step : Step) : ReconstructM Expr := do
+  throwError "step {step.unit.number} replaced a pure predicate by a truth \
+    value, which preserves satisfiability but does not follow from the \
+    premise, so it cannot be replayed; the tactic forces `updr=off` to keep \
+    the pass out of the search"
+
+/--
 `unused_predicate_definition_removal`: one direction of a definition, the only
 one still needed.
 
@@ -381,9 +402,100 @@ def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
       got {step.premises.size}"
   weaken premiseProof (← instantiateMVars premiseStated) (← step.conclusion)
 
+/--
+The term an `inequality_splitting_name_introduction` step named, and the sort it
+has.
+
+`InequalitySplitting::splitLiteral` mints a fresh predicate `p` and asserts the
+one-literal clause `~p(t)`, `t` being the ground side of the inequality it
+split. So the step's own literal is where `t` is written down.
+-/
+private def splitNameOf (u : Vampire.Unit) : ReconstructM (String × Term) := do
+  let l ← definitionLiteral u
+  if l.isEquality then
+    throwError "an inequality_splitting_name_introduction step should state a \
+      predicate, got the equality {l}"
+  if ← literalPolarity l then
+    throwError "an inequality_splitting_name_introduction step should state a \
+      negative literal, got {l}"
+  let some symbol := l.symbol?
+    | throwError "literal has unknown predicate {l.predicate}"
+  let #[t] := l.args
+    | throwError "inequality splitting named a term with \
+      {l.args.size} arguments rather than one; the extra ones are the sorts a \
+      polymorphic equality ranges over, which this fragment does not have"
+  return (symbol.name, t)
+
+/--
+Registers the predicate an `inequality_splitting_name_introduction` introduces.
+
+The predicate is fresh and the one clause asserting it says `~p(t)`, so what
+`p` has to mean for that to hold, and for the split clause to say what the
+clause it was split from said, is `p(x) ↔ x ≠ t`. Binding it to that makes both
+steps hold by unfolding: `~p(t)` becomes `¬(t ≠ t)`, and the literal `p(s)` the
+split put in place of `s ≠ t` becomes `s ≠ t` again.
+-/
+private def registerInequalitySplitting (u : Vampire.Unit) : ReconstructM PUnit := do
+  let (name, t) ← splitNameOf u
+  let body ← withVars u.varSorts {} fun vars _ => term vars t
+  let definition ← withLocalDeclD `x (← inferType body) fun x => do
+    mkLambdaFVars #[x] (mkApp (mkConst ``Not) (← mkEq x body))
+  modify fun s => { s with introduced := s.introduced.insert name definition }
+
+/--
+`inequality_splitting_name_introduction`: that the named term is not unequal to
+itself.
+
+The step states `~p(t)`, and `p` stands for being unequal to `t`, so what it
+says is `¬(t ≠ t)`.
+-/
+def inequalitySplittingName (step : Step) : ReconstructM Expr := do
+  let (_, t) ← splitNameOf step.unit
+  let conclusion ← step.conclusion
+  let some inequality := asNegation conclusion
+    | throwError "an inequality_splitting_name_introduction step should state a \
+      negation, got{indentExpr conclusion}"
+  let body ← withVars step.unit.varSorts {} fun vars _ => term vars t
+  let refl ← mkEqRefl body
+  withLocalDeclD `h inequality fun h =>
+    mkLambdaFVars #[h] (mkApp h refl)
+
+/--
+`inequality_splitting`: the clause with a ground side of an inequality named.
+
+Each split literal `s ≠ t` became `p(s)` for the `p` that names `t`, and `p`
+stands for being unequal to `t`, so the conclusion says what the premise said.
+The name introductions among the premises carry no further weight: what they
+assert is what binding `p` already made true.
+-/
+def inequalitySplitting (step : Step) : ReconstructM Expr := do
+  -- Which premise is the clause is read off the rules rather than off the
+  -- order they came in: the others are the names the split introduced.
+  let some i := step.unit.parents.findIdx? fun p =>
+      p.rule? != some .inequalitySplittingNameIntroduction
+    | throwError "inequality splitting without a clause to split"
+  let some parent := step.unit.parents[i]?
+    | throwError "inequality splitting without a clause to split"
+  let some (proof, stated) := step.premises[i]?
+    | throwError "inequality splitting without a proof of the clause it split"
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    -- Splitting substitutes nothing, so the conclusion keeps the premise's
+    -- variables; it records no unifier because there is none to record.
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ←
+      Clause.instantiateAt parent vars proof stated
+    mkLambdaFVars xs (← carryAll premiseType target premiseAt)
+
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
   | .functionDefinition | .avatarDefinition | .predicateDefinition => true
+  -- Inequality splitting names a ground side of an inequality with a fresh
+  -- predicate, in a clause of its own.
+  | .inequalitySplittingNameIntroduction => true
   -- An equality proxy is a predicate defined to be equality, and is named and
   -- stated the way any other defined predicate is.
   | .equalityProxyDefinition => true
@@ -400,6 +512,7 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
   | some .avatarDefinition => registerAvatarDefinition u
   | some .predicateDefinition | some .equalityProxyDefinition =>
     registerPredicateDefinition u
+  | some .inequalitySplittingNameIntroduction => registerInequalitySplitting u
   | _ => return
 
 /--

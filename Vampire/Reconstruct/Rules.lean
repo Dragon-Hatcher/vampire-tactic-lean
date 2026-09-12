@@ -72,7 +72,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .flatten => Congruence.restated step
   | .rectify => Congruence.restated step
   | .definitionFolding => Congruence.unfolded step
-  | .purePredicateRemoval => Congruence.weakened step
+  | .purePredicateRemoval => Definition.purePredicateRemoval step
   | .reduceFalseTrue => Simplify.reduceFalseTrue step
 
   -- Not implemented yet.
@@ -180,8 +180,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .predicateDefinitionUnfolding => unimplemented step
   | .predicateDefinitionMerging => unimplemented step
   | .predicateElimination => unimplemented step
-  | .inequalitySplitting => unimplemented step
-  | .inequalitySplittingNameIntroduction => unimplemented step
+  | .inequalitySplitting => Definition.inequalitySplitting step
+  | .inequalitySplittingNameIntroduction => Definition.inequalitySplittingName step
   | .distinctnessAxiom => unimplemented step
   | .booleanTermEncoding => unimplemented step
   | .foolElimination => unimplemented step
