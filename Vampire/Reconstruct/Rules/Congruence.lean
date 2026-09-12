@@ -44,16 +44,12 @@ def unfolded (step : Step) : ReconstructM Expr := do
   relateLiterals step parent proof stated
 
 /--
-`pure_predicate_removal` and `reduce_false_true`: a formula with some of what it
-said left out.
-
-`SimplifyFalseTrue` absorbs the truth values a formula holds -- a `⊥` disjunct
-goes, a `⊤` conjunct goes -- and
+`pure_predicate_removal`: a formula with some of what it said left out.
 
 `PredicateDefinition` replaces a predicate that only ever occurs one way round
-by the truth value that way round gives, and simplifies what is left the same
-way. Either way what remains is what the premise said, less some of it, which
-is what `implies` settles by looking each part up.
+by the truth value that way round gives, and absorbs that value into what is
+left. What remains is what the premise said, less some of it, which is what
+`implies` settles by looking each part up.
 -/
 def weakened (step : Step) : ReconstructM Expr := do
   let #[(proof, stated)] := step.premises

@@ -50,13 +50,6 @@ private def impIffNotOr (a b : Expr) : ReconstructM Expr := do
   let decidable ← mkAppOptM ``Classical.propDecidable #[some a]
   mkAppOptM ``Decidable.imp_iff_not_or #[some a, some b, some decidable]
 
-/-- The congruence of a junction's arguments, folded as the junction is. -/
-private partial def congruent (congruence : Name)
-    (parts : Array (Expr × Expr × Expr)) (i : Nat) : ReconstructM Expr := do
-  let some (_, _, proof) := parts[i]? | throwError "missing argument"
-  if i + 1 == parts.size then return proof
-  mkAppM congruence #[proof, ← congruent congruence parts (i + 1)]
-
 /--
 De Morgan over a junction, one argument at a time, then the congruence of the
 arguments: what a junction at negative polarity comes to.
@@ -127,7 +120,7 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       if polarity then
         -- Only the arguments changed, so the proof is their congruence.
         let congruence := if isAnd then ``and_congr else ``or_congr
-        return (source, result, ← congruent congruence parts 0)
+        return (source, result, ← congrJunction congruence (parts.map (·.2.2)))
       else
         -- De Morgan, one argument at a time, then their congruence.
         let givens ← f.subformulas.mapM (Reconstruct.formula sorts vars)

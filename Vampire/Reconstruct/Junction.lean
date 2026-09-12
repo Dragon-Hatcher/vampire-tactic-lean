@@ -156,4 +156,17 @@ partial def introParts (chain : Expr) (offset : Nat)
   return mkApp4 (mkConst ``And.intro) left right
     (← introParts left offset component) (← introParts right (offset + n) component)
 
+/--
+The congruence of a junction's arguments, folded the way `junction` folds them.
+
+`congruence` is `and_congr` or `or_congr`: each takes the congruence of one
+argument and that of the rest, so folding them right-nested matches how the
+junction itself was built.
+-/
+partial def congrJunction (congruence : Name) (proofs : Array Expr) (i : Nat := 0) :
+    ReconstructM Expr := do
+  let some proof := proofs[i]? | throwError "a junction with no arguments"
+  if i + 1 == proofs.size then return proof
+  mkAppM congruence #[proof, ← congrJunction congruence proofs (i + 1)]
+
 end Vampire.Reconstruct

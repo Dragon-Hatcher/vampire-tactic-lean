@@ -11,6 +11,7 @@ import Vampire.Reconstruct.Rules.Input
 import Vampire.Reconstruct.Rules.Normalize
 import Vampire.Reconstruct.Rules.Resolution
 import Vampire.Reconstruct.Rules.Rewrite
+import Vampire.Reconstruct.Rules.Simplify
 import Vampire.Reconstruct.Rules.Skolem
 import Vampire.Reconstruct.Rules.Splitting
 import Vampire.Reconstruct.Rules.Subsumption
@@ -47,6 +48,9 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .input => Input.input step
   | .resolution => Resolution.resolution step
   | .extensionalityResolution => Resolution.resolution step
+  -- Forward literal rewriting rewrites a literal with one half of an
+  -- equivalence, which is resolving against that half: the half's other
+  -- literal is what goes into the conclusion.
   | .forwardLiteralRewriting => Resolution.resolution step
   | .factoring => Resolution.factoring step
   | .unitResultingResolution => Resolution.unitResulting step
@@ -69,7 +73,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .rectify => Congruence.restated step
   | .definitionFolding => Congruence.unfolded step
   | .purePredicateRemoval => Congruence.weakened step
-  | .reduceFalseTrue => Congruence.weakened step
+  | .reduceFalseTrue => Simplify.reduceFalseTrue step
 
   -- Not implemented yet.
   | .genericFormulaClauseTransformation => unimplemented step
