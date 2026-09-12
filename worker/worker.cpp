@@ -38,7 +38,15 @@
  *              firstSkolem, numSkolems, name, firstUse, numUses,
  *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
  *              genState, firstChoice, numChoices, firstCongruence,
- *              numCongruences}
+ *              numCongruences, numBoundSorts, firstConstraint,
+ *              numConstraints}
+ *             `firstConstraint` and `numConstraints` say which of a clause's
+ *             literals are the disequalities an abstracting unifier left
+ *             behind: what it could not unify it defers into literals the
+ *             inference puts into its conclusion, and the step is sound
+ *             because the conclusion failing makes each of those pairs equal.
+ *             Binary resolution puts them before the literals it carried over
+ *             and every other rule after, so a count alone would not say
  *             `genState` is the generalised clause a clause came out of, and
  *             the choices are the conjuncts its clausification went into
  *             `satPremise` is the propositional clause a step derived by SAT
@@ -53,7 +61,14 @@
  *   parents   unit indices
  *   varSorts  {variable, sort} pairs, giving the sorts a unit's free
  *             variables take -- a clause is implicitly universally quantified
- *             over them, so rebuilding it needs their sorts
+ *             over them, so rebuilding it needs their sorts. The
+ *             `numBoundSorts` pairs after a unit's own `numVarSorts` are the
+ *             variables that occur only in what its uses bound its premises'
+ *             variables to: a unifier's image can mention a variable that
+ *             neither the premise nor the conclusion has, and reading that
+ *             term back needs its sort as much as any other. They are kept
+ *             apart because a unit's own variables are the quantifier prefix
+ *             its conclusion is rebuilt with, and these are not part of it
  *   uses      {premise, literal, term, flags, firstBinding, numBindings}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
@@ -170,7 +185,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 16;
+const uint32_t VERSION = 18;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -721,8 +736,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 25);
-    units.resize(units.size() + 25, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 28);
+    units.resize(units.size() + 28, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -796,19 +811,18 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[25 * idx + 0] = u->number();
-    units[25 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[25 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[25 * idx + 3] = flags;
-    units[25 * idx + 4] = payload;
-    units[25 * idx + 5] = numLits;
-    units[25 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[25 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[25 * idx + 8] = numVarSorts == 0 ? NONE : firstVarSort;
-    units[25 * idx + 9] = numVarSorts;
-    units[25 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[25 * idx + 11] = numSkolems;
-    units[25 * idx + 12] = nameOff;
+    units[28 * idx + 0] = u->number();
+    units[28 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[28 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[28 * idx + 3] = flags;
+    units[28 * idx + 4] = payload;
+    units[28 * idx + 5] = numLits;
+    units[28 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[28 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[28 * idx + 9] = numVarSorts;
+    units[28 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[28 * idx + 11] = numSkolems;
+    units[28 * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -827,9 +841,22 @@ struct Encoder {
           bindings.push_back(var);
           bindings.push_back(encodeTerm(term));
         }
+        // Literal selection permutes a clause's literals in place after an
+        // inference has run, so the index the inference saw is not the index
+        // the clause is serialised with. The literal itself was kept; where it
+        // sits now is settled here, with nothing further to move it.
+        unsigned literal = use.literal;
+        if (use.on && use.premiseClause) {
+          literal = InferenceStore::literalNone;
+          for (unsigned i = 0; i < use.premiseClause->length(); i++)
+            if ((*use.premiseClause)[i] == use.on) {
+              literal = i;
+              break;
+            }
+        }
         uses.push_back(use.premise);
-        uses.push_back(use.literal == InferenceStore::literalNone ? NONE
-                                                                  : use.literal);
+        uses.push_back(literal == InferenceStore::literalNone ? NONE
+                                                              : literal);
         uses.push_back(use.term.isEmpty() ? NONE : encodeTerm(use.term));
         uses.push_back(use.flags);
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
@@ -837,11 +864,50 @@ struct Encoder {
         numUses++;
       }
     }
-    units[25 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[25 * idx + 14] = numUses;
-    units[25 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[25 * idx + 16] = numSplits;
-    units[25 * idx + 17] =
+
+    // A unifier's image can mention a variable that neither the premise nor
+    // the conclusion has, and reading that term back needs its sort as much as
+    // any other variable's. These go after the unit's own variables, which are
+    // the quantifier prefix its conclusion is rebuilt with, so that adding
+    // them does not change that prefix.
+    uint32_t numBoundSorts = 0;
+    if (const Stack<InferenceStore::PremiseUse>* recorded =
+          InferenceStore::instance()->premiseUses(u)) {
+      DHMap<unsigned, TermList, FnvHash, IdentityHash> boundSorts;
+      for (const InferenceStore::PremiseUse& use : *recorded) {
+        for (const auto& [var, term] : use.bindings)
+          if (term.isTerm())
+            SortHelper::collectVariableSorts(const_cast<Term*>(term.term()),
+              boundSorts);
+        if (use.term.isTerm())
+          SortHelper::collectVariableSorts(const_cast<Term*>(use.term.term()),
+            boundSorts);
+      }
+      DHMap<unsigned, TermList, FnvHash, IdentityHash>::Iterator it3(boundSorts);
+      while (it3.hasNext()) {
+        unsigned var;
+        TermList sort;
+        it3.next(var, sort);
+        if (sortsOfVars.findPtr(var))
+          continue;
+        varSorts.push_back(var);
+        varSorts.push_back(encodeSort(sort));
+        numBoundSorts++;
+      }
+    }
+    units[28 * idx + 8] =
+      numVarSorts == 0 && numBoundSorts == 0 ? NONE : firstVarSort;
+    units[28 * idx + 25] = numBoundSorts;
+    auto [firstConstraint, numConstraints] =
+      InferenceStore::instance()->constraints(u);
+    units[28 * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
+    units[28 * idx + 27] = numConstraints;
+
+    units[28 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[28 * idx + 14] = numUses;
+    units[28 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[28 * idx + 16] = numSplits;
+    units[28 * idx + 17] =
       inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
 
     uint32_t firstNaming = static_cast<uint32_t>(namings.size() / 4);
@@ -859,9 +925,9 @@ struct Encoder {
         numNamings++;
       }
     }
-    units[25 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
-    units[25 * idx + 19] = numNamings;
-    units[25 * idx + 20] =
+    units[28 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
+    units[28 * idx + 19] = numNamings;
+    units[28 * idx + 20] =
       encodeGenClauseState(InferenceStore::instance()->genClauseOfClause(u));
 
     uint32_t firstCongruence = static_cast<uint32_t>(congruences.size() / 5);
@@ -887,8 +953,8 @@ struct Encoder {
           numCongruences++;
         }
     }
-    units[25 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
-    units[25 * idx + 24] = numCongruences;
+    units[28 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
+    units[28 * idx + 24] = numCongruences;
 
     uint32_t firstChoice = static_cast<uint32_t>(choices.size() / 2);
     uint32_t numChoices = 0;
@@ -900,8 +966,8 @@ struct Encoder {
         numChoices++;
       }
     }
-    units[25 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
-    units[25 * idx + 22] = numChoices;
+    units[28 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
+    units[28 * idx + 22] = numChoices;
     return idx;
   }
 };
@@ -946,7 +1012,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 25));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 28));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));

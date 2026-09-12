@@ -23,6 +23,16 @@ asked to find the facts -- they are the step's own premises -- only to see that
 together they are impossible.
 -/
 def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  -- What a symbol vampire introduced stands for is a function, so a step over
+  -- one states an application of it; the procedures read what it says, which
+  -- is that reduced. Stated again rather than rebuilt: the two are the same
+  -- term to the kernel.
+  let facts ← facts.mapM fun fact => do
+    let stated ← instantiateMVars (← inferType fact)
+    let reduced ← Meta.transform stated (post := fun e => return .done e.headBeta)
+    if reduced == stated then pure fact else mkExpectedTypeHint fact reduced
+  let claim ← claim.mapM fun claim =>
+    Meta.transform claim (post := fun e => return .done e.headBeta)
   let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
   try
     -- `linarith` proves a comparison outright, which is what a theory axiom

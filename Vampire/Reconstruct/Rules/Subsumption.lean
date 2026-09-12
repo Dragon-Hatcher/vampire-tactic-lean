@@ -49,7 +49,7 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
       kept := kept.insert v x
     -- The removed literal can be the only one mentioning a variable, which the
     -- conclusion then does not keep; σ may still mention it.
-    let vars ← coverVars mainParent kept
+    let vars ← coverVars mainParent kept step.unit.boundVarSorts
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let body ← carryPast mainType target mainAt (· == resolved.toNat)

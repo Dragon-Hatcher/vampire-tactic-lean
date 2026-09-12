@@ -368,8 +368,16 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
     | LE.le _ _ a b => arithmeticAtom "$lesseq" a b e
     | GT.gt _ _ a b => arithmeticAtom "$less" b a e
     | GE.ge _ _ a b => arithmeticAtom "$lesseq" b a e
-    | Eq _ a b => return .eq (← translateTerm a) (← translateTerm b) true
-    | Ne _ a b => return .eq (← translateTerm a) (← translateTerm b) false
+    | Eq α a b =>
+      -- Two propositions are equal when each follows from the other, which is
+      -- what TPTP has `<=>` for; it has no equality between formulas.
+      if isPropType α then
+        return .iff (← translateFormula a) (← translateFormula b)
+      return .eq (← translateTerm a) (← translateTerm b) true
+    | Ne α a b =>
+      if isPropType α then
+        return .neg (.iff (← translateFormula a) (← translateFormula b))
+      return .eq (← translateTerm a) (← translateTerm b) false
     | Exists _ p =>
       lambdaTelescope p fun xs body => do
         let mut binders := #[]

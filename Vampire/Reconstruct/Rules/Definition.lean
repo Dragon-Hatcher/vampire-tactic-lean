@@ -305,7 +305,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
     let mut kept : Vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
-    let vars ← coverVars parent kept
+    let vars ← coverVars parent kept step.unit.boundVarSorts
     let body ← carryWith (← instantiateForall (← conclusionOf parent)
         (← parent.varSorts.mapM fun (v, sortName) => do
           match vars[v]? with
@@ -384,6 +384,9 @@ def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
   | .functionDefinition | .avatarDefinition | .predicateDefinition => true
+  -- An equality proxy is a predicate defined to be equality, and is named and
+  -- stated the way any other defined predicate is.
+  | .equalityProxyDefinition => true
   | _ => false
 
 /--
@@ -395,8 +398,42 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
   match u.rule? with
   | some .functionDefinition => registerFunctionDefinition u
   | some .avatarDefinition => registerAvatarDefinition u
-  | some .predicateDefinition => registerPredicateDefinition u
+  | some .predicateDefinition | some .equalityProxyDefinition =>
+    registerPredicateDefinition u
   | _ => return
+
+/--
+`equality_proxy_replacement`: the premise with equality written as the proxy.
+
+The proxy predicate is bound to equality itself, by the `equality_proxy_definition`
+step that introduced it, so the conclusion and the premise say the same thing and
+differ only by that definition. The definition is a premise of this step too,
+and does nothing here beyond having given the proxy its meaning, so the premise
+restated is the clause among them.
+-/
+def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
+  let some i := step.unit.parents.findIdx? (·.clause?.isSome)
+    | throwError "equality_proxy_replacement has no clause among its premises"
+  let some (proof, stated) := step.premises[i]?
+    | throwError "no premise in position {i}"
+  let conclusion ← step.conclusion
+  if ← isDefEq (← instantiateMVars stated) conclusion then
+    return proof
+  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+
+/--
+`equality_proxy_axiom`: an axiom about the proxy, which is equality.
+
+The proxy is bound to equality itself, so what the axiom states of it -- that
+it is reflexive, say -- is what equality states of itself, and holds of itself.
+The conclusion applies that binding rather than having it reduced, so it is
+reduced here for the shape to be read, and the proof restated at the shape the
+step states: the two are one term to the kernel.
+-/
+def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
+  let conclusion ← step.conclusion
+  let reduced ← Meta.transform conclusion (post := fun e => return .done e.headBeta)
+  mkExpectedTypeHint (← byDefinition reduced) conclusion
 
 /-- Any of the definition rules. -/
 def definitionStep (step : Step) : ReconstructM Expr := do

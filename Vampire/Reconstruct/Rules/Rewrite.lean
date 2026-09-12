@@ -213,7 +213,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
     -- Rewriting can be what removes a variable from the clause.
-    let vars ← coverVars mainParent kept
+    let vars ← coverVars mainParent kept step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
@@ -249,6 +249,7 @@ def superposition (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
     let vars ← coverVars sideParent (← coverVars mainParent kept)
+      step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
@@ -260,8 +261,25 @@ def superposition (step : Step) : ReconstructM Expr := do
       (fun i h rest =>
         carryPast sideType rest sideAt (· == equationLiteral.toNat)
           (fun _ hSide inner => do
-            let (_, to, heq) ← orientedEquation sideUse vars hSide (← inferType hSide)
-            placeLiteral inner (← rewriteWith rw vars heq to i h)))
+            let («from», to, heq) ←
+              orientedEquation sideUse vars hSide (← inferType hSide)
+            let source ← rw.target.toExpr
+            if ← isDefEq source «from» then
+              return ← placeLiteral inner (← rewriteWith rw vars heq to i h)
+            -- An abstracting unifier did not make the rewritten term and the
+            -- equation's side one: what it could not unify it left as a
+            -- disequality among the conclusion's literals. So either that
+            -- disequality holds, and it is the conclusion, or the two terms
+            -- are equal after all and the equation rewrites the premise once
+            -- composed with them being equal.
+            let differ ← withLocalDeclD `h (← mkAppM ``Ne #[source, «from»])
+              fun hne => do mkLambdaFVars #[hne] (← placeLiteral inner hne)
+            let agree ← withLocalDeclD `h (← mkAppM ``Eq #[source, «from»])
+              fun hc => do
+                let bridged ← mkAppM ``Eq.trans #[hc, heq]
+                mkLambdaFVars #[hc]
+                  (← placeLiteral inner (← rewriteWith rw vars bridged to i h))
+            mkAppM ``Classical.byCases #[agree, differ]))
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Rewrite

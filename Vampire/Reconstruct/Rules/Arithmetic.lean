@@ -31,10 +31,14 @@ private def premisesOf (step : Step) (vars : Vars) :
     -- took the premise as it stands recorded nothing, and then it is taken so.
     match ← try some <$> step.useAt i catch _ => pure none with
     | some use =>
-      out := out.push (← instantiateAt parent use (← coverVars parent vars) proof stated)
+      out := out.push (← instantiateAt parent use (← coverVars parent vars step.unit.boundVarSorts) proof stated)
     | none =>
-      -- Nothing recorded: the premise speaks of the same variables the
-      -- conclusion does, and stands for whatever it does not mention.
+      -- Nothing recorded: a simplifying inference that applies no substitution
+      -- states its premise of the very variables its conclusion speaks of, so
+      -- that is what it is instantiated at. A variable the conclusion does not
+      -- have is one the step evaluated or dropped the literal of, and the
+      -- premise is a fact of every element of its sort, so which element is
+      -- taken for it cannot matter.
       let mut args := #[]
       for (v, sortName) in parent.varSorts do
         match vars[v]? with
@@ -68,32 +72,13 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       vars := vars.insert v x
     let premises ← premisesOf step vars
-    -- A clause of one literal is what a theory axiom states, and that is
-    -- proved as it stands rather than by supposing it false.
-    if (junctionParts ``Or target).size == 1 then
-      let facts ← premises.filterMapM fun (proof, stated) => do
-        if (junctionParts ``Or stated).size == 1 then
-          return some (← plainly proof)
-        return none
-      if facts.size == premises.size then
-        try
-          return ← mkLambdaFVars xs (← (← read).contradiction facts (some target))
-        catch _ => pure ()
-    let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
-      -- What says each literal of the conclusion fails.
-      let parts := junctionParts ``Or target
-      let mut facts := #[]
-      for (part, i) in parts.zipIdx do
-        let refuting ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l))
-        facts := facts.push (← plainly refuting)
-      -- And a case for each literal of each premise.
-      let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
-        let some (proof, stated) := premises[i]?
-          | return ← (← read).contradiction facts none
-        elimGiven (junctionParts ``Or stated)
-          (fun _ h => do go (facts.push (← plainly h)) (i + 1)) proof
-      mkLambdaFVars #[h] (← go facts 0)
-    mkLambdaFVars xs (ofNotNot target refuted)
+    -- Each premise holds, so one of its literals does, which is a case; every
+    -- case has to make the conclusion, which is what the numbers settle.
+    let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
+      let some (proof, stated) := premises[i]?
+        | return ← byArithmetic facts target
+      elimGiven (junctionParts ``Or stated)
+        (fun _ h => do go (facts.push (← plainly h)) (i + 1)) proof
+    mkLambdaFVars xs (← go #[] 0)
 
 end Vampire.Reconstruct.Arithmetic

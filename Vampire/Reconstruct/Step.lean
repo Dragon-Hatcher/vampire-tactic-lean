@@ -82,14 +82,20 @@ def substitutedVars (use : PremiseUse) (vars : Vars) : ReconstructM Vars := do
 
 /--
 Something of the right sort for each of a premise's variables the conclusion
-did not keep.
+did not keep, and for each of @b bound.
 
 Such a variable is instantiated at an arbitrary element, and both premises have
 to agree on which: a substitution recorded against the premise can mention it.
+
+@b bound is the step's `boundVarSorts`: a unifier's image can mention a
+variable that neither the premise nor the conclusion has, and reading that term
+back needs its sort too. The conclusion does not speak of it, so which element
+is taken for it cannot matter either.
 -/
-def coverVars (parent : Vampire.Unit) (vars : Vars) : ReconstructM Vars := do
+def coverVars (parent : Vampire.Unit) (vars : Vars)
+    (bound : Array (UInt32 × String) := #[]) : ReconstructM Vars := do
   let mut vars := vars
-  for (v, sortName) in parent.varSorts do
+  for (v, sortName) in parent.varSorts ++ bound do
     unless vars.contains v do
       vars := vars.insert v (← someElement (← sortType sortName))
   return vars
@@ -164,7 +170,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
     -- Dropping a literal can drop the last occurrence of a variable with it.
-    let vars ← coverVars parent kept
+    let vars ← coverVars parent kept step.unit.boundVarSorts
     let mut args := #[]
     for (v, sortName) in parent.varSorts do
       match vars[v]? with

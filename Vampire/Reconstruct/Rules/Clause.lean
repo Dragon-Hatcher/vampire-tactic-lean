@@ -39,6 +39,33 @@ def literals (step : Step) : ReconstructM Expr := do
   relateLiterals step parent premiseProof premiseStated
 
 /--
+`condensation`: the premise at a substitution that makes two of its literals
+one.
+
+`Condensation` unifies two literals of a clause and applies the unifier to the
+whole of it, so the conclusion has one literal fewer than the premise and is an
+instance of it. A clause is universally quantified, so an instance follows from
+it; which instance is the unifier's to say, and the inference discards it.
+-/
+def condensation (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "condensation should have one premise, got {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "condensation without a premise"
+  let use ← step.useAt 0
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ←
+      Reconstruct.instantiateAt parent use vars premiseProof premiseStated
+    -- Every literal of the instance is one of the conclusion's, the two that
+    -- were unified having become one of them; `implies` looks each up.
+    mkLambdaFVars xs (mkApp (← implies premiseType target) premiseAt)
+
+/--
 `polarity_flipping`: nothing, once the predicates it flipped are read as
 meaning the opposite.
 

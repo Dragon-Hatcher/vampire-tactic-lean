@@ -37,7 +37,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- Resolving away the last literal a variable occurs in leaves it out of
     -- the conclusion, while the unifier still speaks of it; such a variable
     -- stands for an arbitrary element, the same one wherever it is met.
-    let vars ← coverVars parent₂ (← coverVars parent₁ kept)
+    let vars ← coverVars parent₂ (← coverVars parent₁ kept) step.unit.boundVarSorts
     let (p₁, t₁) ← instantiateAt parent₁ use₁ vars proof₁ stated₁
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps
@@ -70,7 +70,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
       kept := kept.insert v x
     -- Every literal but one is resolved away, and with it any variable it was
     -- the last to mention.
-    let mut vars ← coverVars main kept
+    let mut vars ← coverVars main kept step.unit.boundVarSorts
     for parent in step.unit.parents do
       vars ← coverVars parent vars
     let (mainAt, mainType) ← instantiateAt main mainUse vars mainProof mainStated
@@ -112,11 +112,59 @@ def factoring (step : Step) : ReconstructM Expr := do
     let mut kept : Vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
-    let vars ← coverVars parent kept
+    let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     let place := placeLiteral target
     mkLambdaFVars xs (← carryAll premiseType target premiseAt)
+
+/--
+`rest`, where an abstracting unifier left constraints among the conclusion's
+literals and `h` denies the equality the step resolved on.
+
+The unifier does not make the two terms one: what it could not unify it defers
+into disequality literals of the conclusion. So the conclusion holds either
+because one of those disequalities does -- and then it is that literal -- or
+because none does, and then the pairs deferred are equal, the two terms really
+are one, and `h` denies it.
+-/
+partial def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
+    ReconstructM Expr := do
+  let some (first, count) := step.unit.constraints
+    | -- Equality resolution either unifies the two sides or defers what it
+      -- could not unify into constraints. Neither here: the step resolved an
+      -- inequality between two terms that no substitution makes one, which is
+      -- vampire's https://github.com/vprover/vampire/issues/938. The premise
+      -- gives the conclusion only of the terms that do make them equal, not of
+      -- every term, so there is nothing here to replay.
+      throwError "vampire resolved an inequality between{indentExpr inner}\n\
+        whose sides no substitution makes one, and recorded neither a unifier \
+        nor a constraint: this is vampire's unsoundness bug \
+        https://github.com/vprover/vampire/issues/938, and the step does not \
+        hold"
+  let some clause := step.unit.clause?
+    | throwError "a step with unification constraints is not a clause"
+  let mut constraints := #[]
+  for i in [first : first + count] do
+    let some l := clause.literals[i]?
+      | throwError "the step records a constraint at literal {i}, and its \
+          conclusion has {clause.literals.size}"
+    constraints := constraints.push (← Reconstruct.literal vars l)
+  let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
+    let some constraint := constraints[i]?
+      | -- Every pair the unifier deferred is equal, so the two terms it was to
+        -- unify are one.
+        let made ← byArithmetic facts inner
+        return ← mkAppOptM ``absurd #[some inner, some rest, some made, some h]
+    let some equal := constraint.not?
+      | throwError "the constraint{indentExpr constraint}\nis not a \
+          disequality"
+    let deferred ← withLocalDeclD `h equal fun x => do
+      mkLambdaFVars #[x] (← go (facts.push x) (i + 1))
+    let held ← withLocalDeclD `h constraint fun x => do
+      mkLambdaFVars #[x] (← placeLiteral rest x)
+    mkAppM ``Classical.byCases #[deferred, held]
+  go #[] 0
 
 /--
 `equality_resolution_with_deletion`: the premise at the binding one of its
@@ -142,19 +190,98 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     let mut kept : Vars := {}
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       kept := kept.insert v x
-    let vars ← coverVars parent kept
+    let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
       (fun _ h rest => do
-        -- The binding is what makes the two sides of the inequality one term.
+        -- The binding is what makes the two sides of the inequality one term,
+        -- unless the unifier abstracted: then what it could not unify it left
+        -- as disequalities among the conclusion's own literals, and the two
+        -- sides are one only once those are denied.
         let stated ← instantiateMVars (← inferType h)
         let some inner := stated.not?
           | throwError "the literal resolved on is not a negation:{indentExpr stated}"
-        let some (_, lhs, _) := inner.eq?
+        let some (_, lhs, rhs) := inner.eq?
           | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-        mkAppOptM ``absurd
-          #[some inner, some rest, some (← mkEqRefl lhs), some h])
+        if ← isDefEq lhs rhs then
+          mkAppOptM ``absurd
+            #[some inner, some rest, some (← mkEqRefl lhs), some h]
+        else
+          fromConstraints step vars rest inner h)
+    mkLambdaFVars xs body
+
+/--
+`equality_factoring`: one of the premise's equalities factored against another.
+
+From `C ∨ s ≈ t ∨ u ≈ v` with `sσ = uσ`, the rule concludes
+`tσ ≉ vσ ∨ Cσ ∨ (uσ ≈ vσ)`: every literal but the selected equality is carried
+over, so the side equality is among them, and the disequality is put in front.
+
+The selected equality is the only one that has to be made anything of. Holding
+`sσ ≈ tσ`, either `tσ` and `vσ` differ -- and the disequality the rule put in
+front is the conclusion -- or they do not, and then `uσ ≈ sσ ≈ tσ ≈ vσ` is the
+side equality, which the conclusion carries. Which of the two it is is settled
+by the case, not looked for.
+-/
+def equalityFactoring (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "equality factoring should have one premise, got \
+      {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "equality factoring without a premise"
+  let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+  let #[selected, side] := uses
+    | throwError "equality factoring recorded {uses.size} uses of its premise, \
+      expected the selected equality and the one it was factored against"
+  let some selectedIdx := selected.literal
+    | throwError "equality factoring did not record the equality it factored"
+  let some sideIdx := side.literal
+    | throwError "equality factoring did not record the equality it factored \
+      against"
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ←
+      instantiateAt parent selected vars premiseProof premiseStated
+    -- The unified side of each equality, as the premise states it here.
+    let unified (use : PremiseUse) : ReconstructM Expr := do
+      let some recorded := use.term
+        | throwError "equality factoring did not record which side it unified"
+      -- Recorded as the premise states it, so it is read back in the premise's
+      -- own variables, under what the unifier bound them to.
+      term (← substitutedVars use vars) recorded
+    let sLHS ← unified selected
+    let fLHS ← unified side
+    let parts := junctionParts ``Or premiseType
+    let some sideLit := parts[sideIdx.toNat]?
+      | throwError "the premise has no literal {sideIdx}"
+    let some (_, fa, fb) := sideLit.eq?
+      | throwError "the equality factored against is not an equality:\
+        {indentExpr sideLit}"
+    -- Either side of an equality can be the one that was unified.
+    let fRHS := if ← isDefEq fa fLHS then fb else fa
+    let body ← carryPast premiseType target premiseAt (· == selectedIdx.toNat)
+      (fun _ h rest => do
+        let stated ← instantiateMVars (← inferType h)
+        let some (α, sa, sb) := stated.eq?
+          | throwError "the equality factored is not an equality:\
+            {indentExpr stated}"
+        let sRHS := if ← isDefEq sa sLHS then sb else sa
+        let h ← if ← isDefEq sa sLHS then pure h
+          else pure (← mkAppM ``Eq.symm #[h])
+        -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`.
+        let differ ← withLocalDeclD `h (← mkAppM ``Ne #[sRHS, fRHS]) fun hne => do
+          mkLambdaFVars #[hne] (← placeLiteral rest hne)
+        let agree ← withLocalDeclD `h (← mkAppOptM ``Eq #[some α, some sRHS, some fRHS])
+          fun he => do
+            let chain ← mkAppM ``Eq.trans #[h, he]
+            let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
+            mkLambdaFVars #[he] (← placeLiteral rest (← mkExpectedTypeHint chain stated))
+        mkAppM ``Classical.byCases #[agree, differ])
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Resolution

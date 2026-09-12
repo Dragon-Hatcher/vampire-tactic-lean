@@ -174,8 +174,8 @@ at a time, a case made for each disjunct of a fact -- so that what is left for
 a decision procedure is what it is good at: a comparison, or facts that cannot
 all hold of any numbers.
 -/
-partial def byArithmetic (facts : Array Expr) (goal : Expr) :
-    ReconstructM Expr := do
+partial def byArithmetic (facts : Array Expr) (goal : Expr)
+    (fuel : Nat := 2) : ReconstructM Expr := do
   let contradiction := (← read).contradiction
   -- A fact that says two things says each of them, and one that says either of
   -- two is two cases; both are the caller's to take apart, so they are taken
@@ -188,32 +188,32 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr) :
       let mut extended := rest
       for j in [0 : parts.size] do
         extended := extended.push (← projectGiven parts j fact)
-      return ← byArithmetic extended goal
+      return ← byArithmetic extended goal fuel
     if stated.isAppOfArity ``Or 2 then
       let rest := facts.eraseIdx! i
       return ← elimGiven (junctionParts ``Or stated)
-        (fun _ h => do byArithmetic (rest.push (← plainly h)) goal) fact
+        (fun _ h => do byArithmetic (rest.push (← plainly h)) goal fuel) fact
   -- What is asked for says two things, or either of two, or that something
   -- cannot be: each is a step away from something the numbers settle.
   if goal.isAppOfArity ``And 2 then
     let parts := junctionParts ``And goal
-    return ← introGiven parts fun i => byArithmetic facts parts[i]!
+    return ← introGiven parts fun i => byArithmetic facts parts[i]! fuel
   if let some inner := goal.not? then
     return ← withLocalDeclD `h inner fun h => do
       mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h))
-        (mkConst ``False))
+        (mkConst ``False) fuel)
   if let some (p, q) := goal.iff? then
     let forward ← withLocalDeclD `h p fun h => do
-      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) q)
+      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) q fuel)
     let backward ← withLocalDeclD `h q fun h => do
-      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) p)
+      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) p fuel)
     return ← mkAppM ``Iff.intro #[forward, backward]
   if goal.isAppOfArity ``Or 2 then
     -- Whichever disjunct the numbers give; failing that, suppose none of them.
     let parts := junctionParts ``Or goal
     for (part, i) in parts.zipIdx do
       try
-        return ← injectGiven parts i (← byArithmetic facts part)
+        return ← injectGiven parts i (← byArithmetic facts part fuel)
       catch _ => pure ()
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
       let mut extended := facts
@@ -221,9 +221,30 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr) :
         let refuting ← withLocalDeclD `l part fun l => do
           mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l))
         extended := extended.push (← plainly refuting)
-      mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False))
+      mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
     return ofNotNot goal refuted
   if goal.isConstOf ``False then
+    -- Two of the facts may be a thing and its denial, which is no question
+    -- about numbers: a procedure reads a fact as a linear constraint, and a
+    -- denied equality between two long sums is not one, so it passes over the
+    -- very fact that settles it.
+    for (fact, i) in facts.zipIdx do
+      if let some denied := (← instantiateMVars (← inferType fact)).not? then
+        for other in facts.eraseIdx! i do
+          if ← isDefEq denied (← instantiateMVars (← inferType other)) then
+            return ← mkAppOptM ``absurd
+              #[some denied, some (mkConst ``False), some other, some fact]
+    -- A fact that denies a comparison is used by making the comparison: what
+    -- the procedures read are facts of the form `a ≤ b`, and a denial of one
+    -- says nothing to them. What it denies is proved from the rest instead.
+    if fuel > 0 then
+      for (fact, i) in facts.zipIdx do
+        if let some denied := (← instantiateMVars (← inferType fact)).not? then
+          try
+            let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
+            return ← mkAppOptM ``absurd
+              #[some denied, some (mkConst ``False), some held, some fact]
+          catch _ => pure ()
     return ← contradiction facts none
   -- A comparison, which is what the numbers settle.
   try

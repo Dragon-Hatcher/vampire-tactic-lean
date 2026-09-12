@@ -123,7 +123,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 16
+private def version : UInt32 := 18
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -179,7 +179,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 25 * 4
+  let unitLits := units + numUnits * 28 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -499,8 +499,8 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 25 c.idx.toNat 4
-  let count := p.field p.layout.units 25 c.idx.toNat 5
+  let first := p.field p.layout.units 28 c.idx.toNat 4
+  let count := p.field p.layout.units 28 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
@@ -593,7 +593,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 25 u.idx.toNat off
+  u.proof.field u.proof.layout.units 28 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -633,6 +633,39 @@ def varSorts (u : Unit) : Array (UInt32 × String) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.varSorts + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+
+/--
+The sorts of the variables that occur only in what this step's uses bound its
+premises' variables to.
+
+A unifier's image can mention a variable that neither the premise nor the
+conclusion has, and reading that term back needs its sort as much as any other
+variable's. They are apart from `varSorts` because those are the quantifier
+prefix the conclusion is rebuilt with, and these are no part of it.
+-/
+def boundVarSorts (u : Unit) : Array (UInt32 × String) :=
+  let p := u.proof
+  let first := u.field 8
+  let own := u.field 9
+  let count := u.field 25
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.varSorts + (first.toNat + own.toNat + i.val) * 2 * 4
+    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+
+/--
+Where this step's unification constraints are among its literals, and how many
+of them there are.
+
+Under unification with abstraction the substitution does not make the two terms
+one: what it could not unify it defers into disequality literals the inference
+puts into its conclusion. The step is sound because the conclusion failing
+makes each of those pairs equal, and then the two terms really are one. Binary
+resolution puts them before the literals it carried over and every other rule
+after, so where they are has to be said rather than counted from one end.
+-/
+def constraints (u : Unit) : Option (Nat × Nat) :=
+  let count := u.field 27
+  if count == 0 then none else some ((u.field 26).toNat, count.toNat)
 
 /--
 The skolem symbols this step introduced: the existential variable each replaced,

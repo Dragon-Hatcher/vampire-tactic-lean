@@ -4,6 +4,9 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
+/-- Whether an expression is the type `Prop`. -/
+private def isPropType (e : Expr) : Bool := e matches .sort .zero
+
 /--
 One step of negation normal form, with a proof that it changes nothing.
 
@@ -288,17 +291,21 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
     return ← mkAppM ``iff_congr #[← equivNormal a₁ b₁, ← equivNormal a₂ b₂]
   -- Rectification drops a quantifier over a variable its body never mentions,
-  -- so one side can carry a binder the other does not.
+  -- so one side can carry a binder the other does not. Whether it can be
+  -- dropped is settled by its own body and nothing else: were this to wait
+  -- until the other side had run out of binders, a prefix of quantifiers would
+  -- be paired off in order, and an unused one on one side would be taken to
+  -- answer to a used one on the other.
   for (x, y) in [(a, b), (b, a)] do
     if let .forallE _ d body _ := x then
       unless (← isProp d) && !body.hasLooseBVars do
-        if !body.hasLooseBVars && !(y matches .forallE ..) then
+        if !body.hasLooseBVars then
           let dropped ← mkAppOptM ``forall_const
             #[some body, some d, some (← nonempty d)]
           let related ← if x == a then equivNormal body y else equivNormal y body
           return ← if x == a then mkAppM ``Iff.trans #[dropped, related]
             else mkAppM ``Iff.trans #[related, ← mkAppM ``Iff.symm #[dropped]]
-    if x.isAppOfArity ``Exists 2 && !(y.isAppOfArity ``Exists 2) then
+    if x.isAppOfArity ``Exists 2 then
       if let .lam _ d body _ := x.appArg! then
         unless body.hasLooseBVars do
           let dropped ← mkAppOptM ``exists_const
@@ -439,6 +446,18 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
     | And a b => congruence ``And a b
     | Or a b => congruence ``Or a b
     | Iff a b => congruence ``Iff a b
+    -- Two propositions equal is the two of them each following from the other,
+    -- which is what TPTP has and what the goal may have written as `=`.
+    | Eq α x y =>
+      if isPropType α then
+        let (cx, px) ← sameWayRound x
+        let (cy, py) ← sameWayRound y
+        let bridge ← mkAppM ``Iff.intro
+          #[← mkAppOptM ``iff_of_eq #[some x, some y],
+            ← mkAppOptM ``propext #[some x, some y]]
+        return (mkApp2 (mkConst ``Iff) cx cy,
+          ← mkAppM ``Iff.trans #[bridge, ← mkAppM ``iff_congr #[px, py]])
+      refl e
     | Exists _ p =>
       match p with
       | .lam name τ body _ =>

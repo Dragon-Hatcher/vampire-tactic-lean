@@ -41,8 +41,16 @@ structure Config where
   variables and the sides of its equalities before the search, to give a
   strategy a different run of luck; the proof then speaks of a formula that is
   the goal's under a permutation nothing records, which is no use to replay.
+
+  Unused predicate definition removal is off, because the same pass replaces a
+  pure predicate -- one occurring with a single polarity -- by the truth value
+  that satisfies its occurrences. That preserves satisfiability, which is all a
+  refutation needs, but it is not an entailment: `¬(A ∧ ¬P)` becomes `¬A`,
+  which does not follow from it. What makes the step sound is reinterpreting
+  `P`, and a proof of the goal as it stands cannot do that, so a proof using
+  the step cannot be replayed at all rather than merely not yet.
   -/
-  forced : Array (String × String) := #[("si", "off")]
+  forced : Array (String × String) := #[("si", "off"), ("updr", "off")]
   /-- Further vampire options, as they would be given on its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/
