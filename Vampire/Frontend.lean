@@ -157,7 +157,8 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let outcome ←
       try
         query.preprocessed.goal.withContext
-          (Reconstruct.run query.proof query.symbols Arith.contradiction)
+          (Reconstruct.run query.proof query.symbols Arith.contradiction
+            Arith.rearranged)
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"

@@ -48,6 +48,16 @@ structure Context where
   -/
   contradiction : Array Expr → Option Expr → MetaM Expr := fun _ _ =>
     throwError "no way to prove an arithmetic step was given to replay"
+  /--
+  `a ↔ b` where the two are one comparison with its terms moved across it,
+  which is the shape normalising a literal leaves, and none where they are not.
+
+  Handed in for the same reason as `contradiction`, and asked first: what
+  relates the two is that the difference between their sides is the same, which
+  is a fact about a ring, where a decision procedure would be asked for each
+  way round the equivalence goes.
+  -/
+  rearranged : Expr → Expr → MetaM (Option Expr) := fun _ _ => pure none
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/

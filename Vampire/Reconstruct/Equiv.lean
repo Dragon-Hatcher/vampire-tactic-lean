@@ -246,6 +246,12 @@ If they speak of numbers, what relates them is arithmetic: vampire's
 normalisation states a literal one way where the goal states it the other, and
 puts an equality between the two inequalities it stands between, neither of
 which is a congruence.
+
+Only reached where the two are atoms. A difference in shape -- a quantifier
+over another domain, a junction of another width -- is a difference in what the
+two formulas say of their parts, and asking about the numbers in the whole of
+them asks a decision procedure to prove a nested formula by cases, which for a
+formula of any depth is a question it cannot be asked.
 -/
 private def unrelated (a b : Expr) (why : MessageData) : ReconstructM Expr := do
   try
@@ -319,8 +325,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
       -- An arrow: its left side is negative, which is why this is an ↔.
       return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
     unless ← isDefEq ad bd do
-      return ← unrelated a b
-        m!"equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
+      throwError         m!"equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
     return ← withLocalDeclD `x ad fun x => do
       let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
       mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
@@ -332,8 +337,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
           let inner ← equivNormal (abody.instantiate1 x) (bbody.instantiate1 x)
           mkAppM ``exists_congr #[← mkLambdaFVars #[x] inner]
       | _, _ =>
-        return ← unrelated a b
-          m!"equiv/exists: cannot relate{indentExpr a}\nto{indentExpr b}"
+        throwError "equiv/exists: cannot relate{indentExpr a}\nto{indentExpr b}"
     for fn in [``And, ``Or] do
       if a.isAppOfArity fn 2 || b.isAppOfArity fn 2 then
         let ap := junctionParts fn a
@@ -349,9 +353,8 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
               return ← mkAppM ``Iff.trans
                 #[aSays, ← mkAppM ``Iff.trans
                   #[core, ← mkAppM ``Iff.symm #[bSays]]]
-          return ← unrelated a b
-            m!"junctions have {ap.size} and {bp.size} parts:\
-              {indentExpr a}\nand{indentExpr b}"
+          throwError "junctions have {ap.size} and {bp.size} parts:\
+            {indentExpr a}\nand{indentExpr b}"
         -- Part by part, in order. The translation emits a junction in the
         -- order vampire keeps it, so there is nothing to align: were the two
         -- to disagree, an `input` step would say so rather than a guess being

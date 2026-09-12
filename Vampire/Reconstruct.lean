@@ -182,7 +182,8 @@ Fails if the proof mentions a name vampire introduced itself, since nothing in
 the goal corresponds to it.
 -/
 def run (proof : Proof) (symbols : Symbols)
-    (contradiction : Array Expr → Option Expr → MetaM Expr) :
+    (contradiction : Array Expr → Option Expr → MetaM Expr)
+    (rearranged : Expr → Expr → MetaM (Option Expr)) :
     MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
@@ -198,7 +199,7 @@ def run (proof : Proof) (symbols : Symbols)
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, contradiction
+    (go.run { symbols, proof, givens, contradiction, rearranged
               flipped := proof.polarityFlipBoundary }).run {}
   return some outcome
 
