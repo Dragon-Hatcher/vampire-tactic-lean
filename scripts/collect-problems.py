@@ -28,7 +28,7 @@ import os, random, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent          # the `lean/` package
-OUT = HERE / "problems"
+OUT = HERE / "problems" / "tptp"
 NEXT_DOOR = HERE.parent.parent / "vampire-tactic"
 
 TPTP = Path(os.environ.get("TPTP_DIR", NEXT_DOOR / "tptp" / "TPTP-v9.3.1"))
