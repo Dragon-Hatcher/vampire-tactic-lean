@@ -874,11 +874,46 @@ struct Encoder {
     if (const Stack<InferenceStore::PremiseUse>* recorded =
           InferenceStore::instance()->premiseUses(u)) {
       DHMap<unsigned, TermList, FnvHash, IdentityHash> boundSorts;
+      // The premises, by the number a use names them with: where an image is a
+      // bare variable there is no term to walk, and the sort has to come from
+      // the premise variable the image was bound to.
+      DHMap<unsigned, Unit*> premiseByNumber;
+      Inference::Iterator uit = inference.iterator();
+      while (inference.hasNext(uit)) {
+        Unit* premise = inference.next(uit);
+        premiseByNumber.set(premise->number(), premise);
+      }
       for (const InferenceStore::PremiseUse& use : *recorded) {
-        for (const auto& [var, term] : use.bindings)
-          if (term.isTerm())
+        // The premise's own variable sorts, read once and only where a bare
+        // variable image asks for them.
+        DHMap<unsigned, TermList, FnvHash, IdentityHash> premiseSorts;
+        bool readPremiseSorts = false;
+        auto premiseSortOf = [&](unsigned var) {
+          if (!readPremiseSorts) {
+            Unit* premise = nullptr;
+            if (premiseByNumber.find(use.premise, premise) && premise)
+              SortHelper::collectVariableSorts(premise, premiseSorts);
+            readPremiseSorts = true;
+          }
+          TermList sort;
+          return premiseSorts.find(var, sort) ? sort : TermList::empty();
+        };
+        for (const auto& [var, term] : use.bindings) {
+          if (term.isTerm()) {
             SortHelper::collectVariableSorts(const_cast<Term*>(term.term()),
               boundSorts);
+          } else if (term.isVar()) {
+            // A variable is not a term, so there is nothing to walk: an
+            // inference that renames a premise apart -- superposition from a
+            // clause into itself, say -- binds a variable to a variable, and
+            // that image occurs in no term of either premise or conclusion.
+            // Substitution preserves sorts, so the image takes the sort the
+            // premise gives the variable it replaces.
+            TermList sort = premiseSortOf(var);
+            if (sort.isNonEmpty())
+              boundSorts.set(term.var(), sort);
+          }
+        }
         if (use.term.isTerm())
           SortHelper::collectVariableSorts(const_cast<Term*>(use.term.term()),
             boundSorts);
