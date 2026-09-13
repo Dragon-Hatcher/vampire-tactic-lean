@@ -1,0 +1,21 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs": "7b24f71d195cc9cd.so",
+ "log":
+ [{"message":
+   ".> /home/daniel/.elan/toolchains/leanprover--lean4---v4.33.0/bin/clang -shared -o /home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Step.so @/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Step.so.rsp",
+   "level": "trace"}],
+ "inputs":
+ [["linkObjs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/ir/VampireReplay/Reconstruct/Step.c.o.export",
+     "7c21046f583b0998"]]],
+  ["linkLibs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Carry.so",
+     "e8ce057d2c01a8c1"],
+    ["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Equiv.so",
+     "b55f04d9ca61600b"]]],
+  ["traceArgs: #[]", "00000000000006bb"],
+  ["Lean 4.33.0, commit d8b18978322de05a8f3dba51ef03cf5461676c17",
+   "3eca9d16ab6c877d"],
+  ["x86_64-unknown-linux-gnu", "53a0e8937c307c28"]],
+ "depHash": "f5e3696c3aea895a"}

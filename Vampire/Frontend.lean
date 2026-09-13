@@ -2,7 +2,7 @@ import Lean
 import Auto.Tactic
 import Vampire.Arith
 import Vampire.Preprocess
-import Vampire.Reconstruct
+import VampireReplay.Reconstruct
 import Vampire.Worker
 
 namespace Vampire
@@ -37,6 +37,13 @@ structure TacticConfig extends Config where
   mono : Bool := false
   /-- Show the TPTP problem instead of running vampire. Useful for debugging. -/
   showQuery : Bool := false
+  /--
+  Check each step of the replay as it is built, so that a rule building an
+  ill-typed term is reported with its name instead of reaching the kernel
+  anonymously. Costs about a fifth of the replay; see
+  `Vampire.Reconstruct.Context.checkSteps`.
+  -/
+  checkSteps : Bool := false
 deriving Inhabited
 
 /-- What running vampire on a goal produced. -/
@@ -64,7 +71,7 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : Syste
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
-    trace[vampire] "vampire searched for {(← IO.monoMsNow) - before}ms"
+    trace[vampire.timing] "vampire searched for {(← IO.monoMsNow) - before}ms"
     if let some strategy := proof.strategy? then
       trace[vampire] "found by {strategy}"
     trace[vampire] "proof:\n{proof.proofText}"
@@ -158,11 +165,11 @@ def evalVampire : Tactic := fun stx => withMainContext do
       try
         query.preprocessed.goal.withContext
           (Reconstruct.run query.proof query.symbols Arith.contradiction
-            Arith.rearranged)
+            Arith.rearranged cfg.checkSteps)
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
-    trace[vampire] "replay took {(← IO.monoMsNow) - before}ms"
+    trace[vampire.timing] "replay took {(← IO.monoMsNow) - before}ms"
     if ← isTracingEnabledFor `vampire then
       if let some outcome := outcome then
         let (_, (seen, applied)) :=
@@ -203,5 +210,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
 end Tactic
 
 initialize registerTraceClass `vampire
+/-- What each phase cost, without what each phase was working on. -/
+initialize registerTraceClass `vampire.timing
 
 end Vampire

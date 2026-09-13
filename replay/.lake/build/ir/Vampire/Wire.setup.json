@@ -1,0 +1,11 @@
+{"plugins":
+ [{"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_InferenceRule.so"}],
+ "package": "vampireReplay",
+ "options": {},
+ "name": "Vampire.Wire",
+ "isModule": false,
+ "importArts":
+ {"Vampire.InferenceRule":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/InferenceRule.olean"]]},
+ "dynlibs": []}

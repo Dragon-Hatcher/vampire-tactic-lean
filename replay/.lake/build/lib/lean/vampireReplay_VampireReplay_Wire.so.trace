@@ -1,0 +1,19 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs": "f825f08665614adf.so",
+ "log":
+ [{"message":
+   ".> /home/daniel/.elan/toolchains/leanprover--lean4---v4.33.0/bin/clang -shared -o /home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Wire.so @/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Wire.so.rsp",
+   "level": "trace"}],
+ "inputs":
+ [["linkObjs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/ir/VampireReplay/Wire.c.o.export",
+     "3a23d70ef74f09a3"]]],
+  ["linkLibs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_InferenceRule.so",
+     "bc1bac596bd73a67"]]],
+  ["traceArgs: #[]", "00000000000006bb"],
+  ["Lean 4.33.0, commit d8b18978322de05a8f3dba51ef03cf5461676c17",
+   "3eca9d16ab6c877d"],
+  ["x86_64-unknown-linux-gnu", "53a0e8937c307c28"]],
+ "depHash": "c4deff580bf4d1d3"}

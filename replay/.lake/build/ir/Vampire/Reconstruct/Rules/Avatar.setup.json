@@ -1,0 +1,55 @@
+{"plugins":
+ [{"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Translate.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_InferenceRule.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Wire.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Monad.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Stated.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Choice.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Junction.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Literal.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Equiv.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Carry.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Step.so"},
+  {"path":
+   "/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_Vampire_Reconstruct_Basic.so"}],
+ "package": "vampireReplay",
+ "options": {},
+ "name": "Vampire.Reconstruct.Rules.Avatar",
+ "isModule": false,
+ "importArts":
+ {"Vampire.Wire":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Wire.olean"]],
+  "Vampire.Translate":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Translate.olean"]],
+  "Vampire.Reconstruct.Step":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Step.olean"]],
+  "Vampire.Reconstruct.Stated":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Stated.olean"]],
+  "Vampire.Reconstruct.Monad":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Monad.olean"]],
+  "Vampire.Reconstruct.Literal":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Literal.olean"]],
+  "Vampire.Reconstruct.Junction":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Junction.olean"]],
+  "Vampire.Reconstruct.Equiv":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Equiv.olean"]],
+  "Vampire.Reconstruct.Choice":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Choice.olean"]],
+  "Vampire.Reconstruct.Carry":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Carry.olean"]],
+  "Vampire.Reconstruct.Basic":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/Reconstruct/Basic.olean"]],
+  "Vampire.InferenceRule":
+  [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/Vampire/InferenceRule.olean"]]},
+ "dynlibs": []}

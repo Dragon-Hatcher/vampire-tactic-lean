@@ -1,5 +1,5 @@
 import Auto.Tactic
-import Vampire.Translate
+import VampireReplay.Translate
 
 namespace Vampire.Preprocess
 

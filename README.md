@@ -150,9 +150,15 @@ built worker is made of and what each piece is under.
 
 ## Repository
 
-- `Vampire/` — the tactic. `Translate.lean` goes to TPTP, `Wire.lean` decodes
-  what the prover wrote, and `Reconstruct/` replays it, one module per family of
-  inference rules.
+- `Vampire/` — the tactic: the goal it is given, the decision procedures it
+  hands to replay, and the syntax.
+- `replay/` — a package of its own holding the replay: `Translate.lean` goes to
+  TPTP, `Wire.lean` decodes what the prover wrote, and `Reconstruct/` replays
+  it, one module per family of inference rules. Separate so that it can be
+  precompiled and so run as native code rather than in the interpreter, which
+  is worth about three times the replay; that is possible only because none of
+  it imports Mathlib, the decision procedures being handed in rather than
+  called.
 - `worker/` — the C++ program that runs one proof attempt and writes the
   derivation out in a flat encoding.
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100

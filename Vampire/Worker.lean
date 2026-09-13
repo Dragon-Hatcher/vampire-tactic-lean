@@ -1,5 +1,5 @@
 import Lean.Util.Path
-import Vampire.Wire
+import VampireReplay.Wire
 
 namespace Vampire
 

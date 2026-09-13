@@ -1,0 +1,19 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs": "5f547f9a9a09758d.so",
+ "log":
+ [{"message":
+   ".> /home/daniel/.elan/toolchains/leanprover--lean4---v4.33.0/bin/clang -shared -o /home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Rules_Subsumption.so @/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Rules_Subsumption.so.rsp",
+   "level": "trace"}],
+ "inputs":
+ [["linkObjs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/ir/VampireReplay/Reconstruct/Rules/Subsumption.c.o.export",
+     "f796a572a4f936d7"]]],
+  ["linkLibs",
+   [["/home/daniel/Documents/Programming/vampire-redux/lean/replay/.lake/build/lib/lean/vampireReplay_VampireReplay_Reconstruct_Basic.so",
+     "099d5e7e7ac0d04d"]]],
+  ["traceArgs: #[]", "00000000000006bb"],
+  ["Lean 4.33.0, commit d8b18978322de05a8f3dba51ef03cf5461676c17",
+   "3eca9d16ab6c877d"],
+  ["x86_64-unknown-linux-gnu", "53a0e8937c307c28"]],
+ "depHash": "8c8d9c08a01c4b35"}

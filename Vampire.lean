@@ -1,6 +1,6 @@
-import Vampire.Wire
+import VampireReplay.Wire
 import Vampire.Worker
-import Vampire.Translate
+import VampireReplay.Translate
 import Vampire.Preprocess
-import Vampire.Reconstruct
+import VampireReplay.Reconstruct
 import Vampire.Frontend
