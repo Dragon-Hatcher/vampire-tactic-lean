@@ -354,9 +354,11 @@ nested junction into a wider one, so the two sides of such a step differ in
 exactly that.
 -/
 partial def junctionParts (fn : Name) (e : Expr) : Array Expr :=
-  if e.isAppOfArity fn 2 then
-    junctionParts fn e.appFn!.appArg! ++ junctionParts fn e.appArg!
-  else
-    #[e]
+  let rec go (e : Expr) (acc : Array Expr) : Array Expr :=
+    if e.isAppOfArity fn 2 then
+      go e.appArg! (go e.appFn!.appArg! acc)
+    else
+      acc.push e
+  go e #[]
 
 end Vampire.Reconstruct
