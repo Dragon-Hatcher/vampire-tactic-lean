@@ -132,6 +132,13 @@ how to tell a slow translation from a slow search from a slow replay.
 | `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
 | `vampire failed: …` | the worker could not be run at all |
 
+## Licence
+
+The Lean code here, and `worker/worker.cpp`, are MIT; see `LICENSE`. Vampire
+itself is BSD 3-Clause and is fetched at build time rather than vendored, so
+what this repository distributes is only the MIT part. `NOTICE` records what the
+built worker is made of and what each piece is under.
+
 ## Repository
 
 - `Vampire/` — the tactic. `Translate.lean` goes to TPTP, `Wire.lean` decodes
