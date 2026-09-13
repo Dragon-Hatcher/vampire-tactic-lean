@@ -1,0 +1,28 @@
+This package builds and runs Vampire, and the `vampire-worker` binary it produces
+is Vampire with one extra translation unit (`worker/worker.cpp`) linked in.
+
+    Vampire — https://github.com/vprover/vampire
+    Built from https://github.com/Dragon-Hatcher/vampire-tactic-vampire, a fork
+    carrying the changes that make a proof readable back: what each inference
+    used its premises for, the substitutions it applied, and the steps
+    clausification took.
+    Vampire's licence is at https://vprover.github.io/license.html
+
+Vampire's own build fetches two further components as submodules:
+
+    CaDiCaL — https://github.com/arminbiere/cadical
+    VIRAS — https://github.com/joe-hauns/viras
+
+`Vampire/Preprocess.lean` follows lean-smt in how it reduces a goal to the
+smallest query that states it. lean-smt is used under the Apache License 2.0.
+
+    lean-smt — https://github.com/ufmg-smite/lean-smt
+    Copyright (c) 2021-2026 by the authors listed in that project's AUTHORS file
+    and their institutional affiliations.
+
+The problems under `problems/` are not this project's work. They are test data,
+each kept beside the file it was made from.
+
+    TPTP — https://www.tptp.org, Geoff Sutcliffe. `problems/tptp/`, from
+    TPTP v9.3.1.
+    SMT-LIB — https://smtlib.cs.uiowa.edu. `problems/smtlib/`.

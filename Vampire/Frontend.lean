@@ -175,7 +175,9 @@ def evalVampire : Tactic := fun stx => withMainContext do
     unless outcome.unimplemented.isEmpty do
       -- The proof term holds a `sorry` for each of these, so say so rather
       -- than leaving the goal looking closed.
-      logWarning m!"vampire's proof was replayed except for         {outcome.unimplemented}, which are admitted"
+      logWarning m!"vampire's proof was replayed except for \
+        {outcome.unimplemented}, which this tactic does not implement yet; \
+        those steps are admitted, so the proof holds a `sorry`"
       trace[vampire] "admitted rules: {outcome.unimplemented}"
     query.preprocessed.goal.assign outcome.proof
     mv.assign (.mvar query.copy)
