@@ -409,6 +409,14 @@ end Proof
 
 namespace Term
 
+/--
+The term's place among the proof's terms.
+
+Vampire shares its terms, so two occurrences of one term are one term here too,
+and this says which. What rebuilds a term keys its answer on it.
+-/
+def index (t : Term) : UInt32 := t.idx
+
 @[inline] private def field (t : Term) (off : Nat) : UInt32 :=
   t.proof.field t.proof.layout.terms 4 t.idx.toNat off
 

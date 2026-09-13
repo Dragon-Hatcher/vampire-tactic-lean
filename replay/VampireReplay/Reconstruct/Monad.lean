@@ -90,6 +90,20 @@ structure State where
   conclusions : Std.HashMap UInt32 Expr := {}
   /-- The one term standing for each shape a rebuilt term has taken. -/
   shared : Std.HashMap Expr Expr := {}
+  /--
+  The Lean term each of vampire's ground terms rebuilds to, by vampire's index
+  for it.
+
+  `shared` gives one term per *shape*, but only once the shape has been built:
+  the whole subtree is rebuilt before it turns out to be one already seen. On
+  the corpus that is most of what rebuilding does -- one problem builds
+  1,935,209 terms of which 13,912 are distinct -- and a ground term's rebuilding
+  does not depend on anything but which term it is, so it is done once.
+
+  Only ground terms. What a term with variables in it rebuilds to depends on
+  what those variables stand for, which differs from one step to the next.
+  -/
+  groundTerms : Std.HashMap UInt32 Expr := {}
   /-- What says a sort is inhabited, for the sorts that have needed it. -/
   nonempty : Std.HashMap Expr Expr := {}
 

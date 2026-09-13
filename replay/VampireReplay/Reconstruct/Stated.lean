@@ -152,18 +152,34 @@ def interpreted (name : String) (args : Array Expr) :
     return some (← mkAppM ``HDiv.hDiv
       #[← wholeNumeral τ n, ← wholeNumeral τ (Int.ofNat d)])
 
-/-- Rebuilds a vampire term as a Lean expression. -/
-partial def term (vars : Vars) (t : Term) : ReconstructM Expr := do
+/-- A term, and whether it is ground -- which is what makes it worth keeping. -/
+private partial def termGround (vars : Vars) (t : Term) :
+    ReconstructM (Expr × Bool) := do
   if t.isVar then
     let some x := vars[t.var]?
       | throwError "variable X{t.var} has no recorded sort"
-    return x
+    return (x, false)
+  if let some e := (← get).groundTerms[t.index]? then
+    return (e, true)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
-  let args ← t.args.mapM (term vars)
-  if let some e ← interpreted symbol.name args then
-    return ← shared e
-  shared (mkAppN (← symbolExpr symbol.name) args)
+  let mut args := #[]
+  let mut ground := true
+  for arg in t.args do
+    let (e, argGround) ← termGround vars arg
+    args := args.push e
+    ground := ground && argGround
+  let built ←
+    match ← interpreted symbol.name args with
+    | some e => shared e
+    | none => shared (mkAppN (← symbolExpr symbol.name) args)
+  if ground then
+    modify fun s => { s with groundTerms := s.groundTerms.insert t.index built }
+  return (built, ground)
+
+/-- Rebuilds a vampire term as a Lean expression. -/
+partial def term (vars : Vars) (t : Term) : ReconstructM Expr :=
+  (·.1) <$> termGround vars t
 
 /--
 Whether a literal occurs positively, as the step it belongs to means it.
