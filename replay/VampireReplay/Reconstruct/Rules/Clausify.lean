@@ -205,6 +205,15 @@ private structure Replay where
   vars : Vars
   /-- A proof of the formula being clausified. -/
   premise : Expr
+  /--
+  The locals the clause being written out binds for the variables it keeps.
+
+  What is proved along the way says things of them -- a quantifier the
+  clausification instantiated is instantiated at them -- and each clause of a
+  clausification binds its own, so a step kept to be used again is kept as
+  something said of these rather than of those.
+  -/
+  locals : Array Expr := #[]
 
 mutual
 
@@ -530,16 +539,48 @@ private partial def chainTo (c : GenClause) (chain : Array GenClause := #[]) :
   | none => (chain.push c).reverse
 
 /--
-A proof of the last clause of a chain, with each clause along the way bound to
-what proves it.
+What takes one clause of a chain to the next, taking as given both what the
+clause it starts from says and the variables the clause being written out
+keeps.
 
-Bound rather than written out: each step supposes its clause fails, and putting
-that supposition through what came before it would walk the whole of it again
-at every step of the chain.
+A step of a clausification is replayed once and used wherever it is reached:
+the clauses of one clausification are each a step of vampire's, replayed on its
+own, and the chain that led to one is mostly the chain that led to another. Its
+term is kept as a function of what it starts from, so that keeping it is
+walking one step and not the whole chain behind it.
+
+Kept by what the step proves rather than by which step it is, because that is
+what makes one term stand for another; and kept only where it says nothing of
+any other local, since what such a term says of a local of the clause it was
+built for means nothing in another.
+-/
+private def chainStep (r : Replay) (parentSays says : Expr)
+    (prove : Expr → ReconstructM Expr) : ReconstructM Expr := do
+  let stated ← mkArrow parentSays says
+  let occurring := r.locals.filter fun x => stated.containsFVar x.fvarId!
+  let key ← mkLambdaFVars occurring stated
+  if let some taken := (← get).clausifyChain[key]? then
+    return mkAppN taken occurring
+  let step ← withLocalDeclD `h parentSays fun h => do
+    mkLambdaFVars #[h] (← prove h)
+  let abstracted ← instantiateMVars (← mkLambdaFVars occurring step)
+  -- Nor a term with a hole in it: what fills the hole is settled where the
+  -- term was built, and a term used again elsewhere would carry that with it.
+  unless abstracted.hasExprMVar
+      || abstracted.hasAnyFVar fun id => r.locals.any (·.fvarId! == id) do
+    modify fun s => { s with clausifyChain := s.clausifyChain.insert key abstracted }
+  return step
+
+/--
+A proof of the last clause of a chain, each clause along the way proved from
+the one before it.
+
+By the step that reached it rather than by the chain behind it: each step
+supposes its clause fails, and putting that supposition through what came
+before it would walk the whole of it again at every step of the chain.
 -/
 private partial def proveChain (r : Replay) (chain : Array GenClause) (i : Nat)
-    (parent? : Option Expr) (parentParts : Array Expr) (bound : Array Expr) :
-    ReconstructM Expr := do
+    (parent? : Option Expr) (parentParts : Array Expr) : ReconstructM Expr := do
   let some c := chain[i]?
     | throwError "a clausification without a clause"
   -- Each clause of the chain says what it says once: it is the conclusion of
@@ -548,11 +589,18 @@ private partial def proveChain (r : Replay) (chain : Array GenClause) (i : Nat)
     match c.parent? with
     | some p => genPartsFrom r.sorts r.vars c p.literals parentParts
     | none => genParts r.sorts r.vars c
-  let value ← prove r c parent? parts parentParts
+  let says := junction ``Or ``False parts
+  let value ←
+    match parent? with
+    | none => prove r c none parts parentParts
+    | some parentProof =>
+      let parentSays := junction ``Or ``False parentParts
+      let step ← chainStep r parentSays says fun h =>
+        prove r c (some h) parts parentParts
+      pure (mkApp step parentProof)
   if i + 1 == chain.size then
-    return ← mkLetFVars bound value (usedLetOnly := false)
-  withLetDecl (Name.mkSimple s!"g{i}") (junction ``Or ``False parts) value fun g =>
-    proveChain r chain (i + 1) (some g) parts (bound.push g)
+    return value
+  proveChain r chain (i + 1) (some value) parts
 
 /-!
 The other clausifier, `CNF::clausify`, walks a formula in negation normal form
@@ -651,9 +699,8 @@ def clausify (step : Step) : ReconstructM Expr := do
       -- one the clause kept stands for the local the conclusion binds for it.
       for (v, image) in clause.bindings do
         vars := vars.insert v (← term vars image)
-      let proof ← proveChain { sorts, vars, premise := premiseProof }
-        (chainTo clause) 0 none #[] #[]
-      let place := placeLiteral target
+      let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs }
+        (chainTo clause) 0 none #[]
       mkLambdaFVars xs
         (← carryAll (junction ``Or ``False (← genParts sorts vars clause))
           target proof)

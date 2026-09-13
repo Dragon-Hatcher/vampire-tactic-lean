@@ -106,6 +106,21 @@ structure State where
   groundTerms : Std.HashMap UInt32 Expr := {}
   /-- What says a sort is inhabited, for the sorts that have needed it. -/
   nonempty : Std.HashMap Expr Expr := {}
+  /--
+  What takes one generalised clause of a clausification to the next, by what
+  that step proves.
+
+  One clausification writes out a clause for every conjunct it reached, and
+  each of those is a step of vampire's own, replayed on its own. The chains
+  that led there agree wherever they agree, so following each from the formula
+  proves the same things over and over: on one problem of the corpus, a
+  thousand steps replayed where under a quarter of them are distinct.
+
+  Kept by what a step proves rather than by which step it is, because that is
+  what makes one term stand for another: a term taking what one clause says to
+  what the next says does that wherever it is wanted.
+  -/
+  clausifyChain : Std.HashMap Expr Expr := {}
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
