@@ -81,9 +81,18 @@ theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
 literal natural exponent is unfolded into multiplications.
 
 ```lean
+import Mathlib
+import Vampire
+
 theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
   vampire [h, h₂]
 ```
+
+`import Vampire` brings in only the part of Mathlib the tactic itself needs, so
+a goal of your own about `ℝ` wants Mathlib imported too — without it `ℝ` is in
+scope but its order instances are not, and the goal fails to elaborate before
+the tactic is even reached. Mathlib is already a dependency of this package, so
+importing it costs nothing but the import.
 
 Vampire works through a portfolio: the same problem under a few hundred
 combinations of options. Only the one that succeeds is any use, so when a proof
