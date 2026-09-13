@@ -21,9 +21,11 @@ package vampireReplay
 lean_lib VampireReplay where
   roots := #[
     `VampireReplay.InferenceRule, `VampireReplay.Wire,
-    `VampireReplay.Translate, `VampireReplay.Reconstruct]
+    `VampireReplay.Translate, `VampireReplay.Reconstruct,
+    `VampireReplay.Abstract]
   globs := #[
     .one `VampireReplay.InferenceRule, .one `VampireReplay.Wire,
     .one `VampireReplay.Translate,
+    .one `VampireReplay.Abstract,
     .andSubmodules `VampireReplay.Reconstruct]
   precompileModules := true
