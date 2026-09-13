@@ -1,0 +1,558 @@
+import Vampire.Reconstruct.Basic
+import Vampire.Reconstruct.Rules.Clause
+
+/-!
+Rules that introduce a name and say what it means. Nothing further constrains
+the name, so each is an abbreviation: binding it makes the step's own
+conclusion hold, and leaves later uses meaning what vampire meant by them.
+
+Splitting makes a name's definition a premise of every step using it, but
+naming does not -- it replaces a subformula in place and states the definition
+as a separate root. So these are bound in one pass over the proof, before any
+step is replayed.
+-/
+
+namespace Vampire.Reconstruct.Definition
+
+open Lean Meta
+
+/-- The single literal a definition step states. -/
+private partial def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
+  if let some c := u.clause? then
+    let some l := c.literals[0]?
+      | throwError "definition step {u.number} states no literal"
+    return l
+  if let some f := u.formula? then
+    -- A definition can be stated with its variables quantified.
+    let rec descend (f : Formula) : ReconstructM (Option Literal) := do
+      if let some l := f.literal? then
+        return some l
+      if (← connectiveOf f) matches .«forall» then
+        let some body := f.subformulas[0]? | return none
+        return ← descend body
+      return none
+    if let some l ← descend f then
+      return l
+  throwError "definition step {u.number} does not state an equation"
+
+/--
+Registers what a `function_definition` step introduces.
+
+Vampire mints a fresh symbol and asserts `sF(X₁, …, Xₙ) = t`, taking the
+variables of `t` as arguments. Nothing constrains `sF` beyond that equation, so
+it is an abbreviation: binding it to `fun X₁ … Xₙ => t` makes the step's own
+conclusion hold by reflexivity, and leaves every later use of `sF` meaning what
+vampire meant by it. The equation can be stored either way round, so whichever
+side is the fresh symbol is the one being defined.
+-/
+private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit := do
+  let l ← definitionLiteral u
+  unless l.isEquality do
+    throwError "a function_definition step should state an equality, got {l}"
+  let #[lhs, rhs] := l.args
+    | throwError "equality with {l.args.size} arguments"
+  withVars u.varSorts {} fun vars _ => do
+    let fresh? (t : Term) : ReconstructM (Option (String × Array Term)) := do
+      if t.isVar then return none
+      let some symbol := t.symbol? | return none
+      if ← isGoalSymbol symbol.name then return none
+      return some (symbol.name, t.args)
+    let (name, args, body) ←
+      match ← fresh? lhs, ← fresh? rhs with
+      | some (name, args), _ => pure (name, args, rhs)
+      | _, some (name, args) => pure (name, args, lhs)
+      | none, none =>
+        throwError "a function_definition step should introduce a symbol, \
+          but both sides of {l} are already known"
+    let locals ← args.mapM fun arg => do
+      unless arg.isVar do
+        throwError "function_definition applied {name} to {arg}, not a variable"
+      let some x := vars[arg.var]?
+        | throwError "variable X{arg.var} has no recorded sort"
+      return x
+    let definition ← mkLambdaFVars locals (← term vars body)
+    modify fun s => { s with introduced := s.introduced.insert name definition }
+
+/--
+Registers what an `avatar_definition` step introduces.
+
+Splitting gives a component clause a propositional name and asserts
+`name ↔ component`. As with a function definition the name is an abbreviation,
+so binding it to the component makes the step hold by reflexivity. Splitter
+keeps the definition under the positive name and writes the negation of a
+component as `~name`.
+-/
+private def registerAvatarDefinition (u : Vampire.Unit) : ReconstructM PUnit := do
+  let some f := u.formula?
+    | throwError "an avatar_definition step should state a formula"
+  let connective ← connectiveOf f
+  unless connective matches .iff do
+    throwError "an avatar_definition step should state an equivalence, \
+      got {repr connective}"
+  let #[lhs, rhs] := f.subformulas
+    | throwError "equivalence with {f.subformulas.size} sides"
+  let some name := lhs.name?
+    | throwError "the left side of an avatar_definition should be a name"
+  let body ← withVars u.varSorts {} fun vars _ => formula u.varSorts vars rhs
+  modify fun s => { s with named := s.named.insert name body }
+
+/--
+Registers what a `predicate_definition` step introduces, and says which of the
+two shapes it took.
+
+Naming replaces a subformula by a fresh predicate applied to the subformula's
+free variables. It states the definition either as `∀ vs, sP(vs) ↔ f`, or, when
+one direction suffices, as `∀ vs, ¬sP(vs) ∨ f` with `f`'s disjuncts spliced in
+alongside. Either way the name abbreviates `f`.
+-/
+private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit := do
+  let some f := u.formula?
+    | throwError "a predicate_definition step should state a formula"
+  Reconstruct.withVars u.varSorts {} fun vars _ => do
+    -- The definition is quantified over the free variables of what it names.
+    let mut f := f
+    repeat
+      unless (← connectiveOf f) matches .«forall» do break
+      let some body := f.subformulas[0]? | throwError "quantifier without a body"
+      f := body
+    let (name, body) ←
+      match ← connectiveOf f with
+      | .iff =>
+        let #[lhs, rhs] := f.subformulas
+          | throwError "equivalence with {f.subformulas.size} sides"
+        pure (lhs, ← Reconstruct.formula u.varSorts vars rhs)
+      | .or =>
+        let some negated := f.subformulas[0]?
+          | throwError "a naming definition should start with its own name"
+        unless (← connectiveOf negated) matches .not do
+          throwError "a naming definition should start with its negated name"
+        let some name := negated.subformulas[0]?
+          | throwError "negation without a subformula"
+        let rest ← (f.subformulas.extract 1 f.subformulas.size).mapM
+          (Reconstruct.formula u.varSorts vars)
+        pure (name, Reconstruct.junction ``Or ``False rest)
+      | c => throwError "unexpected naming definition shape {repr c}"
+    let some l := name.literal?
+      | throwError "a naming definition's name should be an atom"
+    let some symbol := l.symbol?
+      | throwError "the name has an unknown predicate {l.predicate}"
+    if ← isGoalSymbol symbol.name then
+      throwError "a predicate_definition step should introduce a predicate, \
+        but {symbol.name} comes from the goal"
+    let args ← l.args.mapM fun arg => do
+      unless arg.isVar do
+        throwError "the name {symbol.name} was applied to {arg}, not a variable"
+      let some x := vars[arg.var]?
+        | throwError "variable X{arg.var} has no recorded sort"
+      return x
+    let definition ← mkLambdaFVars args body
+    modify fun s => { s with introduced := s.introduced.insert symbol.name definition }
+
+/--
+Proves a definition, which once its name is bound says only that something is
+itself: `a = a`, `a ↔ a`, or, for a naming definition stated in one direction,
+`¬a ∨ a`.
+-/
+def byDefinition (conclusion : Expr) : ReconstructM Expr :=
+  forallTelescopeReducing conclusion fun xs body => do
+    let proof ←
+      if let some (_, lhs, _) := body.eq? then
+        mkEqRefl lhs
+      else if let some (lhs, _) := body.iff? then
+        mkAppOptM ``Iff.refl #[some lhs]
+      else if body.isAppOfArity ``Or 2 then
+        let lhs := body.appFn!.appArg!
+        let rhs := body.appArg!
+        unless lhs.isAppOfArity ``Not 1 do
+          throwError "expected a negated name, got{indentExpr lhs}"
+        unless ← isDefEq lhs.appArg! rhs do
+          throwError "a definition should name its own body, but got\
+            {indentExpr lhs.appArg!}\nagainst{indentExpr rhs}"
+        mkAppM ``Or.symm #[← mkAppOptM ``Classical.em #[some rhs]]
+      else
+        throwError "expected an equation, an equivalence or a disjunction, \
+          got{indentExpr body}"
+    mkLambdaFVars xs proof
+
+/--
+The equations `definition_unfolding` unfolds with, by the symbol each defines.
+
+`FunctionDefinition::applyDefinitions` takes the definitions it used as
+premises of the step, one per use, and each is a unit equation whose left-hand
+side applies the defined symbol to distinct variables.
+-/
+private def definitions (step : Step) :
+    ReconstructM (Std.HashMap String
+      (Vampire.Unit × Array UInt32 × Term × Expr × Bool)) := do
+  let mut out := {}
+  for (parent, (proof, _)) in (step.unit.parents.zip step.premises).extract 1 do
+    let some clause := parent.clause?
+      | throwError "a definition premise of definition_unfolding is not a clause"
+    let some l := clause.literals[0]?
+      | throwError "a definition premise of definition_unfolding states no literal"
+    unless clause.literals.size == 1 && l.isEquality && l.polarity do
+      throwError "a definition premise of definition_unfolding is not an equation"
+    let #[left, right] := l.args
+      | throwError "equality with {l.args.size} arguments"
+    -- Either side of an equation can be the symbol it defines, and the
+    -- equation alone does not say which; the step records it.
+    let some use := step.unit.premiseUses.find? (·.premise == parent.number)
+      | throwError "nothing says which side of the definition in step \
+        {parent.number} is the symbol it defines"
+    let some side := use.term
+      | throwError "nothing says which side of the definition in step \
+        {parent.number} is the symbol it defines"
+    let (defined, body, flipped) ←
+      if side == left then pure (left, right, false)
+      else if side == right then pure (right, left, true)
+      else throwError "what a definition defines is neither side of it"
+    let some symbol := defined.symbol?
+      | throwError "what a definition defines is not an applied symbol"
+    let args ← defined.args.mapM fun arg => do
+      unless arg.isVar do
+        throwError "the definition of {symbol.name} applies it to {arg}, \
+          not a variable"
+      return arg.var
+    out := out.insert symbol.name (parent, args, body, proof, flipped)
+  return out
+
+/--
+What a symbol applies to its arguments, for a congruence over them.
+
+For a symbol the goal gave a meaning to that is the symbol itself; for one TPTP
+interprets, it is whatever Lean writes the operation with, which is read off an
+application of it -- `$sum` of two terms is `HAdd.hAdd` at their type, and the
+type and the instance belong to the head rather than to the arguments.
+-/
+private def headOf (name : String) (arity : Nat) (args : Array Expr) :
+    ReconstructM Expr := do
+  match ← interpreted name args with
+  | some applied =>
+    let applied ← instantiateMVars applied
+    let whole := applied.getAppArgs
+    if whole.size < arity then return applied
+    return mkAppN applied.getAppFn (whole.extract 0 (whole.size - arity))
+  | none => symbolExpr name
+
+/--
+`t` at the unfolded definitions, with a proof that it equals what unfolding
+makes of it.
+
+The definition's right-hand side is not unfolded again -- the definitions were
+unfolded in dependency order before any clause was -- but the arguments the
+symbol was applied to are.
+-/
+private partial def unfold
+    (defs : Std.HashMap String
+      (Vampire.Unit × Array UInt32 × Term × Expr × Bool))
+    (vars : Vars) (t : Term) : ReconstructM (Expr × Expr) := do
+  if t.isVar then
+    let e ← term vars t
+    return (e, ← mkEqRefl e)
+  let some symbol := t.symbol?
+    | throwError "term has unknown functor {t.functor}"
+  let head ← headOf symbol.name t.args.size (← t.args.mapM (term vars))
+  let mut args := #[]
+  let mut congruence ← mkEqRefl head
+  for arg in t.args do
+    let (unfolded, proof) ← unfold defs vars arg
+    args := args.push unfolded
+    congruence ← mkCongr congruence proof
+  match defs[symbol.name]? with
+  | none => return (mkAppN head args, congruence)
+  | some (definition, parameters, body, proof, flipped) =>
+    let bound := Std.HashMap.ofList (parameters.zip args).toList
+    let mut instances := #[]
+    for (v, sortName) in definition.varSorts do
+      match bound[v]? with
+      | some e => instances := instances.push e
+      | none => instances := instances.push (← someElement (← sortType sortName))
+    let equation ← do
+      let instantiated := mkAppN proof instances
+      -- The symbol a definition defines can be either side of it.
+      if flipped then mkAppM ``Eq.symm #[instantiated] else pure instantiated
+    let some (_, defined, _) := (← instantiateMVars (← inferType equation)).eq?
+      | throwError "a definition premise does not state an equation"
+    -- The definition speaks of the symbol at its own arguments, so it applies
+    -- once those have been unfolded.
+    unless ← isDefEq defined (mkAppN head args) do
+      throwError "the definition of {symbol.name} states{indentExpr defined}\n\
+        which is not{indentExpr (mkAppN head args)}"
+    let mut bodyVars : Vars := {}
+    for (v, e) in parameters.zip args do
+      bodyVars := bodyVars.insert v e
+    return (← term bodyVars body, ← mkEqTrans congruence equation)
+
+/--
+`definition_unfolding`: the premise with every use of a defined symbol replaced
+by what defines it.
+
+`FunctionDefinition::applyDefinitions` walks the clause replacing each
+application of a defined symbol by that definition's right-hand side at the
+application's arguments. Its arguments are themselves unfolded, but the
+right-hand side is not looked at again: the definitions were unfolded in
+dependency order before any clause was.
+-/
+def definitionUnfolding (step : Step) : ReconstructM Expr := do
+  let some (clauseProof, _) := step.premises[0]?
+    | throwError "definition_unfolding without a premise"
+  let some parent := step.unit.parents[0]?
+    | throwError "definition_unfolding without a premise"
+  let some clause := parent.clause?
+    | throwError "definition_unfolding should be given a clause"
+  let defs ← definitions step
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let body ← carryWith (← instantiateForall (← conclusionOf parent)
+        (← parent.varSorts.mapM fun (v, sortName) => do
+          match vars[v]? with
+          | some x => pure x
+          | none => someElement (← sortType sortName))) target
+      (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
+        match vars[v]? with
+        | some x => pure x
+        | none => someElement (← sortType sortName)))
+      (fun i h => do
+        let some l := clause.literals[i]?
+          | throwError "the premise has no literal {i}"
+        let mut args := #[]
+        let mut congruence ←
+          if l.isEquality then
+            let some sortName := l.sort?
+              | throwError "equality literal without a recorded argument sort"
+            mkEqRefl (← mkAppOptM ``Eq #[some (← sortType sortName)])
+          else
+            let some symbol := l.symbol?
+              | throwError "literal has unknown predicate {l.predicate}"
+            mkEqRefl (← headOf symbol.name l.args.size
+              (← l.args.mapM (term vars)))
+        for arg in l.args do
+          let (unfolded, proof) ← unfold defs vars arg
+          args := args.push unfolded
+          congruence ← mkCongr congruence proof
+        let atom ←
+          if ← literalPolarity l then pure congruence
+          else mkCongrArg (mkConst ``Not) congruence
+        mkAppM ``Eq.mp #[atom, h])
+    mkLambdaFVars xs body
+
+/--
+A proof of what is kept of a definition, from the definition.
+
+Under the binders both sides share, one direction of an equivalence is what the
+equivalence says either way round.
+-/
+private partial def weaken (premise stated conclusion : Expr) :
+    ReconstructM Expr := do
+  if let (.forallE _ d body _, .forallE n d' body' _) := (← whnf stated, conclusion) then
+    unless (← isProp d) && !body.hasLooseBVars do
+      unless ← isDefEq d d' do
+        throwError "the definition binds{indentExpr d}\nwhere what is kept of \
+          it binds{indentExpr d'}"
+      return ← withLocalDeclD n d' fun x => do
+        let inner ← weaken (mkApp premise x) (body.instantiate1 x) (body'.instantiate1 x)
+        mkLambdaFVars #[x] inner
+  let some (antecedent, consequent) := conclusion.arrow?
+    | throwError "what is kept of a definition is not an implication:\
+      {indentExpr conclusion}"
+  if let some (left, right) := stated.iff? then
+    if (← isDefEq left antecedent) && (← isDefEq right consequent) then
+      return ← mkAppM ``Iff.mp #[premise]
+    if (← isDefEq right antecedent) && (← isDefEq left consequent) then
+      return ← mkAppM ``Iff.mpr #[premise]
+    throwError "neither direction of{indentExpr stated}\nis{indentExpr conclusion}"
+  if ← isDefEq stated conclusion then
+    return premise
+  throwError "cannot keep{indentExpr conclusion}\nof{indentExpr stated}"
+
+/--
+`pure_predicate_removal`: a step that does not follow from its premise.
+
+`PredicateDefinition::replacePurePredicates` replaces a predicate occurring
+with a single polarity by the truth value that satisfies its occurrences. That
+preserves satisfiability, which is all a refutation needs, but it is not an
+entailment: `¬(A ∧ ¬P)` becomes `¬A`, which does not follow from it. What makes
+it sound is reinterpreting `P`, and a proof of the goal as it stands cannot do
+that.
+
+So there is nothing here to build, now or later, and the tactic forces the pass
+off (`updr=off`) rather than meeting the step. Reaching it means the forcing was
+undone.
+-/
+def purePredicateRemoval (step : Step) : ReconstructM Expr := do
+  throwError "step {step.unit.number} replaced a pure predicate by a truth \
+    value, which preserves satisfiability but does not follow from the \
+    premise, so it cannot be replayed; the tactic forces `updr=off` to keep \
+    the pass out of the search"
+
+/--
+`unused_predicate_definition_removal`: one direction of a definition, the only
+one still needed.
+
+`PredicateDefinition` keeps a definition whose predicate is only ever used one
+way round as an implication rather than an equivalence.
+-/
+def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "unused predicate definition removal should have one premise, \
+      got {step.premises.size}"
+  weaken premiseProof (← instantiateMVars premiseStated) (← step.conclusion)
+
+/--
+The term an `inequality_splitting_name_introduction` step named, and the sort it
+has.
+
+`InequalitySplitting::splitLiteral` mints a fresh predicate `p` and asserts the
+one-literal clause `~p(t)`, `t` being the ground side of the inequality it
+split. So the step's own literal is where `t` is written down.
+-/
+private def splitNameOf (u : Vampire.Unit) : ReconstructM (String × Term) := do
+  let l ← definitionLiteral u
+  if l.isEquality then
+    throwError "an inequality_splitting_name_introduction step should state a \
+      predicate, got the equality {l}"
+  if ← literalPolarity l then
+    throwError "an inequality_splitting_name_introduction step should state a \
+      negative literal, got {l}"
+  let some symbol := l.symbol?
+    | throwError "literal has unknown predicate {l.predicate}"
+  let #[t] := l.args
+    | throwError "inequality splitting named a term with \
+      {l.args.size} arguments rather than one; the extra ones are the sorts a \
+      polymorphic equality ranges over, which this fragment does not have"
+  return (symbol.name, t)
+
+/--
+Registers the predicate an `inequality_splitting_name_introduction` introduces.
+
+The predicate is fresh and the one clause asserting it says `~p(t)`, so what
+`p` has to mean for that to hold, and for the split clause to say what the
+clause it was split from said, is `p(x) ↔ x ≠ t`. Binding it to that makes both
+steps hold by unfolding: `~p(t)` becomes `¬(t ≠ t)`, and the literal `p(s)` the
+split put in place of `s ≠ t` becomes `s ≠ t` again.
+-/
+private def registerInequalitySplitting (u : Vampire.Unit) : ReconstructM PUnit := do
+  let (name, t) ← splitNameOf u
+  let body ← withVars u.varSorts {} fun vars _ => term vars t
+  let definition ← withLocalDeclD `x (← inferType body) fun x => do
+    mkLambdaFVars #[x] (mkApp (mkConst ``Not) (← mkEq x body))
+  modify fun s => { s with introduced := s.introduced.insert name definition }
+
+/--
+`inequality_splitting_name_introduction`: that the named term is not unequal to
+itself.
+
+The step states `~p(t)`, and `p` stands for being unequal to `t`, so what it
+says is `¬(t ≠ t)`.
+-/
+def inequalitySplittingName (step : Step) : ReconstructM Expr := do
+  let (_, t) ← splitNameOf step.unit
+  let conclusion ← step.conclusion
+  let some inequality := asNegation conclusion
+    | throwError "an inequality_splitting_name_introduction step should state a \
+      negation, got{indentExpr conclusion}"
+  let body ← withVars step.unit.varSorts {} fun vars _ => term vars t
+  let refl ← mkEqRefl body
+  withLocalDeclD `h inequality fun h =>
+    mkLambdaFVars #[h] (mkApp h refl)
+
+/--
+`inequality_splitting`: the clause with a ground side of an inequality named.
+
+Each split literal `s ≠ t` became `p(s)` for the `p` that names `t`, and `p`
+stands for being unequal to `t`, so the conclusion says what the premise said.
+The name introductions among the premises carry no further weight: what they
+assert is what binding `p` already made true.
+-/
+def inequalitySplitting (step : Step) : ReconstructM Expr := do
+  -- Which premise is the clause is read off the rules rather than off the
+  -- order they came in: the others are the names the split introduced.
+  let some i := step.unit.parents.findIdx? fun p =>
+      p.rule? != some .inequalitySplittingNameIntroduction
+    | throwError "inequality splitting without a clause to split"
+  let some parent := step.unit.parents[i]?
+    | throwError "inequality splitting without a clause to split"
+  let some (proof, stated) := step.premises[i]?
+    | throwError "inequality splitting without a proof of the clause it split"
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    -- Splitting substitutes nothing, so the conclusion keeps the premise's
+    -- variables; it records no unifier because there is none to record.
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ←
+      Clause.instantiateAt parent vars proof stated
+    mkLambdaFVars xs (← carryAll premiseType target premiseAt)
+
+/-- Whether a rule introduces a name by defining it. -/
+def introducesName : InferenceRule → Bool
+  | .functionDefinition | .avatarDefinition | .predicateDefinition => true
+  -- Inequality splitting names a ground side of an inequality with a fresh
+  -- predicate, in a clause of its own.
+  | .inequalitySplittingNameIntroduction => true
+  -- An equality proxy is a predicate defined to be equality, and is named and
+  -- stated the way any other defined predicate is.
+  | .equalityProxyDefinition => true
+  | _ => false
+
+/--
+Binds what a definition step introduces. What is named may itself mention a
+name introduced elsewhere, so this can fail and be worth retrying once more
+names are known.
+-/
+def register (u : Vampire.Unit) : ReconstructM PUnit := do
+  match u.rule? with
+  | some .functionDefinition => registerFunctionDefinition u
+  | some .avatarDefinition => registerAvatarDefinition u
+  | some .predicateDefinition | some .equalityProxyDefinition =>
+    registerPredicateDefinition u
+  | some .inequalitySplittingNameIntroduction => registerInequalitySplitting u
+  | _ => return
+
+/--
+`equality_proxy_replacement`: the premise with equality written as the proxy.
+
+The proxy predicate is bound to equality itself, by the `equality_proxy_definition`
+step that introduced it, so the conclusion and the premise say the same thing and
+differ only by that definition. The definition is a premise of this step too,
+and does nothing here beyond having given the proxy its meaning, so the premise
+restated is the clause among them.
+-/
+def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
+  let some i := step.unit.parents.findIdx? (·.clause?.isSome)
+    | throwError "equality_proxy_replacement has no clause among its premises"
+  let some (proof, stated) := step.premises[i]?
+    | throwError "no premise in position {i}"
+  let conclusion ← step.conclusion
+  if ← isDefEq (← instantiateMVars stated) conclusion then
+    return proof
+  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+
+/--
+`equality_proxy_axiom`: an axiom about the proxy, which is equality.
+
+The proxy is bound to equality itself, so what the axiom states of it -- that
+it is reflexive, say -- is what equality states of itself, and holds of itself.
+The conclusion applies that binding rather than having it reduced, so it is
+reduced here for the shape to be read, and the proof restated at the shape the
+step states: the two are one term to the kernel.
+-/
+def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
+  let conclusion ← step.conclusion
+  let reduced ← Meta.transform conclusion (post := fun e => return .done e.headBeta)
+  mkExpectedTypeHint (← byDefinition reduced) conclusion
+
+/-- Any of the definition rules. -/
+def definitionStep (step : Step) : ReconstructM Expr := do
+  -- Bound already by the pass over the proof, unless what it names mentions a
+  -- symbol only bound while replaying, as a clausified skolem is.
+  register step.unit
+  byDefinition (← step.conclusion)
+
+end Vampire.Reconstruct.Definition

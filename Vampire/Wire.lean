@@ -1,0 +1,907 @@
+import Vampire.InferenceRule
+
+namespace Vampire
+
+/-- Absent index. -/
+def none32 : UInt32 := 0xFFFFFFFF
+
+@[inline] private def readU32 (data : ByteArray) (byteOff : Nat) : UInt32 :=
+  data[byteOff]!.toUInt32
+    ||| (data[byteOff + 1]!.toUInt32 <<< 8)
+    ||| (data[byteOff + 2]!.toUInt32 <<< 16)
+    ||| (data[byteOff + 3]!.toUInt32 <<< 24)
+
+/-- Byte offsets of each section, derived once from the header. -/
+private structure Layout where
+  functions : Nat
+  predicates : Nat
+  sorts : Nat
+  terms : Nat
+  args : Nat
+  literals : Nat
+  formulas : Nat
+  subs : Nat
+  vars : Nat
+  units : Nat
+  unitLits : Nat
+  parents : Nat
+  varSorts : Nat
+  skolems : Nat
+  splits : Nat
+  satClauses : Nat
+  satLits : Nat
+  satPremises : Nat
+  namings : Nat
+  namingArgs : Nat
+  genStates : Nat
+  genLits : Nat
+  choices : Nat
+  uses : Nat
+  bindings : Nat
+  congruences : Nat
+  congruenceArgs : Nat
+  strings : Nat
+  proofText : Nat
+  numFunctions : Nat
+  numPredicates : Nat
+  numSorts : Nat
+  numTerms : Nat
+  numLiterals : Nat
+  numFormulas : Nat
+  numUnits : Nat
+  proofTextLen : Nat
+deriving Inhabited
+
+inductive Error where
+  | error (msg : String)
+deriving Repr, BEq
+
+namespace Error
+
+protected def toString : Error → String
+  | .error msg => msg
+
+instance : ToString Error := ⟨Error.toString⟩
+
+end Error
+
+inductive TerminationReason where
+  | refutation
+  | satisfiable
+  | refutationNotFound
+  | inappropriate
+  | unknown
+  | timeLimit
+  | instructionLimit
+  | memoryLimit
+  | activationLimit
+deriving Inhabited, Repr, BEq, DecidableEq
+
+inductive UnitInputType where
+  | «axiom»
+  | assumption
+  | conjecture
+  | negatedConjecture
+  | claim
+  | extensionalityAxiom
+deriving Inhabited, Repr, BEq, DecidableEq
+
+inductive Connective where
+  | literal | and | or | imp | iff | xor | not
+  | «forall» | «exists» | boolTerm | «false» | «true» | name | noconn
+deriving Inhabited, Repr, BEq, DecidableEq
+
+private def ofIndex (variants : Array α) (i : UInt32) (what : String) :
+    Except Error α :=
+  match variants[i.toNat]? with
+  | some v => .ok v
+  | none => .error (.error s!"unknown {what} {i}")
+
+/--
+A decoded proof: the worker's output buffer plus the offsets into it. All
+accessors read from `data`, so a proof is independent of the process that
+produced it.
+-/
+structure Proof where
+  private mk ::
+  private data : ByteArray
+  private layout : Layout
+  /-- Why vampire stopped. -/
+  terminationReason : TerminationReason
+  /--
+  The number of the first step polarity flipping made, or zero if it never ran.
+
+  Flipping replaces every clause of the problem over the predicates it picks by
+  their complements, which says nothing about the clauses: it says that those
+  predicates now mean the opposite of what they did. So the proof divides in
+  two here, the halves disagreeing over what those predicates mean.
+  -/
+  polarityFlipBoundary : UInt32
+deriving Inhabited
+
+namespace Proof
+
+private def magic : UInt32 := 0x504D4156
+
+private def version : UInt32 := 18
+
+/-- Decodes a buffer written by `vampire-worker`. -/
+def ofByteArray (data : ByteArray) : Except Error Proof := do
+  if data.size < 37 * 4 then
+    .error (.error s!"proof is {data.size} bytes, too short for a header")
+  if readU32 data 0 != magic then
+    .error (.error "proof does not start with the expected magic bytes")
+  let v := readU32 data 4
+  if v != version then
+    .error (.error s!"proof has format version {v}, expected {version}")
+  let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
+  let numRules := word 34
+  if numRules != InferenceRule.count then
+    .error (.error s!"vampire declares {numRules} inference rules but \
+      Vampire/InferenceRule.lean has {InferenceRule.count}; \
+      rerun scripts/gen-inference-rules.py")
+  let numFunctions := word 5
+  let numPredicates := word 6
+  let numSorts := word 7
+  let numTerms := word 8
+  let numArgs := word 9
+  let numLiterals := word 10
+  let numFormulas := word 11
+  let numSubs := word 12
+  let numVars := word 13
+  let numUnits := word 14
+  let numUnitLits := word 15
+  let numParents := word 16
+  let numVarSorts := word 17
+  let numSkolems := word 18
+  let numSplits := word 19
+  let numSatClauses := word 20
+  let numSatLits := word 21
+  let numSatPremises := word 22
+  let numNamings := word 23
+  let numNamingArgs := word 24
+  let numGenStates := word 25
+  let numGenLits := word 26
+  let numChoices := word 27
+  let numUses := word 28
+  let numBindings := word 29
+  let numCongruences := word 30
+  let numCongruenceArgs := word 31
+  let stringsLen := word 32
+  let proofTextLen := word 33
+  let functions := 37 * 4
+  let predicates := functions + numFunctions * 2 * 4
+  let sorts := predicates + numPredicates * 3 * 4
+  let terms := sorts + numSorts * 4
+  let args := terms + numTerms * 4 * 4
+  let literals := args + numArgs * 4
+  let formulas := literals + numLiterals * 5 * 4
+  let subs := formulas + numFormulas * 7 * 4
+  let vars := subs + numSubs * 4
+  let units := vars + numVars * 4
+  let unitLits := units + numUnits * 28 * 4
+  let parents := unitLits + numUnitLits * 4
+  let varSorts := parents + numParents * 4
+  let skolems := varSorts + numVarSorts * 2 * 4
+  let splits := skolems + numSkolems * 2 * 4
+  let satClauses := splits + numSplits * 4
+  let satLits := satClauses + numSatClauses * 5 * 4
+  let satPremises := satLits + numSatLits * 4
+  let namings := satPremises + numSatPremises * 4
+  let namingArgs := namings + numNamings * 4 * 4
+  let genStates := namingArgs + numNamingArgs * 4
+  let genLits := genStates + numGenStates * 8 * 4
+  let choices := genLits + numGenLits * 2 * 4
+  let uses := choices + numChoices * 2 * 4
+  let bindings := uses + numUses * 6 * 4
+  let congruences := bindings + numBindings * 2 * 4
+  let congruenceArgs := congruences + numCongruences * 5 * 4
+  let strings := congruenceArgs + numCongruenceArgs * 4
+  let pad (n : Nat) : Nat := (n + 3) / 4 * 4
+  let proofText := strings + pad stringsLen
+  let expected := proofText + pad proofTextLen
+  if data.size < expected then
+    .error (.error s!"proof is {data.size} bytes, expected at least {expected}")
+  let reason ← ofIndex
+    #[.refutation, .satisfiable, .refutationNotFound, .inappropriate, .unknown,
+      .timeLimit, .instructionLimit, .memoryLimit, .activationLimit]
+    (readU32 data 8) "termination reason"
+  return {
+    data, terminationReason := reason
+    polarityFlipBoundary := readU32 data (35 * 4)
+    layout := {
+      functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
+      units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
+      satPremises, namings, namingArgs, genStates, genLits, choices, uses,
+      bindings, congruences, congruenceArgs, strings, proofText, numFunctions,
+      numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
+      proofTextLen
+    }
+  }
+
+/-- Reads a NUL-terminated name from the string blob. -/
+private def string (p : Proof) (off : UInt32) : String :=
+  let start := p.layout.strings + off.toNat
+  let rec len (i : Nat) (fuel : Nat) : Nat :=
+    match fuel with
+    | 0 => i
+    | fuel + 1 => if p.data[start + i]! == 0 then i else len (i + 1) fuel
+  let n := len 0 (p.data.size - start)
+  String.fromUTF8! (p.data.extract start (start + n))
+
+/--
+The strategy the proof was found by, as vampire's `strategy` option reads it,
+and `none` when there is no proof.
+
+In portfolio mode the strategy that wins is one of a schedule of them, and
+running it on its own is the same run without the ones it won against.
+-/
+def strategy? (p : Proof) : Option String :=
+  let off := readU32 p.data (36 * 4)
+  if off == none32 then none else some (p.string off)
+
+/-- Vampire's own rendering of the proof, empty when there is no refutation. -/
+def proofText (p : Proof) : String :=
+  String.fromUTF8! <|
+    p.data.extract p.layout.proofText (p.layout.proofText + p.layout.proofTextLen)
+
+end Proof
+
+/-- A symbol's name and arity. -/
+structure Symbol where
+  name : String
+  arity : UInt32
+  /--
+  Whether polarity flipping flipped this predicate, so that every clause after
+  it means the opposite by the predicate than the ones before it do.
+  -/
+  flipped : Bool := false
+deriving Repr, Inhabited
+
+/-- A term: a variable, or a functor applied to arguments. -/
+structure Term where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/-- A literal: a predicate applied to arguments, with a polarity. -/
+structure Literal where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/-- A first-order formula, for units that have not been clausified. -/
+structure Formula where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/-- A clause: a disjunction of literals. -/
+structure Clause where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/--
+How a step used one of its premises: which of that premise's literals the
+inference acted on, and what the unifier bound each of its variables to.
+
+A generating inference discards the substitution it computes, so without this a
+reconstruction would have to recover it by matching the conclusion back against
+the premises.
+-/
+structure PremiseUse where
+  /-- Vampire's number for the premise. -/
+  premise : UInt32
+  /-- Index of the literal the inference acted on. -/
+  literal : Option UInt32
+  /--
+  The term the inference acted on within that literal.
+
+  A rewriting inference singles out a subterm rather than a whole literal: the
+  subterm rewritten in the premise it rewrites, and the side of the equation
+  doing the rewriting in the premise that one comes from.
+  -/
+  term : Option Term
+  /--
+  Whether the inference rewrote that term throughout the premise rather than
+  only in the literal recorded against it, which is what simultaneous
+  superposition does.
+  -/
+  rewritesWholePremise : Bool
+  bindings : Array (UInt32 × Term)
+
+/--
+One step of the reasoning behind a congruence-closure conflict, which vampire
+states as an axiom: its literals cannot all be false, and the clause itself
+holds what it takes to see that.
+-/
+inductive Congruence where
+  /-- The equality the clause's `literal`th literal denies. -/
+  | input (literal : Nat)
+  /-- `f as = f bs`, from what says each pair of arguments is equal. -/
+  | congruence (lhs rhs : Term) (args : Array (Option Nat))
+  /-- One step and then the other. -/
+  | trans (first second : Nat)
+  /-- A step, the other way round. -/
+  | symm (step : Nat)
+  /-- The clause's `literal`th literal is the equality `step` proves. -/
+  | goalEquality (literal step : Nat)
+  /-- The clause's two literals are one atom under both signs. -/
+  | goalLiterals (negative positive : Nat) (args : Array (Option Nat))
+
+/--
+One state of one of clausification's generalised clauses: a disjunction of
+signed subformulas, together with what the variables it quantifies have been
+bound to.
+
+Clausification starts from the formula itself and replaces one signed
+subformula at a time until nothing but literals is left; each replacement is a
+step that holds on its own, and the clauses that come out are the states with
+nothing left to replace. Which conjunct a clause came from, which way round an
+equivalence was taken and what a quantifier was skolemised at are all here.
+-/
+structure GenClause where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/--
+A clause of the propositional problem splitting hands to a SAT solver, and how
+the solver came by it.
+-/
+structure SatClause where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+/-- Two formulas are the same when they are the same one: they are shared. -/
+instance : BEq Formula where
+  beq a b := a.idx == b.idx
+
+/-- Two terms are the same when they are the same one: they are shared. -/
+instance : BEq Term where
+  beq a b := a.idx == b.idx
+
+/-- A step in the derivation: a clause or formula, and how it was inferred. -/
+structure Unit where
+  private mk ::
+  private proof : Proof
+  private idx : UInt32
+
+namespace Proof
+
+@[inline] private def field (p : Proof) (section_ width i off : Nat) : UInt32 :=
+  readU32 p.data (section_ + (width * i + off) * 4)
+
+/-- The function symbols of the problem's signature. -/
+def function? (p : Proof) (functor : UInt32) : Option Symbol :=
+  if functor.toNat >= p.layout.numFunctions then none
+  else some {
+    name := p.string (p.field p.layout.functions 2 functor.toNat 0)
+    arity := p.field p.layout.functions 2 functor.toNat 1
+  }
+
+/-- The predicate symbols of the problem's signature. -/
+def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
+  if predicate.toNat >= p.layout.numPredicates then none
+  else some {
+    name := p.string (p.field p.layout.predicates 3 predicate.toNat 0)
+    arity := p.field p.layout.predicates 3 predicate.toNat 1
+    flipped := p.field p.layout.predicates 3 predicate.toNat 2 != 0
+  }
+
+/-- The name of the sort vampire numbers `i`. -/
+def sortName? (p : Proof) (i : UInt32) : Option String :=
+  if i.toNat >= p.layout.numSorts then none
+  else some (p.string (readU32 p.data (p.layout.sorts + i.toNat * 4)))
+
+/-- The final step of the derivation, when vampire found a refutation. -/
+def refutation? (p : Proof) : Option Unit :=
+  if readU32 p.data 12 == 0 then none
+  else some ⟨p, readU32 p.data 16⟩
+
+/-- Every step of the derivation. -/
+def units (p : Proof) : Array Unit :=
+  Array.ofFn (n := p.layout.numUnits) fun i => ⟨p, UInt32.ofNat i.val⟩
+
+end Proof
+
+namespace Term
+
+@[inline] private def field (t : Term) (off : Nat) : UInt32 :=
+  t.proof.field t.proof.layout.terms 4 t.idx.toNat off
+
+/-- Whether this term is a variable. -/
+def isVar (t : Term) : Bool := t.field 0 == 0
+
+/-- The variable's number. Only meaningful when `isVar`. -/
+def var (t : Term) : UInt32 := t.field 1
+
+/-- The functor. Only meaningful when not `isVar`. -/
+def functor (t : Term) : UInt32 := t.field 1
+
+/-- The functor's symbol, or `none` for a variable. -/
+def symbol? (t : Term) : Option Symbol :=
+  if t.isVar then none else t.proof.function? t.functor
+
+/-- The number of arguments. -/
+def arity (t : Term) : UInt32 := t.field 3
+
+/-- The arguments, left to right. -/
+def args (t : Term) : Array Term :=
+  let first := t.field 2
+  Array.ofFn (n := t.arity.toNat) fun i =>
+    ⟨t.proof, readU32 t.proof.data (t.proof.layout.args + (first.toNat + i.val) * 4)⟩
+
+protected partial def render (t : Term) : String :=
+  if t.isVar then s!"X{t.var}"
+  else
+    let name := (t.symbol?.map (·.name)).getD s!"f{t.functor}"
+    if t.arity == 0 then name
+    else s!"{name}({String.intercalate ", " (t.args.toList.map Term.render)})"
+
+instance : ToString Term := ⟨Term.render⟩
+
+end Term
+
+namespace Literal
+
+@[inline] private def field (l : Literal) (off : Nat) : UInt32 :=
+  l.proof.field l.proof.layout.literals 5 l.idx.toNat off
+
+/-- The predicate symbol's index. -/
+def predicate (l : Literal) : UInt32 := l.field 0
+
+/-- The predicate's symbol. -/
+def symbol? (l : Literal) : Option Symbol := l.proof.predicate? l.predicate
+
+/-- Whether the literal occurs positively. -/
+def polarity (l : Literal) : Bool := l.field 1 &&& 1 != 0
+
+/-- Whether the literal is an equality. -/
+def isEquality (l : Literal) : Bool := l.field 1 &&& 2 != 0
+
+/-- The number of arguments. -/
+def arity (l : Literal) : UInt32 := l.field 3
+
+/-- The arguments, left to right. -/
+def args (l : Literal) : Array Term :=
+  let first := l.field 2
+  Array.ofFn (n := l.arity.toNat) fun i =>
+    ⟨l.proof, readU32 l.proof.data (l.proof.layout.args + (first.toNat + i.val) * 4)⟩
+
+/--
+The sort of an equality's arguments. A clause `X = Y` gives no other way to
+recover it, so the worker records it.
+-/
+def sort? (l : Literal) : Option String :=
+  let i := l.field 4
+  if i == none32 then none else l.proof.sortName? i
+
+protected def render (l : Literal) : String :=
+  let name := (l.symbol?.map (·.name)).getD s!"p{l.predicate}"
+  let args := l.args.toList.map toString
+  match l.isEquality, args with
+  | true, [lhs, rhs] => s!"{lhs} {if l.polarity then "=" else "!="} {rhs}"
+  | _, _ =>
+    let atom :=
+      if l.arity == 0 then name
+      else s!"{name}({String.intercalate ", " args})"
+    if l.polarity then atom else s!"~{atom}"
+
+instance : ToString Literal := ⟨Literal.render⟩
+
+end Literal
+
+namespace Clause
+
+/-- The literals of the clause. -/
+def literals (c : Clause) : Array Literal :=
+  let p := c.proof
+  let first := p.field p.layout.units 28 c.idx.toNat 4
+  let count := p.field p.layout.units 28 c.idx.toNat 5
+  Array.ofFn (n := count.toNat) fun i =>
+    ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
+
+/-- The number of literals. -/
+def size (c : Clause) : Nat := c.literals.size
+
+/-- Whether this is the empty clause. -/
+def isEmpty (c : Clause) : Bool := c.size == 0
+
+instance : ToString Clause where
+  toString c :=
+    if c.isEmpty then "$false"
+    else String.intercalate " | " (c.literals.toList.map toString)
+
+end Clause
+
+namespace Formula
+
+@[inline] private def field (f : Formula) (off : Nat) : UInt32 :=
+  f.proof.field f.proof.layout.formulas 7 f.idx.toNat off
+
+/-- The formula's top-level connective. -/
+def connective (f : Formula) : Except Error Connective :=
+  ofIndex
+    #[.literal, .and, .or, .imp, .iff, .xor, .not, .«forall», .«exists»,
+      .boolTerm, .«false», .«true», .name, .noconn]
+    (f.field 0) "connective"
+
+/-- The atom, when the connective is `literal`. -/
+def literal? (f : Formula) : Option Literal :=
+  let l := f.field 1
+  if l == none32 then none else some ⟨f.proof, l⟩
+
+/--
+The name of a named subformula: a definition vampire introduced while
+clausifying. `none` for every other connective.
+-/
+def name? (f : Formula) : Option String :=
+  let off := f.field 6
+  if off == none32 then none else some (f.proof.string off)
+
+/-- The immediate subformulas. -/
+def subformulas (f : Formula) : Array Formula :=
+  let p := f.proof
+  let first := f.field 2
+  let count := f.field 3
+  Array.ofFn (n := count.toNat) fun i =>
+    ⟨p, readU32 p.data (p.layout.subs + (first.toNat + i.val) * 4)⟩
+
+/-- The variables bound by a quantifier. -/
+def boundVars (f : Formula) : Array UInt32 :=
+  let p := f.proof
+  let first := f.field 4
+  let count := f.field 5
+  Array.ofFn (n := count.toNat) fun i =>
+    readU32 p.data (p.layout.vars + (first.toNat + i.val) * 4)
+
+/-- Renders the formula in TPTP-like syntax. -/
+protected partial def render (f : Formula) : String :=
+  let subs := f.subformulas
+  let sub (i : Nat) : String := (subs[i]?.map Formula.render).getD "<?>"
+  let binary (op : String) : String := s!"({sub 0} {op} {sub 1})"
+  let junction (op : String) : String :=
+    if subs.isEmpty then "()"
+    else s!"({String.intercalate op (subs.toList.map Formula.render)})"
+  let quantified (q : String) : String :=
+    let vars := f.boundVars.toList.map (s!"X{·}")
+    s!"{q} [{String.intercalate ", " vars}] : {sub 0}"
+  match f.connective with
+  | .error _ => "<unknown connective>"
+  | .ok .literal => (f.literal?.map toString).getD "<missing literal>"
+  | .ok .«true» => "$true"
+  | .ok .«false» => "$false"
+  | .ok .not => s!"~{sub 0}"
+  | .ok .and => junction " & "
+  | .ok .or => junction " | "
+  | .ok .imp => binary "=>"
+  | .ok .iff => binary "<=>"
+  | .ok .xor => binary "<~>"
+  | .ok .«forall» => quantified "!"
+  | .ok .«exists» => quantified "?"
+  | .ok .boolTerm => "<bool term>"
+  | .ok .name => "<name>"
+  | .ok .noconn => "<noconn>"
+
+instance : ToString Formula := ⟨Formula.render⟩
+
+end Formula
+
+namespace Unit
+
+@[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
+  u.proof.field u.proof.layout.units 28 u.idx.toNat off
+
+/-- Vampire's number for this step, as it appears in the proof text. -/
+def number (u : Unit) : UInt32 := u.field 0
+
+/-- The inference rule, as vampire numbers it. -/
+def ruleIndex (u : Unit) : UInt32 := u.field 1
+
+/-- Where this step came from. -/
+def inputType (u : Unit) : Except Error UnitInputType :=
+  ofIndex
+    #[.«axiom», .assumption, .conjecture, .negatedConjecture, .claim,
+      .extensionalityAxiom]
+    (u.field 2) "input type"
+
+/-- Whether this step is a clause rather than a formula. -/
+def isClause (u : Unit) : Bool := u.field 3 &&& 1 != 0
+
+/-- The clause, when this step has been clausified. -/
+def clause? (u : Unit) : Option Clause :=
+  if u.isClause then some ⟨u.proof, u.idx⟩ else none
+
+/-- The formula, when this step has not been clausified. -/
+def formula? (u : Unit) : Option Formula :=
+  if u.isClause then none else some ⟨u.proof, u.field 4⟩
+
+/-- The rule this step was derived by. -/
+def rule? (u : Unit) : Option InferenceRule := InferenceRule.ofNat? (u.field 1).toNat
+
+/--
+The sorts of the step's free variables. A clause is implicitly universally
+quantified over them, so rebuilding it as a Lean proposition needs their sorts.
+-/
+def varSorts (u : Unit) : Array (UInt32 × String) :=
+  let p := u.proof
+  let first := u.field 8
+  let count := u.field 9
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.varSorts + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+
+/--
+The sorts of the variables that occur only in what this step's uses bound its
+premises' variables to.
+
+A unifier's image can mention a variable that neither the premise nor the
+conclusion has, and reading that term back needs its sort as much as any other
+variable's. They are apart from `varSorts` because those are the quantifier
+prefix the conclusion is rebuilt with, and these are no part of it.
+-/
+def boundVarSorts (u : Unit) : Array (UInt32 × String) :=
+  let p := u.proof
+  let first := u.field 8
+  let own := u.field 9
+  let count := u.field 25
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.varSorts + (first.toNat + own.toNat + i.val) * 2 * 4
+    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+
+/--
+Where this step's unification constraints are among its literals, and how many
+of them there are.
+
+Under unification with abstraction the substitution does not make the two terms
+one: what it could not unify it defers into disequality literals the inference
+puts into its conclusion. The step is sound because the conclusion failing
+makes each of those pairs equal, and then the two terms really are one. Binary
+resolution puts them before the literals it carried over and every other rule
+after, so where they are has to be said rather than counted from one end.
+-/
+def constraints (u : Unit) : Option (Nat × Nat) :=
+  let count := u.field 27
+  if count == 0 then none else some ((u.field 26).toNat, count.toNat)
+
+/--
+The skolem symbols this step introduced: the existential variable each replaced,
+and the term it became.
+
+Skolemisation works on NNF rather than prenex input, and a skolem takes only
+the universals it depends on, so this is vampire's own record of the term
+rather than something re-derived.
+-/
+def skolems (u : Unit) : Array (UInt32 × Term) :=
+  let p := u.proof
+  let first := u.field 10
+  let count := u.field 11
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.skolems + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+/--
+The name the input gave this formula, and `none` for anything vampire derived.
+It says which hypothesis an `input` step restates.
+-/
+def name? (u : Unit) : Option String :=
+  let off := u.field 12
+  if off == none32 then none else some (u.proof.string off)
+
+/--
+The names this step's clause holds under.
+
+Splitting asserts a component's name and works on with the clause under that
+assumption, so what such a clause says is that its literals follow from the
+names it is written against. A name is written as the definition that
+introduced it does, negated ones with a leading `~`.
+-/
+def splits (u : Unit) : Array String :=
+  let p := u.proof
+  let first := u.field 15
+  let count := u.field 16
+  Array.ofFn (n := count.toNat) fun i =>
+    p.string (readU32 p.data (p.layout.splits + (first.toNat + i.val) * 4))
+
+/--
+The subformulas this step's clausification named.
+
+Clausification names a subformula that occurs too often to be worth expanding,
+and works on with the name in its place. The definition never becomes a step of
+its own -- the clauses saying what the name means come out of the same
+clausification -- so nothing in the proof says what the name stands for.
+-/
+def namings (u : Unit) : Array (String × Array UInt32 × Formula) :=
+  let p := u.proof
+  let first := u.field 18
+  let count := u.field 19
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.namings + (first.toNat + i.val) * 4 * 4
+    let firstArg := readU32 p.data (base + 4)
+    let numArgs := readU32 p.data (base + 8)
+    (p.string (readU32 p.data base),
+     Array.ofFn (n := numArgs.toNat) fun j =>
+       readU32 p.data (p.layout.namingArgs + (firstArg.toNat + j.val) * 4),
+     ⟨p, readU32 p.data (base + 12)⟩)
+
+/--
+Which argument of each conjunction the clausification of this clause went into.
+
+The other clausifier walks a formula in negation normal form, taking every
+disjunct into the clause it is building and each conjunct into a clause of its
+own, so a clause is one path through the conjunctions and this is that path.
+-/
+def conjunctChoices (u : Unit) : Array (Formula × UInt32) :=
+  let p := u.proof
+  let first := u.field 21
+  let count := u.field 22
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.choices + (first.toNat + i.val) * 2 * 4
+    (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4))
+
+/--
+The reasoning behind a congruence-closure conflict, the last step of it being
+the literal the reasoning settles.
+-/
+def congruences (u : Unit) : Except Error (Array Congruence) := do
+  let p := u.proof
+  let first := u.field 23
+  let count := u.field 24
+  let mut out := #[]
+  for i in [0 : count.toNat] do
+    let base := p.layout.congruences + (first.toNat + i) * 5 * 4
+    let a := readU32 p.data (base + 4)
+    let b := readU32 p.data (base + 8)
+    let firstArg := readU32 p.data (base + 12)
+    let numArgs := readU32 p.data (base + 16)
+    let args : Array (Option Nat) := Array.ofFn (n := numArgs.toNat) fun j =>
+      let arg := readU32 p.data
+        (p.layout.congruenceArgs + (firstArg.toNat + j.val) * 4)
+      if arg == none32 then none else some arg.toNat
+    out := out.push (←
+      match readU32 p.data base with
+      | 0 => pure (.input a.toNat)
+      | 1 => pure (.congruence ⟨p, a⟩ ⟨p, b⟩ args)
+      | 2 => pure (.trans a.toNat b.toNat)
+      | 3 => pure (.symm a.toNat)
+      | 4 => pure (.goalEquality a.toNat b.toNat)
+      | 5 => pure (.goalLiterals a.toNat b.toNat args)
+      | kind => .error (.error s!"unknown congruence step kind {kind}"))
+  return out
+
+/-- The generalised clause this clause came out of, if clausification made it. -/
+def genClause? (u : Unit) : Option GenClause :=
+  let idx := u.field 20
+  if idx == none32 then none else some ⟨u.proof, idx⟩
+
+/--
+The propositional clause a step derived by SAT solving stands on, and `none`
+for anything else.
+-/
+def satPremise? (u : Unit) : Option SatClause :=
+  let idx := u.field 17
+  if idx == none32 then none else some ⟨u.proof, idx⟩
+
+/-- How this step used each of its premises. -/
+def premiseUses (u : Unit) : Array PremiseUse :=
+  let p := u.proof
+  let first := u.field 13
+  let count := u.field 14
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.uses + (first.toNat + i.val) * 6 * 4
+    let literal := readU32 p.data (base + 4)
+    let term := readU32 p.data (base + 8)
+    let flags := readU32 p.data (base + 12)
+    let firstBinding := readU32 p.data (base + 16)
+    let numBindings := readU32 p.data (base + 20)
+    { premise := readU32 p.data base
+      literal := if literal == none32 then none else some literal
+      term := if term == none32 then none else some ⟨p, term⟩
+      rewritesWholePremise := flags &&& 1 != 0
+      bindings := Array.ofFn (n := numBindings.toNat) fun j =>
+        let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
+        (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩) }
+
+/-- The steps this one was derived from. -/
+def parents (u : Unit) : Array Unit :=
+  let p := u.proof
+  let first := u.field 6
+  let count := u.field 7
+  Array.ofFn (n := count.toNat) fun i =>
+    ⟨p, readU32 p.data (p.layout.parents + (first.toNat + i.val) * 4)⟩
+
+instance : ToString Unit where
+  toString u :=
+    match u.clause? with
+    | some c => toString c
+    | none => (u.formula?.map toString).getD "<missing formula>"
+
+end Unit
+
+namespace GenClause
+
+@[inline] private def field (c : GenClause) (off : Nat) : UInt32 :=
+  c.proof.field c.proof.layout.genStates 8 c.idx.toNat off
+
+private def lits (p : Proof) (first count : UInt32) :
+    Array (Formula × Bool) :=
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.genLits + (first.toNat + i.val) * 2 * 4
+    (⟨p, readU32 p.data base⟩, readU32 p.data (base + 4) != 0)
+
+/-- The clause's place among the proof's generalised clauses. -/
+def index (c : GenClause) : UInt32 := c.idx
+
+/-- The state this one was reached from, `none` for one clausification began at. -/
+def parent? (c : GenClause) : Option GenClause :=
+  let idx := c.field 0
+  if idx == none32 then none else some ⟨c.proof, idx⟩
+
+/-- The position replaced in the state this one was reached from. -/
+def position? (c : GenClause) : Option UInt32 :=
+  let position := c.field 1
+  if position == none32 then none else some position
+
+/-- The signed subformulas of the clause as it stands. -/
+def literals (c : GenClause) : Array (Formula × Bool) :=
+  lits c.proof (c.field 2) (c.field 3)
+
+/-- What was put in the replaced position. -/
+def replacement (c : GenClause) : Array (Formula × Bool) :=
+  lits c.proof (c.field 4) (c.field 5)
+
+/-- What each variable the clause quantifies has been bound to. -/
+def bindings (c : GenClause) : Array (UInt32 × Term) :=
+  let p := c.proof
+  let first := c.field 6
+  let count := c.field 7
+  Array.ofFn (n := count.toNat) fun i =>
+    let base := p.layout.bindings + (first.toNat + i.val) * 2 * 4
+    (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+end GenClause
+
+namespace SatClause
+
+@[inline] private def field (c : SatClause) (off : Nat) : UInt32 :=
+  c.proof.field c.proof.layout.satClauses 5 c.idx.toNat off
+
+/--
+The clause's literals, each the name of a component or its negation, written as
+the definition that introduced the name writes it.
+-/
+def literals (c : SatClause) : Array String :=
+  let p := c.proof
+  let first := c.field 0
+  let count := c.field 1
+  Array.ofFn (n := count.toNat) fun i =>
+    p.string (readU32 p.data (p.layout.satLits + (first.toNat + i.val) * 4))
+
+/--
+The clauses the solver derived this one from, in the order it used them: all but
+one of each clause's literals are false once the ones before it are.
+
+Empty for a clause that is a first-order clause's propositional shadow, which
+`origin?` gives instead.
+-/
+def premises (c : SatClause) : Array SatClause :=
+  let p := c.proof
+  let first := c.field 2
+  let count := c.field 3
+  Array.ofFn (n := count.toNat) fun i =>
+    ⟨p, readU32 p.data (p.layout.satPremises + (first.toNat + i.val) * 4)⟩
+
+/-- The clause's place among the proof's propositional clauses. -/
+def index (c : SatClause) : UInt32 := c.idx
+
+/-- The step this clause is the propositional shadow of, if it is one. -/
+def origin? (c : SatClause) : Option Unit :=
+  let idx := c.field 4
+  if idx == none32 then none else some ⟨c.proof, idx⟩
+
+end SatClause
+
+end Vampire

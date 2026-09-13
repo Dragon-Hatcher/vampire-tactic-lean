@@ -9,11 +9,18 @@ theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
   vampire +mono [h, mul_assoc, one_mul]
 ```
 
+Vampire finds the refutation; the tactic then **replays that refutation as a
+Lean proof term**, inference by inference. Nothing is admitted and no search
+tactic stands in: if a rule cannot be replayed the tactic says so rather than
+closing the goal quietly.
+
 ## Theories
 
-The tactic supports uninterpreted functions and the Vampire theories of integer, rational, and real arithmetic.
+The tactic supports uninterpreted functions and the Vampire theories of integer,
+rational and real arithmetic.
 
-Vampire has some support for, but this tactic does not support: bit-vectors, arrays, datatypes, `ite`, `let`, and higher-order reasoning.
+Vampire has some support for, but this tactic does not: bit-vectors, arrays,
+datatypes, `ite`, `let`, and higher-order reasoning.
 
 ## Install
 
@@ -24,27 +31,41 @@ require vampire from git
   "https://github.com/Dragon-Hatcher/vampire-tactic-lean.git" @ "main"
 ```
 
-Lake should check out the custom Vampire fork the tactic embeds and runs its CMake build itself.
+Lake fetches the pinned revision of the [Vampire
+fork](https://github.com/Dragon-Hatcher/vampire-tactic-vampire) into its build
+directory and runs that CMake build itself — you do not have to clone anything.
+The fetch is shallow and takes only the submodules the build needs, about twenty
+megabytes.
 
-You need `cmake`, `git` and a C++20 compiler. Vampire takes some minutes to build the
-first time and is then cached like any other Lake target.
+You need `cmake`, `git` and a C++20 compiler. Vampire is a few hundred
+translation units, so the first build takes some minutes; afterwards it is
+cached like any other Lake target. Linux and macOS are supported; Windows is
+not.
 
-Set the number of jobs for the build like so. The default is 2 which is on the lower side.
+Each translation unit wants upwards of 2 GiB, so the job count is derived from
+the memory the machine reports rather than from its core count. Override it:
+
 ```
-VAMPIRE_TACTIC_JOBS=8 lake build
+CMAKE_BUILD_PARALLEL_LEVEL=8 lake build
 ```
 
-For development you can point `VAMPIRE_TACTIC_SRC` at a checkout of the fork. This will use `<checkout>/build/libvampire_lib.a`.
+For development, `VAMPIRE_DIR` points at a Vampire checkout of your own instead
+of the pinned one, and `VAMPIRE_WORKER` points straight at an already-built
+`vampire-worker` binary.
 
 ## Usage
 
-The main provided tactic is `vampire`. It translates the current goal and any provided hypotheses into the Vampire format, searches for a proof, and attempts to replay the proof in Lean. 
+The tactic is `vampire`. It translates the current goal and the hypotheses you
+name into Vampire's format, searches for a refutation, and replays it.
 
-Only hypotheses named in square brackets (`vampire [h, q]`) are sent to Vampire. 
-Use `*` to send all hypotheses in the local context `vampire [*, other_theorem]`.
+Only hypotheses named in square brackets (`vampire [h, q]`) are sent. Use `*`
+for everything in the local context: `vampire [*, other_theorem]`.
 
-Vampire's logic is monomorphic, so a goal that quantifies over a type or carries a typeclass has no direct reading. `vampire +mono` runs [lean-auto](https://github.com/leanprover-community/lean-auto)'s monomorphisation first. This is the same as the
-[lean-smt](https://github.com/ufmg-smite/lean-smt) tactic.
+Vampire's logic is monomorphic, so a goal quantifying over a type or carrying a
+typeclass has no direct reading. `vampire +mono` runs
+[lean-auto](https://github.com/leanprover-community/lean-auto)'s
+monomorphisation first, as the
+[lean-smt](https://github.com/ufmg-smite/lean-smt) tactic does.
 
 ```lean
 variable [Group G]
@@ -55,20 +76,20 @@ theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
 
 `G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols.
 
-`ℤ`, `ℚ` and `ℝ` are translated to Vampire's `$int`, `$rat` and `$real`; `+`, `-`,
-`*`, `/`, unary minus, `<`, `≤`, `>`, `≥` are also translated automatically; `^` 
-at a literal natural exponent is unfolded into multiplications.
+`ℤ`, `ℚ` and `ℝ` are translated to Vampire's `$int`, `$rat` and `$real`; `+`,
+`-`, `*`, `/`, unary minus, `<`, `≤`, `>`, `≥` are translated too; `^` at a
+literal natural exponent is unfolded into multiplications.
 
 ```lean
 theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
   vampire [h, h₂]
 ```
 
-Vampire relies heavily on portfolios. This means it tries the same problem under
-many different combinations of options. If Vampire used this on your problem you
-will receive a note telling you the successful set of options so the tactic can 
-skip directly there in future runs. This tends to happen especially with 
-arithmetic where the default strategies tend not to work as well.
+Vampire works through a portfolio: the same problem under a few hundred
+combinations of options. Only the one that succeeds is any use, so when a proof
+is found the tactic tells you which strategy found it, and you can write that
+into the call to skip the rest next time. This matters most for arithmetic,
+where the default strategies tend not to work as well.
 
 ```lean
 -- slower
@@ -77,33 +98,56 @@ theorem real_lin (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
 
 -- faster
 theorem real_lin' (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
-  vampire (strategy := "lrs+10_1:1_alasca=on:sp=occurrence:ss=axioms:st=3.0:to=lakbo:si=on:rtra=on_0") [h, h₂]
+  vampire (strategy := "lrs+10_1:1_alasca=on:sp=occurrence:ss=axioms:st=3.0:to=lakbo_0") [h, h₂]
 ```
+
+The search is reproducible. Vampire counts the steps it takes rather than
+reading the clock, so the same goal gives the same proof on a slow machine and a
+fast one. `wallLimit` is the one exception — a run that hits it says so.
+
+## Options
+
+Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`.
+
+| option | default | what it does |
+| --- | --- | --- |
+| `timeout` | 30 | seconds the prover may search, counted in steps |
+| `wallLimit` | 60 | real seconds after which to give up whatever the step count says |
+| `strategy` | — | run only this strategy, as the tactic reports it |
+| `mono` | false | monomorphise with `lean-auto` first (`+mono`) |
+| `showQuery` | false | print the TPTP problem instead of running the prover |
 
 ## If a goal fails
 
-You can use the `vampire?` tactic to see the problem as Vampire received it and the raw refutation it found. 
+`vampire +showQuery` prints the problem exactly as Vampire receives it, and
+`set_option trace.vampire true` reports the problem, the proof Vampire found,
+what Vampire said for itself, and what each step of the replay cost — which is
+how to tell a slow translation from a slow search from a slow replay.
 
-| diagnostic | what it means |
+| message | what it means |
 | --- | --- |
-| `the search ran out of budget` | raise `vampire.timeout`; the search was still going |
-| `the search exhausted what it had not discarded` | the strategy pruned to fit the budget and ran out of room — raise `vampire.timeout` and it prunes less |
-| `no refutation found: ... does not follow` | the search finished the space. No budget will help; the goal does not follow from what it was given |
-| `step N (rule) could not be replayed` | reconstruction of the proof failed. `Vampire/Reconstruct.lean`'s header lists what is ported |
-| `refuted by a portfolio strategy` | it worked, and the message offers you `vampire (strategy := "...")` to skip straight there next time |
-| `error loading library, libc++.so.1` | a linking problem — see `cxxStdlib` in `lakefile.lean` |
+| `vampire did not refute the goal (…)` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, that is the only one tried — remove it to put the schedule back |
+| `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
+| `… which this tactic does not implement yet; those steps are admitted` | Vampire used an inference rule that has no reconstruction yet, so the proof holds a `sorry`. Lean reports that too |
+| `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
+| `vampire failed: …` | the worker could not be run at all |
 
-`set_option trace.vampire.timing true` reports translation, the prover's phases and the
-replay separately, which is how to tell a slow translation from a slow search.
+## Licence
 
-`set_option vampire.timeout n` gives the prover `n` seconds to search (default 10)
+The Lean code here, and `worker/worker.cpp`, are MIT; see `LICENSE`. Vampire
+itself is BSD 3-Clause and is fetched at build time rather than vendored, so
+what this repository distributes is only the MIT part. `NOTICE` records what the
+built worker is made of and what each piece is under.
 
-## Further reading
+## Repository
 
-These are mostly LLM generated docs to itself as it was working so be warned.
-
-* `docs/design.md` — how the pipeline is put together and why, and what it is a port of
-* `docs/portfolio.md` — why the portfolio is worth its share of the budget, measured
-* `docs/comparison.md` — `vampire`, `duper` and `smt` on the same problems
-* `docs/vampire-global-state.md` — the shared mutable state an embedded prover has to reset
-* `bench-tptp/` — the TPTP harness. Development only; not needed to use the tactic
+- `Vampire/` — the tactic. `Translate.lean` goes to TPTP, `Wire.lean` decodes
+  what the prover wrote, and `Reconstruct/` replays it, one module per family of
+  inference rules.
+- `worker/` — the C++ program that runs one proof attempt and writes the
+  derivation out in a flat encoding.
+- `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
+  from SMT-LIB, each with the original beside its Lean statement. Development
+  only; not needed to use the tactic.
+- `scripts/run-problems.py` — elaborates the corpus and reports what failed.
+  `scripts/trace-problem.sh` does one problem with tracing on.

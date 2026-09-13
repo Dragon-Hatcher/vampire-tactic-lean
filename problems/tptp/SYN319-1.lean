@@ -1,0 +1,23 @@
+-- SYN319-1, from TPTP v9.3.1 (SYN).
+-- TPTP Status: Unsatisfiable.  The vampire binary refutes it in 0.01s
+-- (`--mode portfolio --schedule casc --cores 1 -t 1`).
+--
+-- The problem itself is `SYN319-1.p`, beside this file. This is its statement in Lean:
+-- one type variable for TPTP's single sort, functors as functions into it, predicates
+-- as functions into `Prop`, and the whole problem as `axiom₁ → … → axiomₙ → goal`.
+-- `False` as the goal means the problem states no conjecture and asks for a refutation.
+--
+-- Only `Vampire` is imported, for the `vampire` tactic that closes the goal.
+import Vampire
+set_option maxHeartbeats 0
+set_option maxRecDepth 100000000
+set_option linter.all false
+universe u
+variable {ι : Type u}
+variable [inst : Inhabited ι]
+variable {t_y : ι}
+variable {t_z1 t_z2 : ι → ι → ι}
+variable {t_f t_g t_h : ι → Prop}
+
+theorem T_SYN319m1 : (∀ v0 v1 : ι, ((t_f v1) ∨ (t_g v0))) → (∀ v2 v3 : ι, ((t_f v3) ∨ (¬(t_f (t_z1 v2 v3))))) → (∀ v4 : ι, ((¬(t_g (t_z1 v4 t_y))) ∨ (t_g v4))) → (∀ v5 v6 : ι, ((¬(t_g (t_z1 v5 t_y))) ∨ (¬(t_f (t_z1 v5 v6))))) → (∀ v7 : ι, ((¬(t_f v7)) ∨ (t_h v7))) → (∀ v8 : ι, ((¬(t_g v8)) ∨ (t_h v8))) → (∀ v9 v10 : ι, (¬(t_h (t_z2 v9 v10)))) → False := by
+  vampire

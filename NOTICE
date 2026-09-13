@@ -1,56 +1,43 @@
-`Vampire/Logic.lean` is VampLean, copied rather than depended on, and it is the library
-Vampire's own generated Lean files import: one tactic per preprocessing inference rule
-over the propositional and quantifier equivalences those rules need.
+The Lean code in this repository, and `worker/worker.cpp`, are under the MIT
+licence in `LICENSE`. What that code is built against is not, and this file says
+what.
 
-    VampLean — https://github.com/vprover/vamplean
-    Part of the Vampire project, https://github.com/vprover
-    Copied from revision 5a62658.
+This package builds and runs Vampire, and the `vampire-worker` binary it
+produces is Vampire with one extra translation unit (`worker/worker.cpp`) linked
+in. Vampire's licence is a BSD 3-Clause licence, which permits that; anyone who
+*distributes* such a binary has to carry Vampire's copyright notice and
+disclaimer with it, and may not use the names of Vampire's authors to endorse
+what they distribute. This repository does not distribute one -- it is built
+where it is used.
 
-That repository carries no licence file or per-file headers of its own; it is used here
-as part of Vampire, whose licence is at https://vprover.github.io/license.html. The only
-change is that the declarations are in `namespace Vampire` instead of at the root, so
-that a file can import this package and Mathlib at once — upstream declares about a
-dozen names Mathlib also declares, and two modules declaring one name collide at the
-import.
+    Vampire — https://github.com/vprover/vampire
+    Built from https://github.com/Dragon-Hatcher/vampire-tactic-vampire, a fork
+    carrying the changes that make a proof readable back: what each inference
+    used its premises for, the substitutions it applied, and the steps
+    clausification took.
+    Vampire's licence is at https://vprover.github.io/license.html
 
-This package contains code ported from lean-smt, used under the Apache License 2.0.
+Vampire's own build fetches two further components as submodules, and links both
+into the binary:
+
+    CaDiCaL — https://github.com/arminbiere/cadical
+    MIT licence, Copyright (c) 2016-2021 Armin Biere, Johannes Kepler
+    University Linz, Austria.
+
+    VIRAS — https://github.com/joe-hauns/viras
+    That repository carries no licence file and states no terms. It is used
+    here as a part of Vampire's build, which declares it.
+
+`Vampire/Preprocess.lean` follows lean-smt in how it reduces a goal to the
+smallest query that states it. lean-smt is used under the Apache License 2.0.
 
     lean-smt — https://github.com/ufmg-smite/lean-smt
     Copyright (c) 2021-2026 by the authors listed in that project's AUTHORS file
     and their institutional affiliations.
-    Ported from revision a934af210f30145ce0cbc8a38acff3f40c406d43.
 
-The goal-translation pipeline follows lean-smt's design closely, and these files are
-direct ports, each carrying a header saying what was changed:
+The problems under `problems/` are not this project's work. They are test data,
+each kept beside the file it was made from.
 
-    Vampire/Attribute.lean               <- Smt/Attribute.lean
-    Vampire/Data/Graph.lean              <- Smt/Data/Graph.lean
-    Vampire/Recognizers.lean             <- Smt/Recognizers.lean
-    Vampire/Translate.lean               <- Smt/Translate.lean
-    Vampire/Translate/Term.lean          <- Smt/Translate/Term.lean
-    Vampire/Translate/Commands.lean      <- Smt/Translate/Commands.lean
-    Vampire/Translate/Query.lean         <- Smt/Translate/Query.lean
-    Vampire/Translate/Prop.lean          <- Smt/Translate/Prop.lean
-    Vampire/Translate/Bool.lean          <- Smt/Translate/Bool.lean
-    Vampire/Preprocess/Basic.lean        <- Smt/Preprocess/Basic.lean
-    Vampire/Preprocess/Intros.lean       <- Smt/Preprocess/Intros.lean
-    Vampire/Preprocess/NegateGoal.lean   <- Smt/Preprocess/NegateGoal.lean
-    Vampire/Preprocess/PushHintsToCtx.lean <- Smt/Preprocess/PushHintsToCtx.lean
-    Vampire/Preprocess/Mono.lean         <- Smt/Preprocess/Mono.lean
-
-    Vampire/Tactic.lean                  follows Smt/Tactic/Smt.lean
-
-Vampire/Translate/Build.lean has no counterpart: lean-smt renders its terms as SMT-LIB
-text for a solver process, whereas this compiles them into an embedded Vampire's own
-data structures.
-
-Vampire/Preprocess/Mono.lean carries lean-smt's own variants of auto's lemma collection
-along with the port, because monomorphisation is driven by calling into lean-auto and
-those variants are what make the call. lean-smt declares them in lean-auto's `Auto`
-namespace; here they are in `Vampire.Preprocess.Mono` instead, under the same
-identifiers, so that a file can import this tactic and `smt` at once — two ports of one
-file cannot both add the same names to a third library's namespace. lean-auto is used
-under the Apache License 2.0:
-
-    lean-auto — https://github.com/leanprover-community/lean-auto
-    Copyright (c) 2023 Yicheng Qian and contributors.
+    TPTP — https://www.tptp.org, Geoff Sutcliffe. `problems/tptp/`, from
+    TPTP v9.3.1.
+    SMT-LIB — https://smtlib.cs.uiowa.edu. `problems/smtlib/`.

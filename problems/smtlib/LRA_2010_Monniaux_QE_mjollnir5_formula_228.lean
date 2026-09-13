@@ -1,0 +1,22 @@
+-- LRA_2010_Monniaux_QE_mjollnir5_formula_228, from SMT-LIB (LRA, status unsat).
+-- The vampire binary refutes it in 0.04s
+-- (`--input_syntax smtlib2 --mode portfolio --schedule casc --cores 1 -t 1`).
+--
+-- The problem itself is `LRA_2010_Monniaux_QE_mjollnir5_formula_228.smt2`, beside this file. An SMT problem is a
+-- conjunction of assertions asked for satisfiability, so an `unsat` one becomes: take
+-- the assertions as hypotheses, derive `False`. One hypothesis per `assert`, in order;
+-- `let` is inlined, because neither this tactic nor a first-order prover has one.
+--
+-- Arithmetic is over ℚ.  The source is linear real arithmetic, and ℚ and ℝ are
+-- elementarily equivalent for it -- both are dense ordered divisible abelian
+-- groups and that theory is complete -- so `unsat` transfers from the `Real`
+-- the problem is written over to the ℚ it is stated over here.
+import Mathlib
+import Vampire
+set_option maxHeartbeats 0
+set_option maxRecDepth 1000000
+set_option linter.all false
+
+theorem T_formula_228 (a1 : (∀ (v17_x3a0 : ℚ), (∀ (v16_x3a1 : ℚ), (∀ (v15_x3a2 : ℚ), (∀ (v14_x3a3 : ℚ), (∀ (v13_x3a4 : ℚ), (∀ (v12_x3a5 : ℚ), (∃ (v11_x3a6 : ℚ), (∃ (v10_x3a7 : ℚ), (∃ (v9_x3a8 : ℚ), (∃ (v8_x3a9 : ℚ), (∃ (v7_x3a10 : ℚ), (∃ (v6_x3a11 : ℚ), (∀ (v5_x3a12 : ℚ), (∀ (v4_x3a13 : ℚ), (∀ (v3_x3a14 : ℚ), (∀ (v2_x3a15 : ℚ), (∀ (v1_x3a16 : ℚ), (∀ (v0_x3a17 : ℚ), ((((((((((((((18) * v4_x3a13) + (((-13)) * v6_x3a11)) + v13_x3a4) + ((2) * v2_x3a15)) ≤ ((-19)))) ∧ (((((((8) * v2_x3a15) + ((2) * v3_x3a14)) + (((8) * v4_x3a13))) + ((18) * v17_x3a0)) ≤ ((-7))))) ∨ (((((((4 * v3_x3a14) + ((10) * v14_x3a3)) + ((8) * v7_x3a10)) + ((-16) * v15_x3a2))) ≤ (18)) ∧ (((((((-17) * v8_x3a9) + (((-18)) * v2_x3a15)) + (((-10)) * v3_x3a14)) + (17 * v12_x3a5))) ≤ (2)))) ∧ (((((((((((-7)) * v2_x3a15) + ((-17) * v15_x3a2)) + ((6) * v12_x3a5)) + (11 * v10_x3a7))) ≤ ((-5))) ∧ (((((((-16) * v14_x3a3) + ((-9) * v2_x3a15)) + ((6) * v0_x3a17))) + (0 * v1_x3a16)) ≤ (14))) ∨ ((((((((3) * v11_x3a6) + ((-20) * v14_x3a3)) + (((-19)) * v14_x3a3)) + (15 * v6_x3a11))) ≤ 5) ∨ ((((((15 * v10_x3a7) + ((3) * v3_x3a14)) + ((14) * v5_x3a12)) + (((-8)) * v16_x3a1))) ≤ (8)))))) ∧ ((((((((((((-19)) * v17_x3a0) + (2 * v16_x3a1)) + (((-18)) * v11_x3a6)) + ((-16) * v4_x3a13))) ≤ ((-10))) ∨ ((((((((-2)) * v12_x3a5) + ((8) * v14_x3a3)) + (((-18)) * v1_x3a16)) + (((-2)) * v2_x3a15))) ≤ (3))) ∨ (((((((((18) * v10_x3a7)) + (15 * v0_x3a17)) + (4 * v15_x3a2)) + (19 * v10_x3a7))) ≤ ((-8))) ∧ ((((((((-18)) * v17_x3a0) + (((-13)) * v10_x3a7)) + ((-6) * v5_x3a12)) + ((-10) * v17_x3a0))) ≤ 1)))) ∨ (((((((((20 * v2_x3a15) + (((-19)) * v3_x3a14)) + ((-20) * v5_x3a12))) + ((((-14)) * v7_x3a10))) ≤ (18)) ∨ (((((((-6) * v6_x3a11) + ((8) * v6_x3a11)) + (15 * v15_x3a2))) + ((10) * v2_x3a15)) ≤ ((-14)))) ∧ (((((((((-17) * v17_x3a0) + (4 * v13_x3a4)) + ((-11) * v8_x3a9))) + ((3) * v5_x3a12)) ≤ ((-13))) ∧ ((((((16 * v0_x3a17) + ((-11) * v9_x3a8)) + ((-10) * v4_x3a13))) + (((-2)) * v5_x3a12)) ≤ ((-7)))))))))) ∨ (((((((((3) * v12_x3a5) + (11 * v14_x3a3)) + (16 * v16_x3a1))) + v7_x3a10) ≤ ((-2))) ∨ ((((((((((-17) * v6_x3a11) + ((-8) * v12_x3a5)) + (((8) * v4_x3a13))) + ((-5) * v11_x3a6))) ≤ (18)) ∨ ((((((0 * v11_x3a6) + (0 * v11_x3a6)) + ((-3) * v4_x3a13))) + ((14) * v14_x3a3)) ≤ (-1))) ∨ ((((((((-4) * v7_x3a10) + ((-6) * v9_x3a8)) + (((-19)) * v10_x3a7))) + ((12) * v16_x3a1)) ≤ ((-14))) ∧ (((((((18) * v9_x3a8) + ((18) * v7_x3a10)) + (20 * v2_x3a15)) + ((-10) * v8_x3a9))) ≤ (8)))))) ∧ ((((((((((2 * v7_x3a10) + ((-13) * v15_x3a2)) + (17 * v9_x3a8))) + ((12) * v1_x3a16)) ≤ (10)) ∨ ((((((((-15)) * v13_x3a4) + ((-10) * v6_x3a11)) + (((-18)) * v3_x3a14)) + (((3) * v13_x3a4)))) ≤ (6))) ∨ ((((((((((-2)) * v7_x3a10) + (16 * v17_x3a0)) + ((-16) * v2_x3a15))) + (13 * v1_x3a16)) ≤ ((-18))) ∧ (((((((-18) * v14_x3a3) + (((-19)) * v1_x3a16)) + (4 * v14_x3a3))) + (11 * v4_x3a13)) ≤ ((-15)))))) ∨ (((((((((3 * v13_x3a4) + ((-16) * v0_x3a17)) + (16 * v8_x3a9))) + (((18) * v10_x3a7))) ≤ (14)) ∨ (((((((-15) * v14_x3a3) + ((-7) * v13_x3a4)) + ((-20) * v15_x3a2))) + (4 * v0_x3a17)) ≤ ((-2))))) ∨ (((((((((-9) * v14_x3a3) + ((-18) * v0_x3a17)) + (17 * v8_x3a9))) + (13 * v4_x3a13)) ≤ ((-2))) ∧ (((((((-4) * v16_x3a1) + (19 * v6_x3a11)) + (0 * v6_x3a11))) + (((-19)) * v15_x3a2)) ≤ ((-19)))))))))) ∧ (((((((-14) * v7_x3a10) + ((-15) * v4_x3a13)) + ((-5) * v2_x3a15))) + (16 * v5_x3a12)) ≤ (12)))))))))))))))))))))) :
+    False := by
+  vampire [*]

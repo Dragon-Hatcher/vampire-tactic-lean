@@ -1,437 +1,259 @@
 import Lean
-import Vampire.Proof
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.Ring
 
 /-!
-# What Vampire's arithmetic means in Lean
+What proves an arithmetic step of vampire's.
 
-Two jobs, both about the way *back*.
-
-`meanings` reads the symbol table of an exported refutation and says what each of
-Vampire's interpreted symbols and numerals denotes in Lean: `$sum` at `$real` is
-`fun a b : ℝ => a + b`, `$to_real(3/2)` is `(3 : ℝ) / 2`, `$less` is `<`. The
-translation went the other way through `Translate/Arith.lean`, and a symbol that came
-from there comes back through here.
-
-`arithScript` is the tactic a step whose content is arithmetic is closed by. Vampire
-introduces theory axioms for itself — commutativity of `$sum`, `$uminus($uminus(X)) = X`
-— and `LeanChecker` writes each as a Lean `axiom`, which a tactic cannot do. It does not
-need to: every one of them is a true statement about `ℝ`, `ℚ` or `ℤ` and Mathlib proves
-it. The same cascade closes an `evaluation` step, whose conclusion is its premise with
-the arithmetic worked out.
-
-## Why the tactics are parsed from strings
-
-`ring`, `linarith` and `norm_num` are Mathlib's, and this package does not depend on
-Mathlib — deliberately, since the whole first-order fragment needs none of it and a
-Mathlib dependency is not a small thing to hand a downstream project. A tactic
-*quotation* would have to parse at compile time and so would need the import.
-
-So the cascade is parsed in the environment the tactic is *running* in, with
-`Parser.runParserCategory`. A goal with `ℝ` in it has imported Mathlib by construction —
-`ℝ` is Mathlib's — so the tactics resolve exactly when there is arithmetic to do, and a
-package that has no arithmetic in it never asks. Where they genuinely are missing the
-parse fails, and the error says which tactic and why rather than reporting the step as
-unprovable.
+Kept apart from the rest of the tactic because `linarith` comes with a library
+whose keywords -- `lemma`, `says`, `to` -- the replay uses as names of its own.
+Replay is handed `contradiction` rather than importing it.
 -/
 
 namespace Vampire.Arith
 
-open Lean Meta Elab
+open Lean Meta Mathlib.Tactic
 
-/-- Which of the three arithmetics a symbol belongs to.
+/--
+Whether a decision procedure reads inside a term of this shape, or can only
+take it whole.
 
-Its own enumeration rather than `Translate/Build.lean`'s `NumKind`: that one is paired
-with the opcodes `ffi/vampire_build.cpp` reads and lives beside the translation's `Term`,
-which would shadow `Lean.Term` here. The two directions do not have to share a type for
-three constructors. -/
-inductive Kind where
-  | int | rat | real
-  deriving Repr, DecidableEq, Inhabited
-
-/-- Vampire's TPTP name for each of the three numeric sorts. -/
-def kindOfSortName? (nm : String) : Option Kind :=
-  match nm with
-  | "$int" => some .int | "$rat" => some .rat | "$real" => some .real
+The comparisons and the arithmetic it is stated over, and the connectives
+between them. Anything else -- an uninterpreted symbol applied to something, a
+term a skolemisation stood up, a numeral's own innards -- is a term it can only
+treat as one opaque thing.
+-/
+private def transparent (e : Expr) : Option (Array Expr) :=
+  let args := e.getAppArgs
+  match e.getAppFn with
+  | .const c _ =>
+    if c == ``Not && args.size == 1 then some args
+    else if (c == ``And || c == ``Or || c == ``Iff) && args.size == 2 then some args
+    else if c == ``False || c == ``True then some #[]
+    -- A comparison's sort is an argument of it, and is no part of what is
+    -- compared.
+    else if (c == ``LE.le || c == ``LT.lt || c == ``GE.ge || c == ``GT.gt)
+        && args.size == 4 then some args[2:]
+    else if (c == ``Eq || c == ``Ne) && args.size == 3 then some args[1:]
+    else if (c == ``HAdd.hAdd || c == ``HSub.hSub || c == ``HMul.hMul
+        || c == ``HDiv.hDiv) && args.size == 6 then some args[4:]
+    else if c == ``Neg.neg && args.size == 3 then some args[2:]
+    -- A numeral is not looked into: it is read as the number it is.
+    else if c == ``OfNat.ofNat || c == ``OfScientific.ofScientific then some #[]
+    else none
   | _ => none
 
-/-- The Lean type a numeric sort denotes.
+/--
+The terms a decision procedure can only take whole, each once.
 
-`Rat` and `Real` are named rather than referred to with `` `` ``, for the reason given in
-`Translate/Arith.lean`: they are Mathlib's. A refutation that mentions them arrived from
-a goal that mentions them, so the constant exists by the time this is asked. -/
-def kindType : Kind → Expr
-  | .int  => .const ``Int []
-  | .rat  => .const (.str .anonymous "Rat") []
-  | .real => .const (.str .anonymous "Real") []
+A step of vampire's speaks of the terms the clause it acts on speaks of, and a
+skolemisation's is the whole formula it came from: asking about a handful of
+numbers over such terms has the procedure walk them, where all it can do with
+one is tell it apart from another. So each is put aside here, the question
+asked of a variable standing for it, and the answer applied to it again.
+-/
+private partial def atomsOf (e : Expr) (acc : Array Expr)
+    (seen : Std.HashSet Expr) : MetaM (Array Expr × Std.HashSet Expr) := do
+  -- A term read back from the proof is shared wherever the proof shares it, so
+  -- it is a graph and not a tree: walking it as a tree walks a shared part
+  -- once for every path that reaches it, which for the terms these steps
+  -- speak of is a walk that does not end.
+  if seen.contains e then return (acc, seen)
+  let seen := seen.insert e
+  match transparent e with
+  | some args =>
+    let mut acc := acc
+    let mut seen := seen
+    for a in args do
+      let (acc', seen') ← atomsOf a acc seen
+      acc := acc'; seen := seen'
+    return (acc, seen)
+  | none =>
+    -- Only a term stands aside. What a proposition says is what relates it to
+    -- another proposition -- a thing and its denial cannot both hold, whatever
+    -- the thing is -- and a variable standing for one says nothing of the
+    -- sort, so putting one aside is losing the very fact that settles it.
+    if ← isProp e then return (acc, seen)
+    -- A local already stands for itself, and standing for it again would only
+    -- be another binder.
+    if e.isFVar || acc.any (· == e) then return (acc, seen)
+    return (acc.push e, seen)
 
-/-- Check that the type a sort denotes actually exists, so that a missing Mathlib is a
-message about Mathlib rather than an unknown-constant error from deep inside a replay. -/
-def checkKindType (k : Kind) : MetaM Expr := do
-  let ty := kindType k
-  let .const nm _ := ty | throwError "vampire: internal: {ty} is not a constant"
-  unless (← getEnv).contains nm do
-    throwError "vampire: the refutation uses {nm}, which is not in scope. Arithmetic \
-      reaches the prover as Lean's `ℤ`, `ℚ` and `ℝ`, and the last two are Mathlib's — \
-      `import Mathlib` (or the part of it defining {nm}) to replay a proof about them."
-  return ty
+/--
+`a ↔ b`, where the two are one comparison with its terms moved across it.
 
-/-- `p/q` and `-p/q`, and a bare integer, as Vampire writes a numeral.
+What theory normalisation does to a literal is to gather its terms on one side:
+`-14 x + -77 y < 64` for `0 < 64 + 14 x + 77 y`. The two say the same because
+the difference between the sides is the same, which is a fact about a ring and
+not about an order, so `ring` settles it -- where asking a decision procedure
+asks twice, once for each way round the equivalence goes, and asks it to search
+for a combination when there is nothing to search for.
+-/
+def rearranged (a b : Expr) : MetaM (Option Expr) := do
+  -- A lemma stated of whatever makes it true here, found by unifying it with
+  -- what is wanted of it rather than by counting its arguments.
+  let instantiated (name : Name) (want : Expr) : MetaM (Option Expr) := do
+    let e ← mkConstWithFreshMVarLevels name
+    let (mvars, binders, stated) ← forallMetaTelescope (← inferType e)
+    unless ← isDefEq stated want do return none
+    -- Unifying settles what the lemma is stated of but not what it is stated
+    -- over: an instance argument is found rather than matched.
+    for (mvar, binder) in mvars.zip binders do
+      if binder == .instImplicit && !(← mvar.mvarId!.isAssigned) then
+        match ← trySynthInstance (← mvar.mvarId!.getType) with
+        | .some inst => unless ← isDefEq mvar inst do return none
+        | _ => return none
+    let stated ← instantiateMVars (mkAppN e mvars)
+    -- Nothing left unsettled. A term with a hole in it is one the kernel will
+    -- not take, and the slow way round is there to be taken instead.
+    if stated.hasExprMVar then return none
+    return some stated
+  -- A comparison read as `0 ≤ d` or `0 < d`, with what says the two are the
+  -- same. A denied comparison is a comparison the other way round, which is
+  -- the shape normalisation leaves and is a lemma rather than a question.
+  let below (e : Expr) : MetaM (Option (Bool × Expr × Expr × Expr)) := do
+    let parsed : Option (Bool × Expr × Expr × Option Name) :=
+      match e.getAppFnArgs with
+      | (``LE.le, #[_, _, x, y]) => some (true, y, x, none)
+      | (``LT.lt, #[_, _, x, y]) => some (false, y, x, none)
+      | (``Not, #[p]) =>
+        match p.getAppFnArgs with
+        | (``LT.lt, #[_, _, x, y]) => some (true, x, y, some ``not_lt)
+        | (``LE.le, #[_, _, x, y]) => some (false, x, y, some ``not_le)
+        | _ => none
+      | _ => none
+    let some (nonneg, greater, lesser, denied) := parsed | return none
+    let difference ← mkAppM ``HSub.hSub #[greater, lesser]
+    let α ← inferType difference
+    let zero ← mkAppOptM ``OfNat.ofNat #[some α, some (mkRawNatLit 0), none]
+    let named (l r : Expr) : MetaM Expr :=
+      mkAppM (if nonneg then ``LE.le else ``LT.lt) #[l, r]
+    let stated ← named zero difference
+    let some core ← instantiated (if nonneg then ``sub_nonneg else ``sub_pos)
+        (← mkAppM ``Iff #[stated, ← named lesser greater])
+      | return none
+    match denied with
+    | none => return some (nonneg, difference, stated, core)
+    | some name =>
+      let some bridge ← instantiated name
+          (← mkAppM ``Iff #[e, ← named lesser greater])
+        | return none
+      return some (nonneg, difference, stated,
+        ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[bridge]])
+  let some (nonnegA, dA, statedA, saysA) ← below a | return none
+  let some (nonnegB, dB, _, saysB) ← below b | return none
+  unless nonnegA == nonnegB do return none
+  let same ← mkFreshExprMVar (← mkEq dA dB)
+  try
+    AtomM.run .reducible (Mathlib.Tactic.Ring.proveEq same.mvarId!)
+  catch _ => return none
+  -- The two differ only where the difference stands, so one is the other with
+  -- it replaced, and `same` says the replacement holds.
+  let α ← inferType dA
+  let motive := Expr.lam `t α (statedA.abstract #[dA]) .default
+  let between ← mkAppM ``iff_of_eq #[← mkAppM ``congrArg #[motive, same]]
+  let answer ← instantiateMVars (← mkAppM ``Iff.trans
+    #[← mkAppM ``Iff.symm #[saysA], ← mkAppM ``Iff.trans #[between, saysB]])
+  if answer.hasExprMVar then return none
+  return some answer
 
-`IntegerConstantType` prints as `3` or `-3`, `RationalConstantType` as `3/2`, and
-`RealConstantType` wraps its rational in `$to_real(...)` — that wrapper is how the
-numeral's *sort* shows up in its name, and it is stripped here because the sort is
-already known from the symbol's type. -/
-def parseNumeral? (nm : String) : Option (Int × Nat) := do
-  let cs := nm.toList
-  let body : String :=
-    if nm.startsWith "$to_real(" && nm.endsWith ")" then
-      String.mk ((cs.drop "$to_real(".length).dropLast)
-    else if nm.startsWith "$to_rat(" && nm.endsWith ")" then
-      String.mk ((cs.drop "$to_rat(".length).dropLast)
-    else nm
-  match body.splitOn "/" with
-  | [p] => do let n ← toInt? p; return (n, 1)
-  | [p, q] => do
-    let n ← toInt? p
-    let d ← toInt? q
-    guard (d > 0)
-    return (n, d.toNat)
-  | _ => none
-where
-  toInt? (s : String) : Option Int :=
-    match s.trim.toList with
-    | '-' :: rest => (String.mk rest).toNat?.map (fun n => -(Int.ofNat n))
-    | rest => (String.mk rest).toNat?.map Int.ofNat
+/-- `False` or `claim`, asked of the facts as they stand. -/
+private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
+  -- `omega` decides the integers and the naturals and nothing else, so asking
+  -- it about the rationals or the reals is asking a question whose answer is
+  -- known: it cannot say. What is asked here is asked once per literal of
+  -- every clause of every arithmetic step, so a procedure that cannot answer
+  -- is not asked.
+  let integral (e : Expr) : Bool :=
+    (e.find? fun s => s.isConstOf ``Int || s.isConstOf ``Nat).isSome
+  let discrete := claim.any integral
+    || (← facts.anyM fun f => return integral (← instantiateMVars (← inferType f)))
+  try
+    -- `linarith` proves a comparison outright, which is what a theory axiom
+    -- like commutativity states; `omega` wants a goal of `False`, so it is
+    -- given one, the claim having been turned into a fact by the caller.
+    if claim.isSome || !discrete then
+      Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
+    else
+      Lean.Elab.Tactic.Omega.omega facts.toList goal.mvarId!
+  catch omegaFailed =>
+    try
+      if !discrete then
+        throw omegaFailed
+      else if claim.isSome then
+        Lean.Elab.Tactic.Omega.omega facts.toList goal.mvarId!
+      else
+        Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
+    catch linarithFailed =>
+      let stated ← facts.mapM fun f => do
+        return indentExpr (← instantiateMVars (← inferType f))
+      throwError "nothing says {(claim.map fun c =>
+          m!"that{indentExpr c}\nfollows").getD m!"these cannot all hold"} \
+        of any numbers:{MessageData.joinSep stated.toList ""}\n\
+        omega said: {omegaFailed.toMessageData}\n\
+        linarith said: {linarithFailed.toMessageData}"
+  instantiateMVars goal
 
-/-- A numeral at a numeric type, as `OfNat`/`Neg`/`HDiv` applied to literals.
+/--
+`False`, from facts that cannot all hold of any numbers.
 
-Built rather than elaborated from syntax: the value can be any size and going through
-the parser would mean rendering it and reading it back. -/
-def numeralExpr (k : Kind) (n : Int) (d : Nat) : MetaM Expr := do
-  let ty ← checkKindType k
-  let nat (m : Nat) : MetaM Expr := mkAppOptM ``OfNat.ofNat #[ty, mkRawNatLit m, none]
-  let signed ← if n < 0 then mkAppM ``Neg.neg #[← nat n.natAbs] else nat n.toNat
-  if d == 1 then return signed
-  -- An integer numeral with a denominator is a rounding division in Lean and an exact
-  -- one in TPTP, so it is not one this can honestly build; a rational or real numeral
-  -- with a denominator is just a division.
-  if k == .int then
-    throwError "vampire: the integer numeral {n}/{d} is not an integer"
-  mkAppM ``HDiv.hDiv #[signed, ← nat d]
-
-/-- `fun (a b : ty) => f a b`, with the instance synthesised. -/
-private def binOp (ty : Expr) (f : Name) : MetaM Expr :=
-  withLocalDeclD `a ty fun a => withLocalDeclD `b ty fun b => do
-    mkLambdaFVars #[a, b] (← mkAppM f #[a, b])
-
-/-- `fun (a : ty) => f a`. -/
-private def unOp (ty : Expr) (f : Name) : MetaM Expr :=
-  withLocalDeclD `a ty fun a => do mkLambdaFVars #[a] (← mkAppM f #[a])
-
-/-- What each of Vampire's interpreted symbols and numerals means in Lean, by the
-number the export gave it. Keyed by number and not by name: Vampire renames a clash, so
-`$sum` at `$int` and at `$real` are `$sum` and `$sum0` in some order, and which is which
-is not recoverable from the name. The symbol's own argument sorts say it instead. -/
-structure Meanings where
-  sorts : Std.HashMap Nat Expr := {}
-  funs : Std.HashMap Nat Expr := {}
-  preds : Std.HashMap Nat Expr := {}
-  deriving Inhabited
-
-/-- The Lean meaning of one function symbol, if Vampire interprets it. -/
-private def funMeaning? (syms : Symbols) (info : FunInfo) : MetaM (Option Expr) := do
-  -- The sort decides which of the three arithmetics this is. For an operation that is
-  -- the result sort; for a conversion it is the *argument*, since `$to_real` at `$int`
-  -- lands in `$real`.
-  let resKind := (syms.sorts[info.resultSort]?).bind kindOfSortName?
-  let argKind := (info.argSorts[0]?.bind (syms.sorts[·]?)).bind kindOfSortName?
-  match info.name with
-  | "$sum"        => opAt resKind ``HAdd.hAdd
-  | "$difference" => opAt resKind ``HSub.hSub
-  | "$product"    => opAt resKind ``HMul.hMul
-  | "$quotient"   => opAt resKind ``HDiv.hDiv
-  | "$uminus"     => unAt resKind ``Neg.neg
-  -- `abs` is Mathlib's, so it is named rather than quoted, like the types are.
-  | "$abs"        => unAt resKind (Name.mkSimple "abs")
-  | "$to_real" | "$to_rat" =>
-    -- A cast. Lean spells `((x : ℤ) : ℝ)` with `IntCast`, and `$to_rat` out of `$int`
-    -- the same way.
-    match argKind, resKind with
-    | some .int, some k => do
-      let ty ← checkKindType k
-      let intTy ← checkKindType .int
-      let e ← withLocalDeclD `a intTy fun a => do
-        mkLambdaFVars #[a] (← mkAppOptM ``IntCast.intCast #[ty, none, a])
-      return some e
-    | _, _ => return none
-  | nm =>
-    -- Otherwise a numeral, whose sort is its result sort.
-    --
-    -- ALASCA also writes scalar multiplication as the numeral applied to the term it
-    -- scales -- `-1/1(x)` for `-1 * x` -- so the *arity* decides which of the two a
-    -- numeral-named symbol is. Reading the unary one as the numeral itself hands the
-    -- replay `(-1 : ℝ)` applied to an argument, which is how the `alasca
-    -- normalization` step of `3 * x + 1 ≤ 7 ⊢ x ≤ 2` came out unprovable.
-    match resKind, parseNumeral? nm with
-    | some k, some (n, d) => do
-      let c ← numeralExpr k n d
-      if info.arity == 1 then
-        let ty ← checkKindType k
-        let e ← withLocalDeclD `a ty fun a => do
-          mkLambdaFVars #[a] (← mkAppM ``HMul.hMul #[c, a])
-        return some e
-      return some c
-    | _, _ => return none
-where
-  opAt (k : Option Kind) (f : Name) : MetaM (Option Expr) := do
-    let some k := k | return none
-    return some (← binOp (← checkKindType k) f)
-  unAt (k : Option Kind) (f : Name) : MetaM (Option Expr) := do
-    let some k := k | return none
-    return some (← unOp (← checkKindType k) f)
-
-/-- The Lean meaning of one predicate symbol, if Vampire interprets it. -/
-private def predMeaning? (syms : Symbols) (info : PredInfo) : MetaM (Option Expr) := do
-  let some k := (info.argSorts[0]?.bind (syms.sorts[·]?)).bind kindOfSortName?
-    | return none
-  let ty ← checkKindType k
-  match info.name with
-  | "$less"      => return some (← binOp ty ``LT.lt)
-  | "$lesseq"    => return some (← binOp ty ``LE.le)
-  | "$greater"   => return some (← binOp ty ``GT.gt)
-  | "$greatereq" => return some (← binOp ty ``GE.ge)
-  | _ => return none
-
-/-- Everything in the refutation's symbol table that Vampire interprets. -/
-def meanings (syms : Symbols) : MetaM Meanings := do
-  let mut m : Meanings := {}
-  for (n, nm) in syms.sorts do
-    if let some k := kindOfSortName? nm then
-      m := { m with sorts := m.sorts.insert n (← checkKindType k) }
-  for (f, info) in syms.funs do
-    if let some e ← funMeaning? syms info then
-      m := { m with funs := m.funs.insert f e }
-  for (p, info) in syms.preds do
-    if let some e ← predMeaning? syms info then
-      m := { m with preds := m.preds.insert p e }
-  return m
-
-/-! ## The arithmetic a step is closed by -/
-
-/-- Parse one tactic in the environment the replay is running in.
-
-See the note at the top: the tactics are Mathlib's and this package does not import it,
-so they are resolved here rather than in a quotation. -/
-def parseTactic (src : String) : MetaM (TSyntax `tactic) := do
-  match Parser.runParserCategory (← getEnv) `tactic src (fileName := "<vampire.arith>") with
-  | .ok stx => return ⟨stx⟩
-  | .error e =>
-    throwError "vampire: this step is arithmetic and needs Mathlib's `{src}`, which \
-      does not parse here: {e}. Arithmetic replay needs `import Mathlib`."
-
-/-- The cascade a theory axiom or an evaluation is closed by, cheapest first.
-
-`ring` for the equational axioms, which is most of them — commutativity, associativity,
-distributivity, `$uminus($uminus(X)) = X`. `linarith` for the order axioms, `omega` for
-the integer ones, `nlinarith` where a product of unknowns is involved, `norm_num` for a
-claim about literals alone, and `positivity` for the sign facts. Each is tried under
-`intros`, since every one of these is universally quantified over its variables —
-and an axiom like non-reflexivity, `¬(X < X)`, has its hypothesis introduced by the same
-`intros`, which is what leaves `linarith` something to work with.
-
-The order is by cost and by how often it fires, not by strength: `ring` closes the
-majority and is the cheapest.
-
-**Every alternative ends in `done`.** Without it the cascade silently half-works:
-`norm_num` and `simp_arith` *succeed* on a goal they only partially simplify, so they
-win the `first` and leave a goal behind, and `proveBy` then reports the step as
-unproved with no indication that a later alternative would have closed it. That is how
-`tha non-reflexivity` failed. `t <;> done` fails when `t` leaves anything, so the
-cascade moves on. -/
-def arithTactics : List String :=
-  -- `ring` and `linarith` first: they close the great majority and are the cheapest.
-  -- The `simp`-based ones last, because they are the ones that run away.
-  ["intros <;> ring",
-   "intros <;> norm_num",
-   "intros <;> linarith",
-   "intros <;> omega",
-   "intros; by_contra hc; push_neg at hc; casesm* _ ∧ _; linarith",
-   "intros; by_contra hc; push_neg at hc; casesm* _ ∧ _; omega",
-   "intros; norm_num at *",
-   "intros <;> nlinarith",
-   "intros <;> positivity",
-   "intros <;> tauto",
-   "intros; simp_arith at *",
-   "intros <;> simp_all",
-   "intros; ring_nf at *; linarith",
-   "intros; ring_nf at *; simp_all",
-   "intros; by_contra hc; push_neg at hc; casesm* _ ∧ _; nlinarith",
-   "intros <;> field_simp <;> ring",
-   -- `theory normalization` rewrites a whole *formula*: `A ≥ 0` becomes `¬A < 0`,
-   -- `n * ep * vo` becomes `ep * vo * n`, and the conjunctions come back reassociated.
-   -- So the premise and the conclusion are logically equivalent with ring-equal atoms,
-   -- and what closes it is normalising both sides the same way rather than proving
-   -- either. `ring_nf at *` settles the atoms and the `simp only` set settles the
-   -- comparisons; `tauto` or `grind` then matches the propositional skeletons.
-   "intros; simp only [ge_iff_le, gt_iff_lt, not_lt, not_le] at *; ring_nf at *; tauto",
-   "intros; simp only [ge_iff_le, gt_iff_lt, not_lt, not_le] at *; ring_nf at *; grind",
-   "intros; ring_nf at *; grind",
-   "intros <;> grind"]
-
-/-- Heartbeats one alternative of the cascade may spend before it is abandoned.
-
-Every alternative is wrapped in `set_option maxHeartbeats … in`, and that is not a
-nicety. `first | A | B` moves on when `A` *fails*, and a `simp` that runs away does not
-fail -- it exhausts the whole declaration's budget and takes the replay down with it. On
-`p15_NRA`, an NRA problem of thirty steps, one `simp_all` inside a `theory normalization`
-step used the entire 400000 heartbeats, so the step reported a `simp` timeout and the
-theorem came out resting on `sorryAx` -- with `ring_nf; linarith`, three alternatives
-later, able to close it in a fraction of that.
-
-A per-alternative bound turns "the cascade hangs" into "this alternative failed, try the
-next", which is what a cascade is for. It is deliberately generous: the point is to stop
-a runaway, not to make a slow proof fail. -/
-def arithHeartbeats : Nat := 40000
-
-/-- The cascade for a step that *rewrites a formula* rather than computing a value.
-
-`theory normalization` and the ALASCA normalisations restate a unit over the same
-numbers: `A ≥ 0` becomes `¬A < 0`, `n * ep * vo` becomes `ep * vo * n`, and the
-conjunctions come back reassociated. Premise and conclusion are logically equivalent with
-ring-equal atoms, so what closes them is normalising both sides the same way -- not
-proving either, which is what `ring` and `linarith` try to do.
-
-Sharing `arithTactics` cost 8.5 seconds a step. That list is ordered for a theory
-*axiom*, where `ring` closes the majority, so the alternative that settles a formula
-rewrite sat seventeenth and every step paid for sixteen failures first -- on
-`NRA_intersection-example-simple_proof-node9729`, one `theory normalization` step was
-8537ms of an 8677ms replay. Ordering the same alternatives for what this rule actually is
-is the whole fix; nothing here is new machinery. -/
-def normTactics : List String :=
-  [-- The structural bridge, with the atoms `Vampire/Bridge/Poly.lean` recognises as the
-   -- *same* comparison left as goals for `linarith`. `h0` is what `intros` named the
-   -- premise; a step with no premise has no `h0`, the alternative fails to elaborate, and
-   -- the cascade moves on, which is the same fallback every other line here relies on.
-   --
-   -- **Plain `vampire_bridge h0` used to come first and has been dropped.** It is the same
-   -- walk with one leaf rule switched off, so it proves a strict subset -- and when it
-   -- fails it fails at the *end* of the walk, having done all of it. On
-   -- `LRA_formula_071` step 2 that cost 20ms of a 22ms `theory normalization`, and the
-   -- line below then walked the same formula again and closed it in 1ms. A first
-   -- alternative that cannot succeed where the second fails, and costs the whole walk to
-   -- find out, is not a cheap first alternative.
-   --
-   -- This is the line a normalisation that is not purely structural needs, which is most
-   -- of them: `theory normalization` restates `A ≥ 0` as `¬ A < 0` and reassociates the
-   -- sum inside it, so premise and conclusion agree formula-for-formula and disagree in
-   -- every atom. `vampire_bridge h0` above walks the shape and misses at the first such
-   -- atom; this one hands each one over on its own, already decided to be provable.
-   --
-   -- Why the goals being small is the whole point. On `LRA_formula_040` the step-2
-   -- obligation is a 200-atom `∃∀∃`-quantified tree, and the lines below ask `ring_nf at
-   -- *` and `grind` to take it whole -- which is both why the step failed and where the
-   -- time went. Split, each goal is two comparisons over the same numbers and `linarith`
-   -- settles it outright, while the quantifier prefix, the junction tree and the
-   -- reassociation are the bridge's own rules and cost a walk.
-   -- `linarith only [hb]`, and the restriction is the whole cost of this line.
-   --
-   -- Each goal `vampire_bridge_arith` hands back is one comparison implying another, and
-   -- `Poly` has already decided they are the same comparison -- so the *only* hypothesis
-   -- that can matter is the antecedent, which is what `rename_i hb` names. Left
-   -- unrestricted, `linarith` collects every hypothesis in scope, and at a leaf that scope
-   -- is everything `transport` opened on the way down: the premise, one hypothesis per
-   -- `Exists.elim`, and the enclosing quantified formulas themselves. It preprocesses all
-   -- of them, per leaf, to prove something that needs one.
-   --
-   -- Measured on `NRA_intersection-example-simple_proof-node715350` step 2, a `theory
-   -- normalization` over a formula wide enough to have a great many leaves.
-   -- The fallback is *inside* the `<;>`, per goal, and that placement is the point.
-   --
-   -- As a separate alternative behind this one it is a pessimisation: `proveBy` wraps each
-   -- line in `<;> done`, so one leaf needing more than its antecedent fails the whole line,
-   -- and the next line then walks the formula again and re-runs `linarith` on every leaf --
-   -- including the ones already closed. Measured that way, `LRA_formula_071` went from 7.2s
-   -- to over the 15s wall. Per goal, an awkward leaf costs one extra `linarith` on itself
-   -- and nothing anywhere else.
-   --
-   -- `first` also covers `rename_i` failing outright on a goal with no inaccessible name to
-   -- rename, which would otherwise take the whole line down with it.
-   "vampire_bridge_arith h0 <;> (first | (rename_i hb; linarith only [hb]) | linarith)",
-   -- `nlinarith` behind those for the NRA problems, where a normalised atom can differ by
-   -- a product of unknowns and the goal is no longer linear.
-   "vampire_bridge_arith h0 <;> nlinarith",
-   -- `grind` before `tauto`, and the order is measured rather than a preference. On
-   -- `NRA_intersection-example-simple_proof-node9729`'s `theory normalization` step the
-   -- `tauto` line spends 3197ms and *fails*; the `grind` line that follows it closes the
-   -- same goal in 122ms. `tauto` stays, behind it, because it costs nothing when `grind`
-   -- has already succeeded -- `proveBy` stops feeding lines to a closed goal.
-   "simp only [ge_iff_le, gt_iff_lt, not_lt, not_le] at *; ring_nf at *; grind",
-   "ring_nf at *; grind",
-   "simp only [ge_iff_le, gt_iff_lt, not_lt, not_le] at *; ring_nf at *; tauto",
-   "ring_nf at *; tauto",
-   "intros <;> ring",
-   "intros <;> linarith",
-   "intros; norm_num at *",
-   "intros <;> simp_all",
-   "intros <;> grind",
-   "intros; by_contra hc; push_neg at hc; casesm* _ ∧ _; linarith"]
-
-/-- The script for a step whose whole content is arithmetic. -/
-def scriptFrom (tactics : List String) : MetaM (Array (TSyntax `tactic)) := do
-  -- One `try` per alternative, on its own line, rather than one nested `first`.
-  --
-  -- Semantically the same: `proveBy` stops feeding lines to the script once the goal is
-  -- closed, so the first alternative that closes it is the last one that runs, and
-  -- `<;> done` makes a partial success count as a failure so `try` backtracks it. What
-  -- the separate lines buy is that `trace.vampire.timing.tactic` then times each
-  -- alternative *individually*. Inside a `first` the whole cascade is one line and one
-  -- number, which is how a step that spent 8.5 seconds looked exactly like a step that
-  -- spent one millisecond -- there was no way to see which alternative was winning, or
-  -- how much the ones before it cost, without rebuilding with the list cut down.
-  tactics.toArray.mapM fun t =>
-    parseTactic s!"try (set_option maxHeartbeats {arithHeartbeats} in (({t}) <;> done))"
-
-/-- The bridge's lines, for any rule whose conclusion *restates* its premise.
-
-`theory normalization` is the obvious such rule and `normTactics` puts these first, but
-`evaluation` is one too: its conclusion is its premise with the arithmetic worked out, so
-premise and conclusion agree formula-for-formula and differ inside the atoms, which is what
-the bridge walks and `Vampire/Bridge/Poly.lean` decides.
-
-Shared rather than repeated because `evaluation` did *not* have them, and the cost of that
-was not a slow step but a **discarded refutation**. On
-
-    theorem int_bound (n m : ℤ) (h : 2 * n ≤ m) (h₂ : 0 < n) : 2 ≤ m := by vampire [*]
-
-the probe finds a refutation in 968ms whose step 11655 asks for
-
-    (∀ v0 : ℤ, 0 < v0 + -0 ∨ ¬n < v0) → ∀ v0 : ℤ, ¬n < v0 ∨ 0 < v0
-
--- a reordered disjunction over an atom that lost a `+ -0`. Nothing in `arithTactics`
-closes it, and it cannot: the conclusion is *false* on its own (`v0 = -5`, `n = -10`), so
-it has to be got from the premise, and neither `omega` nor `linarith` instantiates a
-premise's `∀`. The bridge introduces the conclusion's binder, instantiates the premise's at
-it, matches the disjuncts by permutation and the atoms by normal form. Without these two
-lines the whole refutation was thrown away and the tactic escalated through 42 portfolio
-strategies to find another -- 5.7s of a 7.2s run spent on proofs it had already found. -/
-def bridgeTactics : List String :=
-  ["vampire_bridge h0",
-   "vampire_bridge_arith h0 <;> (first | (rename_i hb; linarith only [hb]) | linarith)"]
-
-/-- The script for a theory axiom or an evaluation. -/
-def arithScript : MetaM (Array (TSyntax `tactic)) := scriptFrom arithTactics
-
-/-- The script for an `evaluation`: the bridge first, then the theory-axiom cascade.
-
-The bridge lines go first because an evaluation's conclusion restates its premise, and the
-cascade stays behind them because an evaluation that really is a *computation* -- `2 * 3`
-becoming `6` with no premise to walk from -- is what that cascade is ordered for. A theory
-axiom keeps `arithScript` unchanged: it has no premise, so `h0` does not exist and the
-bridge lines could only fail to elaborate. -/
-def evalScript : MetaM (Array (TSyntax `tactic)) :=
-  scriptFrom (bridgeTactics ++ arithTactics)
-
-/-- The script for a formula-level arithmetic rewrite. -/
-def normScript : MetaM (Array (TSyntax `tactic)) := scriptFrom normTactics
+Two procedures rather than one: `omega` knows that the integers are discrete,
+which is what vampire's integrality steps turn on, and `linarith` works over
+any ordered field, which is where the rationals and the reals are. Neither is
+asked to find the facts -- they are the step's own premises -- only to see that
+together they are impossible.
+-/
+def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  -- What a symbol vampire introduced stands for is a function, so a step over
+  -- one states an application of it; the procedures read what it says, which
+  -- is that reduced. Stated again rather than rebuilt: the two are the same
+  -- term to the kernel.
+  -- Only where what it says is a proposition. A defined predicate applied to
+  -- something says what it stands for once reduced, and that is what the
+  -- procedures read; a term does not need reading that way, and reducing one
+  -- copies the body of the function into every place its variable occurs,
+  -- which for a term a skolemisation stood up is a term there is no end of.
+  let readable (e : Expr) : MetaM Expr :=
+    Meta.transform e (post := fun s => do
+      if s.getAppFn.isLambda && (← isProp (← inferType s)) then
+        return .done s.headBeta
+      return .done s)
+  let facts ← facts.mapM fun fact => do
+    let stated ← instantiateMVars (← inferType fact)
+    let reduced ← readable stated
+    if reduced == stated then pure fact else mkExpectedTypeHint fact reduced
+  let claim ← claim.mapM readable
+  -- Put aside what the procedure can only take whole and ask about a variable
+  -- standing for each, so that what is asked is as wide as the numbers in it
+  -- and no wider. The answer proves the question with those variables free, so
+  -- applying it to the terms they stand for, and to the facts the question
+  -- took as hypotheses, proves what was asked.
+  let mut atoms := #[]
+  let mut seen : Std.HashSet Expr := {}
+  for fact in facts do
+    let (atoms', seen') ← atomsOf (← instantiateMVars (← inferType fact)) atoms seen
+    atoms := atoms'; seen := seen'
+  if let some claim := claim then
+    let (atoms', _) ← atomsOf claim atoms seen
+    atoms := atoms
+  if atoms.isEmpty then
+    return ← askAbout facts claim
+  let mut decls := #[]
+  for (atom, i) in atoms.zipIdx do
+    decls := decls.push (Name.mkSimple s!"a{i}", fun _ => inferType atom)
+  withLocalDeclsD decls fun locals => do
+    let standingFor (e : Expr) : Expr :=
+      e.replace fun s =>
+        match atoms.findIdx? (· == s) with
+        | some i => some locals[i]!
+        | none => none
+    let mut hypDecls := #[]
+    for (fact, i) in facts.zipIdx do
+      let stated := standingFor (← instantiateMVars (← inferType fact))
+      hypDecls := hypDecls.push (Name.mkSimple s!"h{i}", fun _ => pure stated)
+    withLocalDeclsD hypDecls fun hyps => do
+      let answer ← askAbout hyps (claim.map standingFor)
+      return mkAppN (← mkLambdaFVars (locals ++ hyps) answer) (atoms ++ facts)
 
 end Vampire.Arith

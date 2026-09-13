@@ -1,251 +1,453 @@
-/-
-Ported from lean-smt (`Smt/Translate.lean`), Copyright (c) 2021-2022 by the authors
-listed in that project's AUTHORS file. Released under Apache 2.0; see `NOTICE`.
-Changes: the target is `Vampire.Term` and the attribute is `vampire_translate`;
-`lam` is rejected with a message about first-order logic rather than SMT-LIB.
--/
 import Lean
-import Vampire.Attribute
-import Vampire.Translate.Term
-
-/-!
-# Translating Lean expressions
-
-A `Translator` handles some fragment of Lean. The traversal tries every registered
-translator on the whole expression first; if none matches, it splits the expression and
-recurses, so a translator only has to handle the constructs it knows about.
-
-Along the way we record which constants and free variables the result depends on. Those
-become the declarations Vampire needs, and their order is fixed by the dependency graph
-in `Translate/Query.lean`.
--/
-
-/-- Return true iff `e` contains a free variable satisfying `p`. -/
-@[inline] private def Lean.Expr.hasAnyFVar' {m : Type → Type} [Monad m]
-    (e : Expr) (p : FVarId → m Bool) : m Bool :=
-  let rec @[specialize] visit (e : Expr) := do if !e.hasFVar then return false else
-    match e with
-    | Expr.forallE _ d b _ => return (← visit d) || (← visit b)
-    | Expr.lam _ d b _     => return (← visit d) || (← visit b)
-    | Expr.mdata _ e       => visit e
-    | Expr.letE _ t v b _  => return (← visit t) || (← visit v) || (← visit b)
-    | Expr.app f a         => return (← visit f) || (← visit a)
-    | Expr.proj _ _ e      => visit e
-    | Expr.fvar fvarId     => p fvarId
-    | _                    => return false
-  visit e
 
 namespace Vampire
 
-open Lean Meta Expr
-open Attribute Term
+open Lean Meta
 
-structure TranslationM.State where
-  /-- Constants the translated result depends on, propagated upwards so the caller can
-  build a dependency graph. Reset at the `translateExpr` entry point.
+/-- A TPTP term. -/
+inductive Tm where
+  | var (name : String)
+  | app (fn : String) (args : Array Tm)
+deriving Inhabited
 
-  The universe levels are kept, not just the name. A dependency is turned back into an
-  `Expr` to key the graph and to have its type inferred, and `mkConst nm []` is ill-formed
-  for a universe-polymorphic constant — `inferType` on it fails with "incorrect number of
-  universe levels", naming the constant and nothing about where it came from. `instHAdd`
-  is the one that finds this: `a + b` elaborates to an application mentioning it, so the
-  goal `a + b = a + b` failed to translate at all.
+/-- A TPTP TFF formula. -/
+inductive Fm where
+  | top
+  | bot
+  | atom (tm : Tm)
+  | eq (lhs rhs : Tm) (positive : Bool)
+  | neg (arg : Fm)
+  | and (args : Array Fm)
+  | or (args : Array Fm)
+  | imp (lhs rhs : Fm)
+  | iff (lhs rhs : Fm)
+  | all (vars : Array (String × String)) (body : Fm)
+  | ex (vars : Array (String × String)) (body : Fm)
+deriving Inhabited
 
-  A `NameMap`, not a `HashMap`: it is ordered, like the `NameSet` this used to be, and the
-  order decides the order symbols are declared to Vampire in. -/
-  depConstants : NameMap (List Level) := {}
-  /-- Free variables the translated result depends on. Same purpose. -/
-  depFVars : FVarIdSet := {}
-  /-- Free variables introduced *by* the translation, from binders. These are bound in
-  the result, so they are not dependencies. -/
-  localFVars : FVarIdSet := {}
-  /-- Memoises `applyTranslators?` along with what it contributed to the dependencies. -/
-  cache : Std.HashMap Expr (Option (Term × NameMap (List Level) × FVarIdSet)) := {}
-  /-- Suffix counter making a scoped binder name unique. -/
-  scopedNames : Std.HashMap Name Nat := {}
-  /-- Names chosen for free variables, so the same fvar is spelled the same way in every
-  formula it occurs in. -/
-  uniqueFVarNames : Std.HashMap FVarId String := {}
+namespace Tm
 
-abbrev TranslationM := StateT TranslationM.State MetaM
+protected partial def render : Tm → String
+  | .var name => name
+  | .app fn args =>
+    if args.isEmpty then fn
+    else s!"{fn}({String.intercalate ", " (args.toList.map Tm.render)})"
+
+instance : ToString Tm := ⟨Tm.render⟩
+
+end Tm
+
+namespace Fm
+
+private def renderVars (vars : Array (String × String)) : String :=
+  String.intercalate ", " (vars.toList.map fun (v, ty) => s!"{v}: {ty}")
+
+protected partial def render : Fm → String
+  | .top => "$true"
+  | .bot => "$false"
+  | .atom tm => toString tm
+  | .eq lhs rhs positive => s!"({lhs} {if positive then "=" else "!="} {rhs})"
+  | .neg arg => s!"~{Fm.render arg}"
+  | .and args => junction "&" args
+  | .or args => junction "|" args
+  | .imp lhs rhs => s!"({Fm.render lhs} => {Fm.render rhs})"
+  | .iff lhs rhs => s!"({Fm.render lhs} <=> {Fm.render rhs})"
+  | .all vars body => s!"(! [{renderVars vars}] : {Fm.render body})"
+  | .ex vars body => s!"(? [{renderVars vars}] : {Fm.render body})"
+where
+  junction (op : String) (args : Array Fm) : String :=
+    if args.isEmpty then (if op == "&" then "$true" else "$false")
+    else if args.size == 1 then Fm.render args[0]!
+    else s!"({String.intercalate s!" {op} " (args.toList.map Fm.render)})"
+
+instance : ToString Fm := ⟨Fm.render⟩
+
+end Fm
+
+/-- A `$tType` declaration and the symbols declared over it. -/
+structure Declarations where
+  types : Array String := #[]
+  symbols : Array String := #[]
+deriving Inhabited
+
+structure State where
+  /-- TPTP type name for each Lean sort. -/
+  sorts : Std.HashMap Expr String := {}
+  /-- TPTP symbol name for each signature constant, keyed by its `Expr`. -/
+  symbols : Std.HashMap Expr String := {}
+  /-- TPTP variable name for each local introduced under a binder. -/
+  vars : Std.HashMap FVarId String := {}
+  decls : Declarations := {}
+  /-- Every TPTP identifier handed out, to keep them distinct. -/
+  taken : Std.HashSet String := {}
+  varCount : Nat := 0
+deriving Inhabited
+
+abbrev TranslateM := StateRefT State MetaM
 
 /--
-A function translating some subset of Lean expressions into first-order `Term`s.
-Register one with `@[vampire_translate]`.
-
-The input is guaranteed well-typed in the ambient `MetaM` context. Return `some t` if
-this translator handles the input, `none` if it does not.
+Turns a Lean name into a TPTP identifier: alphanumerics and underscores, with a
+leading character of the required case. TPTP wants lower case for symbols and
+upper case for variables.
 -/
-abbrev Translator := Expr → TranslationM (Option Term)
+def sanitize (name : String) (upper : Bool) : String :=
+  let cs := name.toList.map fun c => if c.isAlphanum || c == '_' then c else '_'
+  let cs := match cs with
+    | c :: rest => if c.isAlpha then c :: rest else 'x' :: c :: rest
+    | [] => ['x']
+  -- A name of entirely non-ASCII characters would become all underscores.
+  let cs := (cs.reverse.dropWhile (· == '_')).reverse
+  match cs with
+  | c :: rest => String.ofList ((if upper then c.toUpper else c.toLower) :: rest)
+  | [] => "x"
 
-namespace Translator
+/-- Hands out `name`, or `name_1`, `name_2`, … if it is already in use. -/
+def freshName (name : String) : TranslateM String := do
+  let taken := (← get).taken
+  let name :=
+    if !taken.contains name then name
+    else
+      let rec attempt (i : Nat) : String :=
+        match i with
+        | 0 => name
+        | i + 1 =>
+          let candidate := s!"{name}_{taken.size - i}"
+          if taken.contains candidate then attempt i else candidate
+      attempt (taken.size + 1)
+  modify fun s => { s with taken := s.taken.insert name }
+  return name
 
-private unsafe def getTranslatorsUnsafe : MetaM (List (Translator × Name)) := do
-  let env ← getEnv
-  let names := ((vampireExt.getState env).getD ``Translator {}).toList
-  let mut translators := []
-  for name in names do
-    let fn ← IO.ofExcept <| Id.run <| ExceptT.run <|
-      env.evalConst Translator Options.empty name
-    translators := (fn, name) :: translators
-  return translators
+/--
+The TPTP arithmetic type a Lean type stands for, for the three that TPTP has of
+its own. Named rather than resolved, so that this file need not import the
+library `Real` comes from.
+-/
+def arithmeticSort (τ : Expr) : Option String :=
+  match τ with
+  | .const name _ =>
+    if name == ``Int then some "$int"
+    else if name == `Rat then some "$rat"
+    else if name == `Real then some "$real"
+    else none
+  | _ => none
 
-/-- The translators registered in the current environment. -/
-@[implemented_by getTranslatorsUnsafe]
-opaque getTranslators : MetaM (List (Translator × Name))
+/--
+The integer a numeral stands for, whatever numeric type it is at.
 
-/-- Return a cached translation of `e`, or run `k e` and cache it. -/
-def withCache (k : Translator) (e : Expr) : TranslationM (Option Term) := do
-  match (← get).cache[e]? with
-  | some (some (tm, depConsts, depFVars)) =>
-    modify fun st => { st with
-      depConstants := depConsts.foldl (fun m k v => m.insert k v) st.depConstants
-      depFVars := st.depFVars.union depFVars }
-    return some tm
-  | some none => return none
-  | none =>
-    let depConstantsBefore := (← get).depConstants
-    let depFVarsBefore := (← get).depFVars
-    modify fun st => { st with depConstants := .empty, depFVars := .empty }
-    let ret? ← k e
-    modify fun st => { st with
-      depConstants :=
-        depConstantsBefore.foldl (fun m k v => m.insert k v) st.depConstants
-      depFVars := st.depFVars.union depFVarsBefore
-      cache := st.cache.insert e <| ret?.map ((·, st.depConstants, st.depFVars)) }
-    return ret?
+A numeral is an `OfNat` application over a raw literal, and a negative one that
+under a `Neg`; both are read here rather than evaluated, so that nothing but a
+literal is taken for one.
+-/
+def numeral? (e : Expr) : Option Int :=
+  match_expr e with
+  | Neg.neg _ _ a => (numeralNat? a).map fun n => -(Int.ofNat n)
+  | _ => (numeralNat? e).map Int.ofNat
+where
+  numeralNat? (e : Expr) : Option Nat :=
+    match_expr e with
+    | OfNat.ofNat _ n _ =>
+      match n.consumeMData with
+      | .lit (.natVal n) => some n
+      | _ => none
+    | _ => none
 
-/-- Run `k` with a variant of `n` that does not shadow anything free in `b`. -/
-def withScopedName {α : Type} (n : Name) (b : Expr) (k : Name → TranslationM α) :
-    TranslationM α := do
-  let state ← get
-  let mut n' := n
-  let mut scopedNames := state.scopedNames
-  while ← b.hasAnyFVar' (·.getUserName >>= (return · == n')) do
-    let i := scopedNames.getD n 1
-    n' := n.appendIndexAfter i
-    scopedNames := scopedNames.insert n (i + 1)
-  set { state with scopedNames := scopedNames }
-  let k := k n'
-  set state
-  k
+/-- How TPTP writes a whole number of each of its arithmetic types. -/
+def renderNumeral (sort : String) (n : Int) : String :=
+  if sort == "$rat" then s!"{n}/1"
+  else if sort == "$real" then s!"{n}.0"
+  else toString n
+
+/-- Whether `e` is the type `Prop`. -/
+def isPropType (e : Expr) : Bool := e matches .sort .zero
+
+/--
+Whether `e` is a type whose elements are TPTP individuals. `Prop` is not one,
+and neither is a universe: an argument of type `Type` is a type argument, which
+carries no first-order content.
+-/
+def isSortType (e : Expr) : MetaM Bool := do
+  if isPropType e then return false
+  if e matches .sort _ then return false
+  return (← whnf (← inferType e)) matches .sort _
+
+/-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
+def sortName (e : Expr) : TranslateM String := do
+  if let some name := (← get).sorts[e]? then
+    return name
+  if let some builtin := arithmeticSort e then
+    -- Recorded so that reading the proof back knows the Lean type, but not
+    -- declared: TPTP has these types already.
+    modify fun s => { s with sorts := s.sorts.insert e builtin }
+    return builtin
+  let hint ← match e with
+    | .fvar fvarId => pure (← fvarId.getUserName).toString
+    | .const name _ => pure name.getString!
+    | _ => pure "sort"
+  let name ← freshName (sanitize hint false)
+  modify fun s => { s with
+    sorts := s.sorts.insert e name
+    decls.types := s.decls.types.push s!"tff({name}_type, type, {name}: $tType)."
+  }
+  return name
+
+/--
+The TPTP signature of a symbol's Lean type: the sort names of its arguments and
+of its result, or `none` when the type is not first-order over TPTP sorts.
+
+The sorts are named inside the telescope, since naming them afterwards would
+read expressions mentioning locals that no longer exist. A type that depends on
+its own arguments is rejected outright, which is what keeps type class
+instances and polymorphic constants out; `+mono` is the way to handle those.
+-/
+def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
+  forallTelescopeReducing type fun args result => do
+    let locals := args.map (·.fvarId!)
+    let dependent (e : Expr) : Bool := e.hasAnyFVar locals.contains
+    if dependent result then return none
+    unless isPropType result || (← isSortType result) do return none
+    let mut argTypes := #[]
+    for arg in args do
+      let argType ← inferType arg
+      if dependent argType then return none
+      unless ← isSortType argType do return none
+      argTypes := argTypes.push argType
+    let argNames ← argTypes.mapM sortName
+    let resultName ← if isPropType result then pure "$o" else sortName result
+    return some (argNames, resultName)
+
+/-- Returns the TPTP name for a signature symbol, declaring it if new. -/
+def symbolName (e : Expr) (type : Expr) : TranslateM (Option String) := do
+  if let some name := (← get).symbols[e]? then
+    return some name
+  let some (argNames, resultName) ← signatureOf type | return none
+  let hint ← match e with
+    | .fvar fvarId => pure (← fvarId.getUserName).toString
+    | .const name _ => pure name.toString
+    | _ => pure "f"
+  let name ← freshName (sanitize hint false)
+  let signature :=
+    if argNames.isEmpty then resultName
+    else if argNames.size == 1 then s!"{argNames[0]!} > {resultName}"
+    else s!"({String.intercalate " * " argNames.toList}) > {resultName}"
+  modify fun s => { s with
+    symbols := s.symbols.insert e name
+    decls.symbols := s.decls.symbols.push
+      s!"tff({name}_decl, type, {name}: {signature})."
+  }
+  return some name
+
+/-- Hands out a fresh TPTP variable name for a bound local. -/
+def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
+  let hint := (← fvarId.getUserName).toString
+  let name ← freshName (sanitize hint true)
+  let type ← sortName (← fvarId.getType)
+  modify fun s => { s with vars := s.vars.insert fvarId name }
+  return (name, type)
+
+/-- How TPTP names the cast into one of its arithmetic types. -/
+def castInto (sort : String) : String :=
+  if sort == "$real" then "$to_real"
+  else if sort == "$rat" then "$to_rat"
+  else "$to_int"
 
 mutual
 
-/-- `applyTranslators?`, but a failure to translate is an error. -/
-partial def applyTranslators! (e : Expr) : TranslationM Term := do
-  let some tm ← applyTranslators? e
-    | throwError "vampire: no translator matched{indentD e}"
-  return tm
+/--
+The arguments of a nested conjunction or disjunction, flattened.
+
+In the order they are written: vampire's parser flattens a junction however it
+was nested and keeps its arguments in the order it read them, so its reading of
+the formula agrees with the goal's. (Its *printing* reverses them, which is
+only a thing to know when reading a proof by eye.) Were that to stop holding,
+an `input` step would say so: it would no longer prove what the goal states.
+-/
+partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
+  -- Both sides, not just the right: vampire's parser flattens a junction
+  -- however it was nested, and what is emitted has to be what it flattens to
+  -- or the reversal below lines the parts up against the wrong ones.
+  let rec parts (e : Expr) : Array Expr :=
+    if e.isAppOfArity fn 2 then
+      parts e.appFn!.appArg! ++ parts e.appArg!
+    else
+      #[e]
+  (parts e).mapM translateFormula
 
 /--
-Compute the first-order translation of `e`.
+A Lean arithmetic operation as TPTP writes it, or `none` if the expression is
+not one.
 
-Every registered translator is tried on the whole expression; if one succeeds its result
-is used. Otherwise `e` is split and its parts translated, top-down and depth-first.
+Only at TPTP's own arithmetic types: `+` over a type it knows nothing of is an
+ordinary symbol, and is translated as one. Lean's `/` and `%` over the integers
+are `Int.ediv` and `Int.emod`, which round toward minus infinity for a positive
+divisor -- Euclidean, which is what TPTP's `_e` forms are and what SMT-LIB's
+`div` and `mod` are.
 -/
-partial def applyTranslators? : Translator := withCache fun e => do
-  let ts ← getTranslators
-  go ts e
-where
-  go (ts : List (Translator × Name)) : Translator := fun e => do
-    for (t, nm) in ts do
-      if let some tm ← t e then
-        trace[vampire.translate.expr] "{e} =({nm})=> {tm}"
-        return tm
-    match e with
-    | fvar fv =>
-      if (← get).localFVars.contains fv then
-        return symbolT (← fv.getUserName).toString
-      else
-        modify fun st => { st with depFVars := st.depFVars.insert fv }
-        match (← get).uniqueFVarNames[fv]? with
-        | some n => return symbolT n
-        | none   => return symbolT (← fv.getUserName).toString
-    | const nm us =>
-      -- The levels go with the name; see `depConstants`. Where the same constant occurs
-      -- at two instantiations the last wins, which costs nothing here: the symbol is
-      -- named after the constant either way, and a universe argument is not part of the
-      -- first-order term.
-      modify fun st => { st with depConstants := st.depConstants.insert nm us }
-      return symbolT nm.toString
-    | app f e => return appT (← applyTranslators! f) (← applyTranslators! e)
-    | lam .. =>
-      throwError "vampire: cannot translate{indentD e}\n\
-        first-order logic has no lambdas; try instantiating or eta-expanding it"
-    | e@(forallE n t b bi) => withScopedName n b fun n => do
-      let tmB ← Meta.withLocalDecl n bi t (translateBody b)
-      -- What decides between a quantifier and a function sort is whether the whole
-      -- `∀` is a proposition, not whether its binder is used. `∀ (v : ι), ψ` where ψ
-      -- happens not to mention `v` is still a quantified formula; reading it as the
-      -- sort `ι → ψ` declares a symbol whose argument sort is a formula, which is not
-      -- first-order and is rejected further down with no hint of where it came from.
-      -- Implication between propositions is handled earlier, by `Translate/Prop.lean`.
-      if (← Meta.inferType e).isProp then
-        return forallT n.toString (← applyTranslators! t) tmB
-      else if !b.hasLooseBVars then
-        return arrowT (← applyTranslators! t) tmB
-      else
-        return forallT n.toString (← applyTranslators! t) tmB
-    | letE n t v b true =>
-      let tmB ← Meta.withLetDecl n t v (translateBody b)
-      return letT n.toString (← applyTranslators! v) tmB
-    | mdata _ e => go ts e
-    | sort _ =>
-      -- `Prop` is handled by a translator; anything else here is a type in term
-      -- position. Two quite different things look like this and the remedy differs, so
-      -- the message names both rather than guessing.
-      --
-      -- The one that is easy to miss: a goal with no polymorphism of its own still
-      -- reaches here as soon as it uses an operation that goes through a class, because
-      -- what is translated is the *elaborated* term. `a + b` for `a b : Nat` is
-      -- `@HAdd.hAdd Nat Nat Nat instHAdd a b`, and those three `Nat`s are types in
-      -- argument position. `+mono` is what handles it — auto instantiates and then
-      -- abstracts the operation into an uninterpreted symbol — so `a + b = a + b`
-      -- fails here and goes through with `+mono`.
-      throwError "vampire: cannot translate{indentD e}\n\
-        Vampire's logic is monomorphic, so a type cannot appear as an argument.\n\n\
-        If the goal uses an operation defined through a typeclass — arithmetic, or \
-        anything else spelled with `+`, `*`, `≤` and friends — this is what its \
-        elaborated form looks like, even when the goal itself mentions no type \
-        variable: `a + b` is `@HAdd.hAdd Nat Nat Nat instHAdd a b`. Try `vampire +mono`, \
-        which instantiates and abstracts those away.\n\n\
-        If the goal is genuinely polymorphic, `+mono` is also the answer; failing that, \
-        instantiate the constant at the types the goal uses."
-    | e => throwError "vampire: cannot translate{indentD e}"
-  translateBody (b : Expr) (x : Expr) : TranslationM Term := do
-    modify fun s => { s with localFVars := s.localFVars.insert x.fvarId! }
-    let tmB ← applyTranslators! (b.instantiate #[x])
-    modify fun s => { s with localFVars := s.localFVars.erase x.fvarId! }
-    return tmB
+partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
+  let some sort := arithmeticSort (← whnf (← inferType e)) | return none
+  if let some n := numeral? e then
+    return some (.app (renderNumeral sort n) #[])
+  let binary (fn : String) (a b : Expr) : TranslateM (Option Tm) := do
+    return some (.app fn #[← translateTerm a, ← translateTerm b])
+  match_expr e with
+  | HAdd.hAdd _ _ _ _ a b => binary "$sum" a b
+  | HSub.hSub _ _ _ _ a b => binary "$difference" a b
+  | HMul.hMul _ _ _ _ a b => binary "$product" a b
+  | Neg.neg _ _ a => return some (.app "$uminus" #[← translateTerm a])
+  | HDiv.hDiv _ _ _ _ a b =>
+    binary (if sort == "$int" then "$quotient_e" else "$quotient") a b
+  | HMod.hMod _ _ _ _ a b => binary "$remainder_e" a b
+  -- A cast into the type this term is at. Lean puts one in where a numeral was
+  -- written at one type and used at another, and what it names is the number,
+  -- so the integer division in `((16 : ℤ) / 5 : ℝ)` is integer division.
+  | Int.cast _ _ a => return some (.app (castInto sort) #[← translateTerm a])
+  | Nat.cast _ _ a => return some (.app (castInto sort) #[← translateTerm a])
+  | _ => return none
+
+/-- Translates a Lean expression of non-`Prop` type into a TPTP term. -/
+partial def translateTerm (e : Expr) : TranslateM Tm := do
+  let e ← instantiateMVars e
+  if let some arithmetic ← arithmeticTerm? e then
+    return arithmetic
+  match e with
+  | .fvar fvarId =>
+    if let some name := (← get).vars[fvarId]? then
+      return .var name
+    let some name ← symbolName e (← fvarId.getType)
+      | throwError "cannot translate {e} of type {← inferType e} to TPTP"
+    return .app name #[]
+  | .const .. =>
+    let some name ← symbolName e (← inferType e)
+      | throwError "cannot translate {e} of type {← inferType e} to TPTP"
+    return .app name #[]
+  | .app .. =>
+    let fn := e.getAppFn
+    let args := e.getAppArgs
+    -- Type arguments carry no first-order content.
+    let args ← args.filterM fun arg => return !(← isSortType arg)
+    let head ← match fn with
+      | .fvar fvarId => symbolName fn (← fvarId.getType)
+      | .const .. => symbolName fn (← inferType fn)
+      | _ => pure none
+    let some head := head
+      | throwError "cannot translate application of {fn} to TPTP"
+    return .app head (← args.mapM translateTerm)
+  | .mdata _ e => translateTerm e
+  | _ => throwError "cannot translate {e} to TPTP"
+
+/-- Translates a Lean proposition into a TPTP formula. -/
+partial def translateFormula (e : Expr) : TranslateM Fm := do
+  let e ← instantiateMVars e
+  match e with
+  | .mdata _ e => translateFormula e
+  | .forallE name domain body binderInfo =>
+    if (← isProp domain) && !body.hasLooseBVars then
+      return .imp (← translateFormula domain) (← translateFormula body)
+    else if ← isSortType domain then
+      -- One block rather than a binder at a time: vampire's flattening merges
+      -- adjacent quantifiers and does not keep their order while doing it, so
+      -- what is emitted is what it would have flattened them into.
+      withLocalDecl name binderInfo domain fun x => do
+        let binder ← bindVar x.fvarId!
+        match ← translateFormula (body.instantiate1 x) with
+        | .all binders inner => return .all (#[binder] ++ binders) inner
+        | inner => return .all #[binder] inner
+    else
+      -- A dependent or higher-order binder, e.g. an instance argument. Assume
+      -- it is inhabited and translate the body; TPTP domains are non-empty.
+      withLocalDecl name binderInfo domain fun x =>
+        translateFormula (body.instantiate1 x)
+  | _ =>
+    match_expr e with
+    | True => return .top
+    | False => return .bot
+    | Not p => return .neg (← translateFormula p)
+    | And _ _ => return .and (← junctionArgs ``And e)
+    | Or _ _ => return .or (← junctionArgs ``Or e)
+    | Iff p q => return .iff (← translateFormula p) (← translateFormula q)
+    | LT.lt _ _ a b => arithmeticAtom "$less" a b e
+    | LE.le _ _ a b => arithmeticAtom "$lesseq" a b e
+    | GT.gt _ _ a b => arithmeticAtom "$less" b a e
+    | GE.ge _ _ a b => arithmeticAtom "$lesseq" b a e
+    | Eq α a b =>
+      -- Two propositions are equal when each follows from the other, which is
+      -- what TPTP has `<=>` for; it has no equality between formulas.
+      if isPropType α then
+        return .iff (← translateFormula a) (← translateFormula b)
+      return .eq (← translateTerm a) (← translateTerm b) true
+    | Ne α a b =>
+      if isPropType α then
+        return .neg (.iff (← translateFormula a) (← translateFormula b))
+      return .eq (← translateTerm a) (← translateTerm b) false
+    | Exists _ p =>
+      lambdaTelescope p fun xs body => do
+        let mut binders := #[]
+        for x in xs do
+          binders := binders.push (← bindVar x.fvarId!)
+        match ← translateFormula body with
+        | .ex inner rest => return .ex (binders ++ inner) rest
+        | rest => return .ex binders rest
+    | _ => return .atom (← translateTerm e)
+
+/--
+A comparison at one of TPTP's arithmetic types, or the atom it is otherwise:
+`≤` over a type TPTP knows nothing of is an ordinary predicate.
+-/
+partial def arithmeticAtom (fn : String) (a b : Expr) (whole : Expr) :
+    TranslateM Fm := do
+  if (arithmeticSort (← whnf (← inferType a))).isSome then
+    return .atom (.app fn #[← translateTerm a, ← translateTerm b])
+  return .atom (← translateTerm whole)
 
 end
 
-/-- Translate `e`, returning the term and everything it depends on. -/
-def translateExpr (e : Expr) :
-    TranslationM (Term × NameMap (List Level) × FVarIdSet) := do
-  modify fun st => { st with depConstants := .empty, depFVars := .empty }
-  let tm ← applyTranslators! e
-  trace[vampire.translate] "{e} ↦ {tm}"
-  return (tm, (← get).depConstants, (← get).depFVars)
+/--
+The TPTP role of a hypothesis. Vampire treats both as asserted, so this does
+not affect whether a refutation exists, but it drives the goal-directed
+heuristics (set of support, SInE selection, `nongoal_weight_coefficient`) and
+is what makes `inputType` meaningful on the units of a proof.
+-/
+inductive Role where
+  | «axiom»
+  | negatedConjecture
+deriving Inhabited, Repr, BEq
 
-def translateExpr' (e : Expr) : TranslationM Term :=
-  Prod.fst <$> translateExpr e
+def Role.render : Role → String
+  | .axiom => "axiom"
+  | .negatedConjecture => "negated_conjecture"
 
-end Vampire.Translator
+/--
+The Lean expressions the TPTP names stand for, so that a proof over those names
+can be read back. Anything vampire introduces itself -- a skolem function, an
+AVATAR predicate -- is absent, which is how such names are recognised.
+-/
+structure Symbols where
+  sorts : Std.HashMap String Expr := {}
+  symbols : Std.HashMap String Expr := {}
+  /--
+  The hypothesis each formula in the problem states, by the name it was given.
+  An `input` step names the formula it restates, so this says which hypothesis
+  proves it.
+  -/
+  hypotheses : Std.HashMap String Expr := {}
+deriving Inhabited
 
-namespace Vampire
-
-initialize Lean.registerTraceClass `vampire
-initialize Lean.registerTraceClass `vampire.translate
-initialize Lean.registerTraceClass `vampire.translate.expr
-initialize Lean.registerTraceClass `vampire.translate.query
-initialize Lean.registerTraceClass `vampire.preprocess
-initialize Lean.registerTraceClass `vampire.replay
-initialize Lean.registerTraceClass `vampire.timing
-initialize Lean.registerTraceClass `vampire.timing.tactic
-initialize Lean.registerTraceClass `vampire.prover
-initialize Lean.registerTraceClass `vampire.bridge
-initialize Lean.registerTraceClass `vampire.export
+/-- The TPTP problem for a set of hypotheses, to be refuted. -/
+def problemOf (hypotheses : Array (Expr × Role)) : MetaM (String × Symbols) := do
+  let go : TranslateM (Array String) := do
+    let mut formulas := #[]
+    for ((h, role), i) in hypotheses.zipIdx do
+      let formula ← translateFormula (← inferType h)
+      formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
+    return formulas
+  let (formulas, state) ← go.run {}
+  let lines := state.decls.types ++ state.decls.symbols ++ formulas
+  let invert (m : Std.HashMap Expr String) : Std.HashMap String Expr :=
+    m.fold (init := {}) fun acc e name => acc.insert name e
+  let named := hypotheses.zipIdx.foldl (init := {}) fun acc ((h, _), i) =>
+    Std.HashMap.insert acc s!"h{i}" h
+  let symbols :=
+    { sorts := invert state.sorts, symbols := invert state.symbols
+      hypotheses := named }
+  return (String.intercalate "\n" lines.toList ++ "\n", symbols)
 
 end Vampire
