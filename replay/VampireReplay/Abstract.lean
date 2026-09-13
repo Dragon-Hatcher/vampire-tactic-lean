@@ -127,7 +127,7 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
     atoms := atoms'; seen := seen'
   if let some claim := claim then
     let (atoms', _) ← atomsOf claim atoms seen
-    atoms := atoms
+    atoms := atoms'
   if atoms.isEmpty then
     return ← ask facts claim
   let mut decls := #[]
