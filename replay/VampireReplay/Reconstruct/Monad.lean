@@ -107,6 +107,21 @@ structure State where
   /-- What says a sort is inhabited, for the sorts that have needed it. -/
   nonempty : Std.HashMap Expr Expr := {}
   /--
+  The Lean proposition each of vampire's variable-free formulas rebuilds to, by
+  vampire's index for it.
+
+  The companion of `groundTerms`, and kept for the same reason: a proof states
+  the same subformulas over and over -- one problem of the corpus rebuilds
+  279,738 formulas of which 7,104 are distinct -- and what a formula free of
+  variables rebuilds to does not depend on anything but which formula it is.
+
+  Only such formulas, and only where polarity flipping is not in play: a
+  quantifier binds a local whose type comes from the sorts the step recorded, a
+  name stands for whatever the proof has bound it to, and a literal over a
+  flipped predicate means the opposite after the flipping from before it.
+  -/
+  groundFormulas : Std.HashMap UInt32 Expr := {}
+  /--
   What takes one generalised clause of a clausification to the next, by what
   that step proves.
 

@@ -194,9 +194,15 @@ def literalPolarity (l : Literal) : ReconstructM Bool := do
         return !l.polarity
   return l.polarity
 
-/-- Rebuilds a vampire literal as a Lean proposition. -/
-def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
-  let args ← l.args.mapM (term vars)
+/-- A literal, and whether it speaks of no variable. -/
+private def literalGround (vars : Vars) (l : Literal) :
+    ReconstructM (Expr × Bool) := do
+  let mut args := #[]
+  let mut ground := true
+  for arg in l.args do
+    let (e, argGround) ← termGround vars arg
+    args := args.push e
+    ground := ground && argGround
   let polarity ← literalPolarity l
   let atom ←
     if l.isEquality then
@@ -211,7 +217,11 @@ def literal (vars : Vars) (l : Literal) : ReconstructM Expr := do
       match ← interpreted symbol.name args with
       | some atom => pure atom
       | none => pure (mkAppN (← symbolExpr symbol.name) args)
-  shared (if polarity then atom else mkApp (mkConst ``Not) atom)
+  return (← shared (if polarity then atom else mkApp (mkConst ``Not) atom), ground)
+
+/-- Rebuilds a vampire literal as a Lean proposition. -/
+def literal (vars : Vars) (l : Literal) : ReconstructM Expr :=
+  (·.1) <$> literalGround vars l
 
 /--
 Folds an n-ary junction, right-associated as Lean writes them. Vampire's
@@ -255,43 +265,86 @@ def withVars (sorts : Array (UInt32 × String)) (vars : Vars)
       k vars locals
   go 0 vars #[]
 
-/-- Rebuilds a formula, binding quantified variables as it descends. -/
-partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formula) :
-    ReconstructM Expr := do
-  let sub (i : Nat) : ReconstructM Expr := do
+/--
+A formula, and whether it speaks of no variable -- which, with polarity
+flipping out of play, is what makes it worth keeping.
+-/
+private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Vars)
+    (f : Formula) : ReconstructM (Expr × Bool) := do
+  let keeping := !(← read).flipping
+  if keeping then
+    if let some e := (← get).groundFormulas[f.index]? then
+      return (e, true)
+  let sub (i : Nat) : ReconstructM (Expr × Bool) := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
-    formula sorts vars g
-  let all : ReconstructM (Array Expr) := f.subformulas.mapM (formula sorts vars)
-  let binary (fn : Name) : ReconstructM Expr :=
-    return mkApp2 (mkConst fn) (← sub 0) (← sub 1)
-  let quantified (bind : Array Expr → Expr → ReconstructM Expr) : ReconstructM Expr := do
+    formulaGround sorts vars g
+  let all : ReconstructM (Array Expr × Bool) := do
+    let mut built := #[]
+    let mut ground := true
+    for g in f.subformulas do
+      let (e, subGround) ← formulaGround sorts vars g
+      built := built.push e
+      ground := ground && subGround
+    return (built, ground)
+  let binary (fn : Name) : ReconstructM (Expr × Bool) := do
+    let (left, leftGround) ← sub 0
+    let (right, rightGround) ← sub 1
+    return (mkApp2 (mkConst fn) left right, leftGround && rightGround)
+  -- A quantifier says nothing this could keep: what it binds is a local whose
+  -- type comes from the sorts the step recorded, and two steps can record
+  -- different sorts for the same variable.
+  let quantified (bind : Array Expr → Expr → ReconstructM Expr) :
+      ReconstructM (Expr × Bool) := do
     let bound := f.boundVars.filterMap fun v =>
       (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
-    withVars bound vars fun vars locals => do
-      let body ← formula sorts vars (← do
+    let built ← withVars bound vars fun vars locals => do
+      let (body, _) ← formulaGround sorts vars (← do
         let some g := f.subformulas[0]? | throwError "quantifier without a body"
         pure g)
       bind locals body
-  shared (← do
+    return (built, false)
+  let (built, ground) ← do
     match ← connectiveOf f with
     | .literal =>
       let some l := f.literal? | throwError "atom without a literal"
-      literal vars l
-    | .«true» => return mkConst ``True
-    | .«false» => return mkConst ``False
-    | .not => return mkApp (mkConst ``Not) (← sub 0)
-    | .and => return junction ``And ``True (← all)
-    | .or => return junction ``Or ``False (← all)
-    | .imp => mkArrow (← sub 0) (← sub 1)
+      literalGround vars l
+    | .«true» => pure (mkConst ``True, true)
+    | .«false» => pure (mkConst ``False, true)
+    | .not =>
+      let (inner, innerGround) ← sub 0
+      pure (mkApp (mkConst ``Not) inner, innerGround)
+    | .and =>
+      let (parts, partsGround) ← all
+      pure (junction ``And ``True parts, partsGround)
+    | .or =>
+      let (parts, partsGround) ← all
+      pure (junction ``Or ``False parts, partsGround)
+    | .imp =>
+      let (left, leftGround) ← sub 0
+      let (right, rightGround) ← sub 1
+      pure (← mkArrow left right, leftGround && rightGround)
     | .iff => binary ``Iff
-    | .xor => return mkApp (mkConst ``Not) (← binary ``Iff)
+    | .xor =>
+      let (stated, statedGround) ← binary ``Iff
+      pure (mkApp (mkConst ``Not) stated, statedGround)
     | .«forall» => quantified fun locals body => mkForallFVars locals body
     | .«exists» => quantified fun locals body => do
       locals.foldrM (fun x body => do mkAppM ``Exists #[← mkLambdaFVars #[x] body]) body
     | .name =>
+      -- A name stands for whatever the proof has bound it to, which is not
+      -- settled by which formula this is.
       let some raw := f.name? | throwError "named formula without a name"
-      namedFormula raw
-    | c => throwError "cannot rebuild a formula with connective {repr c}")
+      pure (← namedFormula raw, false)
+    | c => throwError "cannot rebuild a formula with connective {repr c}"
+  let e ← shared built
+  if ground && keeping then
+    modify fun s => { s with groundFormulas := s.groundFormulas.insert f.index e }
+  return (e, ground)
+
+/-- Rebuilds a formula, binding quantified variables as it descends. -/
+partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formula) :
+    ReconstructM Expr :=
+  (·.1) <$> formulaGround sorts vars f
 
 /--
 The arguments of an n-ary junction, however it was nested.

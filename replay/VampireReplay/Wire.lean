@@ -530,6 +530,9 @@ namespace Formula
 @[inline] private def field (f : Formula) (off : Nat) : UInt32 :=
   f.proof.field f.proof.layout.formulas 7 f.idx.toNat off
 
+/-- Which formula of the proof this is. -/
+def index (f : Formula) : UInt32 := f.idx
+
 /-- The formula's top-level connective. -/
 def connective (f : Formula) : Except Error Connective :=
   ofIndex
