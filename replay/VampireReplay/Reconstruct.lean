@@ -15,6 +15,8 @@ structure Outcome where
   proof : Expr
   /-- Rules that fell to `unimplemented`, so the term still contains `sorry`. -/
   unimplemented : Array String
+  /-- How many steps of vampire's the refutation rests on, all of them replayed. -/
+  steps : Nat
 
 /--
 The steps a refutation rests on, each after the ones it was inferred from.
@@ -221,7 +223,8 @@ def run (proof : Proof) (symbols : Symbols)
     bindIntroduced
     let (_, steps) := ((order refutation).run ({}, #[])).2
     let term ← replayAll steps 0 #[] refutation
-    return { proof := term, unimplemented := (← get).unimplemented.toArray }
+    return { proof := term, unimplemented := (← get).unimplemented.toArray,
+             steps := steps.size }
   -- Taken here, where the context is the goal's: from here on the context is
   -- whatever a rule has introduced on top of it.
   let context ← getLCtx

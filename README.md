@@ -125,6 +125,23 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 | `strategy` | — | run only this strategy, as the tactic reports it |
 | `mono` | false | monomorphise with `lean-auto` first (`+mono`) |
 | `showQuery` | false | print the TPTP problem instead of running the prover |
+| `stats` | false | report what each phase cost and how many steps the proof had (`+stats`) |
+| `checkSteps` | false | check each replayed step as it is built, naming the rule that fails |
+
+`+stats` says where the time went:
+
+```
+vampire took 452ms, not counting what Lean then does with the proof term:
+  preprocessing 12ms
+  translation   5ms
+  search        340ms
+  replay        95ms
+the proof vampire found had 128 steps
+```
+
+Sharing the term's subterms and checking it in the kernel happen after the
+tactic returns, so they are not in that total; `set_option profiler true`
+reports them.
 
 ## If a goal fails
 

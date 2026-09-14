@@ -44,6 +44,12 @@ structure TacticConfig extends Config where
   `Vampire.Reconstruct.Context.checkSteps`.
   -/
   checkSteps : Bool := false
+  /--
+  Report what each phase of the call cost and how many steps the proof it
+  replayed had. `set_option trace.vampire.timing true` says the same and more,
+  step by step; this is the summary.
+  -/
+  stats : Bool := false
 deriving Inhabited
 
 /-- What running vampire on a goal produced. -/
@@ -88,12 +94,14 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
   match ← prove problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
-    trace[vampire.timing] "vampire searched for {(← IO.monoMsNow) - before}ms"
+    let search := (← IO.monoMsNow) - before
+    trace[vampire.timing] "vampire searched for {search}ms"
     if let some strategy := proof.strategy? then
       trace[vampire] "found by {strategy}"
     trace[vampire] "proof:\n{proof.proofText}"
     trace[vampire] "vampire said:\n{diagnostics}"
-    return { preprocessed, copy, problem, symbols, proof, diagnostics }
+    return { preprocessed, copy, problem, symbols, proof, diagnostics,
+             preprocessing, translation, search }
 
 namespace Tactic
 
@@ -216,6 +224,18 @@ def evalVampire : Tactic := fun stx => withMainContext do
         {outcome.unimplemented}, which this tactic does not implement yet; \
         those steps are admitted, so the proof holds a `sorry`"
       trace[vampire] "admitted rules: {outcome.unimplemented}"
+    if cfg.stats then
+      -- What Lean does with the term afterwards -- sharing its subterms and
+      -- checking it -- is not counted here, because it happens once the
+      -- tactic has returned. `set_option profiler true` reports that.
+      let ms (name : String) (took : Nat) : MessageData :=
+        m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
+      logInfo m!"vampire took {query.preprocessing + query.translation +
+          query.search + replay}ms, not counting what Lean then does with the \
+        proof term:{ms "preprocessing" query.preprocessing}\
+        {ms "translation" query.translation}{ms "search" query.search}\
+        {ms "replay" replay}\n\
+        the proof vampire found had {outcome.steps} steps"
     query.preprocessed.goal.assign outcome.proof
     mv.assign (.mvar query.copy)
     replaceMainGoal []
