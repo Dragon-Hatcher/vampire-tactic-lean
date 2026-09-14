@@ -49,13 +49,14 @@ private def premisesOf (step : Step) (vars : Vars) :
   return out
 
 /--
-A step whose conclusion follows from its premises by arithmetic.
+What the numbers alone settle of a step whose conclusion follows from its
+premises by arithmetic.
 
-Suppose the conclusion fails. Then each of its literals fails, which is a fact;
-and each premise holds, so one of its literals does, which is a case. Every
-case ends in facts that cannot all hold of any numbers.
+Suppose the conclusion fails. Then each of its literals fails, which is a
+fact; and each premise holds, so one of its literals does, which is a case.
+Every case ends in facts that cannot all hold of any numbers.
 -/
-partial def theoryStep (step : Step) : ReconstructM Expr := do
+private partial def theoryStepByNumbers (step : Step) : ReconstructM Expr := do
   -- Before clausification a step states a formula, and what it did to it was
   -- to rewrite its literals where they stand: a congruence, whose leaves are
   -- where the arithmetic is.
@@ -88,6 +89,27 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
       elimGiven (junctionParts ``Or stated)
         (fun _ h => do go (facts.push (← plainly h)) (i + 1)) proof
     mkLambdaFVars xs (← go #[] 0)
+
+/--
+A step whose conclusion follows from its premises by arithmetic, or by
+whatever an SMT solver reasoned with where the numbers are not enough.
+-/
+partial def theoryStep (step : Step) : ReconstructM Expr := do
+  -- What the numbers cannot settle, an SMT solver may: vampire built against
+  -- Z3 reasons with it about theories no linear procedure sees -- a product
+  -- of two variables, an instantiation the solver chose -- and such a step
+  -- says only what holds, not why.
+  --
+  -- Asked once for the step, and only once the step has failed, rather than
+  -- wherever a procedure is asked: the walk below asks about branches it is
+  -- guessing at and expects most of them to fail, and a solver started for
+  -- each of those costs more than the whole replay.
+  try theoryStepByNumbers step
+  catch numbers =>
+    try bySmt (step.premises.map (·.1)) (← step.conclusion)
+    catch solver =>
+      throwError "{numbers.toMessageData}\nand an SMT solver \
+        said: {solver.toMessageData}"
 
 /-- `a * b`, whichever numbers those are. -/
 private def asProduct (e : Expr) : Option (Expr × Expr) :=

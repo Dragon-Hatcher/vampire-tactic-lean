@@ -28,6 +28,7 @@ SPLITS = HERE / "scripts" / "splits"
 
 OPTIONS = ("set_option profiler true\nset_option profiler.threshold 0\n"
            "set_option trace.vampire.timing true")
+SEARCH = re.compile(r"vampire searched for (\d+)ms")
 REPLAY = re.compile(r"replay took (\d+)ms")
 SHARE = re.compile(r"share common exprs took ([\d.]+)(m?s)")
 CHECK = re.compile(r"type checking took ([\d.]+)(m?s)")
@@ -50,8 +51,16 @@ def dynlibs() -> list[str]:
     if not setup.exists():
         return []
     import json
-    libs = json.loads(setup.read_text()).get("dynlibs", [])
-    return [f"--load-dynlib={x['path'] if isinstance(x, dict) else x}" for x in libs]
+    described = json.loads(setup.read_text())
+
+    def paths(key):
+        return [x["path"] if isinstance(x, dict) else x
+                for x in described.get(key, [])]
+
+    # A plugin as well as a library: cvc5 is one, and the steps vampire
+    # settled inside an SMT solver are replayed by calling it.
+    return ([f"--load-dynlib={p}" for p in paths("dynlibs")]
+            + [f"--plugin={p}" for p in paths("plugins")])
 
 
 def measure(stem: str, work: Path, env: dict, timeout: float,
@@ -86,8 +95,10 @@ def measure(stem: str, work: Path, env: dict, timeout: float,
     check = CHECK.search(out)
     if replay is None:
         return {"stem": stem, "failed": "no replay reported"}
+    search = SEARCH.search(out)
     got = {
         "stem": stem,
+        "search": float(search.group(1)) if search else 0.0,
         "replay": float(replay.group(1)),
         "share": ms(*share.groups()) if share else 0.0,
         "check": ms(*check.groups()) if check else 0.0,
@@ -138,6 +149,9 @@ def main() -> None:
 
     def s(key): return sum(r[key] for r in rows)
     print(f"\n{args.set}: {len(rows)} measured, {len(failed)} not")
+    # The prover's own search, which the metric excludes but a change to how
+    # it searches shows up in.
+    print(f"  search {s('search') / 1000:9.1f}s  (not counted in the total)")
     print(f"  replay {s('replay') / 1000:9.1f}s")
     print(f"  share  {s('share') / 1000:9.1f}s")
     print(f"  check  {s('check') / 1000:9.1f}s")

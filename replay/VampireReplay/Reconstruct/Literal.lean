@@ -1,6 +1,5 @@
 import VampireReplay.Reconstruct.Choice
 import VampireReplay.Reconstruct.Junction
-import VampireReplay.Reconstruct.Smt
 
 namespace Vampire.Reconstruct
 
@@ -178,17 +177,6 @@ all hold of any numbers.
 partial def byArithmetic (facts : Array Expr) (goal : Expr)
     (fuel : Nat := 2) : ReconstructM Expr := do
   let contradiction := (← read).contradiction
-  -- What the numbers cannot settle, an SMT solver may: vampire built against
-  -- Z3 reasons with it about theories a linear procedure cannot see -- a
-  -- product of two variables, an instantiation the solver chose -- and the
-  -- steps that come back say only what holds, not why.
-  let settle (facts : Array Expr) (claim : Option Expr) : ReconstructM Expr := do
-    try contradiction facts claim
-    catch numbers =>
-      try bySmt facts (claim.getD (mkConst ``False))
-      catch solver =>
-        throwError "{numbers.toMessageData}\nand an SMT solver \
-          said: {solver.toMessageData}"
   -- A fact that says two things says each of them, and one that says either of
   -- two is two cases; both are the caller's to take apart, so they are taken
   -- apart here before anything is asked of the numbers.
@@ -265,10 +253,10 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
             return ← mkAppOptM ``absurd
               #[some denied, some (mkConst ``False), some held, some fact]
           catch _ => pure ()
-    return ← settle facts none
+    return ← contradiction facts none
   -- A comparison, which is what the numbers settle.
   try
-    settle facts (some goal)
+    contradiction facts (some goal)
   catch _ =>
     -- Supposing it fails is another set of facts, and they are taken apart
     -- the same way anything else is: a denied comparison among them says
