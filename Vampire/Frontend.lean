@@ -111,17 +111,29 @@ syntax (name := vampireStx) "vampire" optConfig vampireHints : tactic
 
 declare_config_elab elabConfig TacticConfig
 
-def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Expr)
+/--
+A hint, as `lean-auto` states one: what proves it, what it says, and the
+universes it is stated over.
+
+Kept whole rather than reduced to the term, because a term named here can
+still be waiting on what it is stated of -- `mul_assoc` says nothing until a
+type and its `Semigroup` instance are chosen -- and it is monomorphization
+that chooses. A lemma handed over as a term alone has had the universes it was
+abstracted over forgotten, and then nothing can instantiate it.
+-/
+def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Auto.Lemma)
   | `(vampireHintElem| *) => do
-    return (← Preprocess.propHypotheses (← getMainGoal)).filter Expr.isFVar
+    let hs := (← Preprocess.propHypotheses (← getMainGoal)).filter Expr.isFVar
+    hs.mapM fun h => do
+      return ⟨⟨h, ← inferType h, .leaf s!"{h}"⟩, #[]⟩
   | `(vampireHintElem| $h:term) => do
     -- Named `fact` rather than `lemma`, which `linarith`'s library makes a
     -- keyword and this file now reaches for.
     let fact ← Auto.Prep.elabLemma h (.leaf s!"❰{h}❱")
-    return #[fact.proof]
+    return #[fact]
   | _ => throwUnsupportedSyntax
 
-def elabHints : TSyntax ``vampireHints → TacticM (Array Expr)
+def elabHints : TSyntax ``vampireHints → TacticM (Array Auto.Lemma)
   | `(vampireHints| [ $[$hs],* ]) => withMainContext do
     hs.foldlM (init := #[]) fun acc h => return acc ++ (← elabHintElem h)
   | `(vampireHints| ) => return #[]

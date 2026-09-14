@@ -79,25 +79,23 @@ def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
     goal := mv
   }
 
-private def toLemma (e : Expr) : MetaM Auto.Lemma := do
-  let e ← instantiateMVars e
-  let abstracted ← Auto.abstractMVars e
-  let e := abstracted.expr
-  return ⟨⟨e, ← inferType e, .leaf s!"{e}"⟩, abstracted.paramNames⟩
-
 /--
 Monomorphizes with `lean-auto`, reducing Lean's dependent type theory to
 something first-order. `lean-auto` negates the goal itself, so this also leaves
 a `False` goal over `Prop` hypotheses. It collects the whole local context.
 -/
-def mono (mv : MVarId) (extra : Array Expr) : MetaM Result := do
+def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
   let (goalBinders, mv) ← mv.intros
   let [nngoal] ← mv.apply (.const ``Classical.byContradiction [])
     | throwError "could not negate the goal"
   let (ngoal, absurd) ← nngoal.intro goalMarker
   absurd.withContext do
     let lctxLemmas ← Auto.collectLctxLemmas true (goalBinders.push ngoal)
-    let lemmas ← (lctxLemmas ++ (← extra.mapM toLemma)).mapM
+    -- The terms named in brackets come as `lean-auto` elaborated them, whole:
+    -- what a lemma is stated of is settled by monomorphization, and it can
+    -- only settle it where the lemma still says which universes and which
+    -- instances it is waiting for.
+    let lemmas ← (lctxLemmas ++ extra).mapM
       (Auto.unfoldConstAndPreprocessLemma #[])
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
     let (proof, mv, _, dtrs) ← Auto.runMono none lemmas inhFacts
