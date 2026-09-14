@@ -136,9 +136,9 @@ vampire took 2126ms, not counting what Lean then does with the proof term:
   translation   0ms
   search        1807ms
     starting the worker     18ms
-    reading the problem in  0ms
-    strategies that failed  1598ms
-    the one that found it   191ms
+    parsing the problem     0ms
+    failed strategies       1598ms
+    successful strategy     191ms
   replay        92ms
 the proof vampire found had 292 steps
 ```

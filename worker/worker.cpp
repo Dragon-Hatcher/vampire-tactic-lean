@@ -473,7 +473,7 @@ struct Encoder {
    */
   uint32_t strategyMs = 0;
   /**
-   * What was spent before the schedule began: reading the problem in.
+   * What was spent before the schedule began: starting up and parsing.
    *
    * A run that names the strategy pays this too, so it is not part of what
    * naming it saves.
@@ -482,8 +482,8 @@ struct Encoder {
   /**
    * When the proof was found, in milliseconds since this process began.
    *
-   * What the caller timed beyond this went on starting the process and on
-   * handing it its problem, which a run naming the strategy pays as well.
+   * What the caller timed beyond this went on starting the process, which a
+   * run naming the strategy pays as well.
    */
   uint32_t foundAtMs = 0;
 
@@ -1249,8 +1249,8 @@ int main(int argc, char** argv)
       // there, so it has to do the encoding itself; the parent never sees its
       // refutation. Portfolio mode preprocesses per slice, so not here.
       UIHelper::onProofFound = &emitProof;
-      // Starting up and reading the problem in are behind us, and a run
-      // that names the strategy pays for both of them too.
+      // Starting up and parsing are behind us, and a run that names the
+      // strategy pays for both of them too.
       g_setupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - g_startedAt).count();
       CASC::PortfolioMode::perform(prb);

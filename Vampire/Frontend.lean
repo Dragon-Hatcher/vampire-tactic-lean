@@ -243,9 +243,9 @@ def evalVampire : Tactic := fun stx => withMainContext do
         if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
           m!""
         else part "starting the worker" (query.search - foundAt)
-          ++ part "reading the problem in" setup
-          ++ part "strategies that failed" (foundAt - setup - winner)
-          ++ part "the one that found it" winner
+          ++ part "parsing the problem" setup
+          ++ part "failed strategies" (foundAt - setup - winner)
+          ++ part "successful strategy" winner
       logInfo m!"vampire took {query.preprocessing + query.translation +
           query.search + replay}ms, not counting what Lean then does with the \
         proof term:{ms "preprocessing" query.preprocessing}\
@@ -268,11 +268,6 @@ def evalVampire : Tactic := fun stx => withMainContext do
           | none => none
         let call := " ".intercalate
           (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
-        -- What the schedule spent before reaching the strategy that won,
-        -- which is what naming it saves. The search is measured here and the
-        -- strategy's own time comes back with the proof, so the difference
-        -- also covers reading the problem in, which a named run still pays;
-        -- hence "about".
         -- What the schedule spent on the strategies this one won against:
         -- everything between the schedule starting and the proof being
         -- found, less the winner's own run. Starting the worker and handing

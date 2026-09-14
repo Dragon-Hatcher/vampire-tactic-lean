@@ -253,8 +253,8 @@ def strategyTime? (p : Proof) : Option Nat :=
   else some (readU32 p.data (37 * 4)).toNat
 
 /--
-What the search spent before the schedule began -- reading the problem in --
-in milliseconds, and `none` when there is no proof.
+What the search spent before the schedule began -- starting vampire up and
+parsing the problem -- in milliseconds, and `none` when there is no proof.
 
 A run that names the strategy pays this too, so it is not part of what
 naming one saves.
@@ -267,9 +267,9 @@ def setupTime? (p : Proof) : Option Nat :=
 When the proof was found, in milliseconds after the worker began, and `none`
 when there is no proof.
 
-What the caller timed beyond this went on starting the worker and handing it
-its problem, which a run naming the strategy pays as well -- so the
-difference is not part of what naming one saves.
+What the caller timed beyond this went on starting the worker's process,
+which a run naming the strategy pays as well -- so the difference is not
+part of what naming one saves.
 -/
 def foundAtTime? (p : Proof) : Option Nat :=
   if (readU32 p.data (36 * 4)) == none32 then none
