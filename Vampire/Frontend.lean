@@ -58,14 +58,31 @@ structure Query where
   proof : Proof
   /-- What vampire said for itself, for when it did not find a proof. -/
   diagnostics : String
+  /-- What reducing the goal to a set of hypotheses took, in milliseconds. -/
+  preprocessing : Nat
+  /-- What writing those out as a TPTP problem took. -/
+  translation : Nat
+  /-- What vampire's own search took. -/
+  search : Nat
 
-def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Expr) (searchFrom : System.FilePath) :
-    MetaM Query := mv.withContext do
+def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
+    (searchFrom : System.FilePath) : MetaM Query := mv.withContext do
   -- Preprocessing assigns the goal it is given, so work on a copy and leave the
   -- caller's goal for it to discharge.
   let copy := (← mkFreshExprMVar (← mv.getType)).mvarId!
-  let preprocessed ← if cfg.mono then Preprocess.mono copy hs else Preprocess.intros copy hs
-  let (problem, symbols) ← preprocessed.goal.withContext (problemOf preprocessed.hypotheses)
+  let started ← IO.monoMsNow
+  let preprocessed ←
+    if cfg.mono then Preprocess.mono copy hs
+    else Preprocess.intros copy (hs.map (·.proof))
+  -- Vampire has no exponentiation, so a literal power is written out as the
+  -- multiplications it stands for -- in Lean, with a proof, so that what is
+  -- asked and what is replayed say the same thing.
+  let hypotheses ← preprocessed.goal.withContext <|
+    preprocessed.hypotheses.mapM fun (h, role) => do
+      return (← Preprocess.withoutPowers h, role)
+  let preprocessing := (← IO.monoMsNow) - started
+  let (problem, symbols) ← preprocessed.goal.withContext (problemOf hypotheses)
+  let translation := (← IO.monoMsNow) - started - preprocessing
   trace[vampire] "problem:\n{problem}"
   let before ← IO.monoMsNow
   match ← prove problem cfg.toConfig searchFrom with
