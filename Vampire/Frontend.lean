@@ -231,10 +231,25 @@ def evalVampire : Tactic := fun stx => withMainContext do
       -- tactic has returned. `set_option profiler true` reports that.
       let ms (name : String) (took : Nat) : MessageData :=
         m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
+      -- Where the search went: starting the worker and handing it the
+      -- problem, then the strategies that did not find it, then the one
+      -- that did.
+      let winner := query.proof.strategyTime?.getD 0
+      let setup := query.proof.setupTime?.getD 0
+      let foundAt := query.proof.foundAtTime?.getD 0
+      let part (name : String) (took : Nat) : MessageData :=
+        m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
+      let within :=
+        if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
+          m!""
+        else part "starting the worker" (query.search - foundAt)
+          ++ part "reading the problem in" setup
+          ++ part "strategies that failed" (foundAt - setup - winner)
+          ++ part "the one that found it" winner
       logInfo m!"vampire took {query.preprocessing + query.translation +
           query.search + replay}ms, not counting what Lean then does with the \
         proof term:{ms "preprocessing" query.preprocessing}\
-        {ms "translation" query.translation}{ms "search" query.search}\
+        {ms "translation" query.translation}{ms "search" query.search}{within}\
         {ms "replay" replay}\n\
         the proof vampire found had {outcome.steps} steps"
     query.preprocessed.goal.assign outcome.proof
@@ -253,9 +268,25 @@ def evalVampire : Tactic := fun stx => withMainContext do
           | none => none
         let call := " ".intercalate
           (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
+        -- What the schedule spent before reaching the strategy that won,
+        -- which is what naming it saves. The search is measured here and the
+        -- strategy's own time comes back with the proof, so the difference
+        -- also covers reading the problem in, which a named run still pays;
+        -- hence "about".
+        -- What the schedule spent on the strategies this one won against:
+        -- everything between the schedule starting and the proof being
+        -- found, less the winner's own run. Starting the worker and handing
+        -- it the problem are outside that, and a named run pays them too.
+        let saved := query.proof.foundAtTime?.getD 0
+          - min (query.proof.foundAtTime?.getD 0)
+              (query.proof.setupTime?.getD 0 + query.proof.strategyTime?.getD 0)
+        let skipping :=
+          if saved < 50 then "naming it skips the others next time"
+          else s!"the others took about {saved}ms of the {query.search}ms search, \
+and naming it skips them next time"
         Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
-          (header := "vampire found the proof with one strategy of its \
-            schedule; naming it skips the others next time:")
+          (header := s!"vampire found the proof with one strategy of its schedule; \
+{skipping}:")
   | _ => throwUnsupportedSyntax
 
 end Tactic

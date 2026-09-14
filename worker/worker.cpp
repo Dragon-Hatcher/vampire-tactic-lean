@@ -145,6 +145,7 @@
  */
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <unistd.h>
 #include <cstring>
@@ -186,7 +187,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 18;
+const uint32_t VERSION = 21;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -463,6 +464,28 @@ struct Encoder {
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
   uint32_t strategy = NONE;
+  /**
+   * How long that strategy itself ran for, in milliseconds.
+   *
+   * The schedule is worked through one strategy at a time, so the rest of
+   * the search went on the ones that did not find it -- which is what naming
+   * this one would save.
+   */
+  uint32_t strategyMs = 0;
+  /**
+   * What was spent before the schedule began: reading the problem in.
+   *
+   * A run that names the strategy pays this too, so it is not part of what
+   * naming it saves.
+   */
+  uint32_t setupMs = 0;
+  /**
+   * When the proof was found, in milliseconds since this process began.
+   *
+   * What the caller timed beyond this went on starting the process and on
+   * handing it its problem, which a run naming the strategy pays as well.
+   */
+  uint32_t foundAtMs = 0;
 
   std::unordered_map<uint64_t, uint32_t> termSeen, sortSeen;
   std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen,
@@ -1073,6 +1096,9 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
     InferenceRule::FUNCTIONAL_EXTENSIONALITY_AXIOM) + 1);
   putWord(buf, InferenceStore::instance()->polarityFlipBoundary());
   putWord(buf, enc.strategy);
+  putWord(buf, enc.strategyMs);
+  putWord(buf, enc.setupMs);
+  putWord(buf, enc.foundAtMs);
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1121,6 +1147,19 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
 /** Where `emitProof` writes; set once from `main`. */
 std::string g_outPath;
 
+/**
+ * What had been spent when the schedule began, in milliseconds.
+ *
+ * Set in this process before the slices are forked, so each of them
+ * inherits it; their own timers start from zero. Measured from the top of
+ * `main` rather than from vampire's timer, which is restarted for each slice
+ * and so says nothing about what starting up cost.
+ */
+long g_setupMs = 0;
+
+/** When this process began, for `g_setupMs`. */
+std::chrono::steady_clock::time_point g_startedAt;
+
 /** Encodes whatever proof this process has, if any, and writes it out. */
 void emitProof()
 {
@@ -1133,6 +1172,14 @@ void emitProof()
     // the proof: in portfolio mode this is the winning slice itself, which is
     // the only process that knows which one it was.
     enc.strategy = enc.addString(env.options->generateEncodedOptions());
+    // The timer is restarted for each slice, so this is what this strategy
+    // spent, not what the schedule before it did.
+    long ran = Timer::elapsedMilliseconds();
+    enc.strategyMs = ran < 0 ? 0 : static_cast<uint32_t>(ran);
+    enc.setupMs = g_setupMs < 0 ? 0 : static_cast<uint32_t>(g_setupMs);
+    long found = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - g_startedAt).count();
+    enc.foundAtMs = found < 0 ? 0 : static_cast<uint32_t>(found);
     std::ostringstream proof;
     InferenceStore::instance()->outputProof(proof, r);
     enc.proofText = proof.str();
@@ -1151,6 +1198,7 @@ bool isPortfolioMode(Options::Mode mode)
 
 int main(int argc, char** argv)
 {
+  g_startedAt = std::chrono::steady_clock::now();
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: vampire-worker <problem.p> <out-file> "
@@ -1201,6 +1249,10 @@ int main(int argc, char** argv)
       // there, so it has to do the encoding itself; the parent never sees its
       // refutation. Portfolio mode preprocesses per slice, so not here.
       UIHelper::onProofFound = &emitProof;
+      // Starting up and reading the problem in are behind us, and a run
+      // that names the strategy pays for both of them too.
+      g_setupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - g_startedAt).count();
       CASC::PortfolioMode::perform(prb);
     } else {
       env.options->setForcedOptionValues();

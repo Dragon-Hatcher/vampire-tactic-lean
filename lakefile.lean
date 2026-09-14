@@ -138,8 +138,11 @@ over the resulting binary.
 -/
 target «vampire-worker» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg
-  -- Declared before the build so that editing the checkout re-runs it.
+  -- Declared before the build so that editing either side re-runs it: what
+  -- git says of the vampire checkout, and the sources kept here.
   addTrace (.ofHash (Hash.ofString (← vampireState vampireDir)))
+  for source in ["worker.cpp", "CMakeLists.txt"] do
+    addTrace (.ofHash (← computeFileHash (pkg.dir / "worker" / source)))
   let cmakeDir := pkg.buildDir / "cmake"
   let exe := cmakeDir / "vampire-worker"
   proc (quiet := true) {

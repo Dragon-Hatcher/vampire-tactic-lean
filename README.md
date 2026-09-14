@@ -131,13 +131,22 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 `+stats` says where the time went:
 
 ```
-vampire took 452ms, not counting what Lean then does with the proof term:
-  preprocessing 12ms
-  translation   5ms
-  search        340ms
-  replay        95ms
-the proof vampire found had 128 steps
+vampire took 2126ms, not counting what Lean then does with the proof term:
+  preprocessing 227ms
+  translation   0ms
+  search        1807ms
+    starting the worker     18ms
+    reading the problem in  0ms
+    strategies that failed  1598ms
+    the one that found it   191ms
+  replay        92ms
+the proof vampire found had 292 steps
 ```
+
+The search is broken down because most of it is usually the schedule: the
+strategies that did not find the proof are what naming the one that did
+skips, and the tactic says how much that is when it reports the strategy.
+Here, naming it took the search from 1807ms to 248ms.
 
 Sharing the term's subterms and checking it in the kernel happen after the
 tactic returns, so they are not in that total; `set_option profiler true`

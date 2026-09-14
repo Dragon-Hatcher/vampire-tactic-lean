@@ -123,11 +123,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 18
+private def version : UInt32 := 21
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 37 * 4 then
+  if data.size < 40 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -169,7 +169,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numCongruenceArgs := word 31
   let stringsLen := word 32
   let proofTextLen := word 33
-  let functions := 37 * 4
+  let functions := 40 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -239,6 +239,41 @@ running it on its own is the same run without the ones it won against.
 def strategy? (p : Proof) : Option String :=
   let off := readU32 p.data (36 * 4)
   if off == none32 then none else some (p.string off)
+
+/--
+How long the strategy that found the proof ran for, in milliseconds, and
+`none` when there is no proof.
+
+The schedule is worked through one strategy at a time, so what the search
+took beyond this went on strategies that did not find the proof -- which is
+what naming this one saves.
+-/
+def strategyTime? (p : Proof) : Option Nat :=
+  if (readU32 p.data (36 * 4)) == none32 then none
+  else some (readU32 p.data (37 * 4)).toNat
+
+/--
+What the search spent before the schedule began -- reading the problem in --
+in milliseconds, and `none` when there is no proof.
+
+A run that names the strategy pays this too, so it is not part of what
+naming one saves.
+-/
+def setupTime? (p : Proof) : Option Nat :=
+  if (readU32 p.data (36 * 4)) == none32 then none
+  else some (readU32 p.data (38 * 4)).toNat
+
+/--
+When the proof was found, in milliseconds after the worker began, and `none`
+when there is no proof.
+
+What the caller timed beyond this went on starting the worker and handing it
+its problem, which a run naming the strategy pays as well -- so the
+difference is not part of what naming one saves.
+-/
+def foundAtTime? (p : Proof) : Option Nat :=
+  if (readU32 p.data (36 * 4)) == none32 then none
+  else some (readU32 p.data (39 * 4)).toNat
 
 /-- Vampire's own rendering of the proof, empty when there is no refutation. -/
 def proofText (p : Proof) : String :=
