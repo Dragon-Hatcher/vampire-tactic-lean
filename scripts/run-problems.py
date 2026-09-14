@@ -38,8 +38,16 @@ def dynlibs() -> list[str]:
     if not setup.exists():
         return []
     import json
-    libs = json.loads(setup.read_text()).get("dynlibs", [])
-    return [f"--load-dynlib={x['path'] if isinstance(x, dict) else x}" for x in libs]
+    described = json.loads(setup.read_text())
+
+    def paths(key):
+        return [x["path"] if isinstance(x, dict) else x
+                for x in described.get(key, [])]
+
+    # A plugin as well as a library: cvc5 is one, and the SMT steps are
+    # replayed by calling it.
+    return ([f"--load-dynlib={p}" for p in paths("dynlibs")]
+            + [f"--plugin={p}" for p in paths("plugins")])
 
 
 LIBS = dynlibs()

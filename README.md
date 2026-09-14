@@ -119,6 +119,37 @@ The search is reproducible. Vampire counts the steps it takes rather than
 reading the clock, so the same goal gives the same proof on a slow machine and a
 fast one. `wallLimit` is the one exception — a run that hits it says so.
 
+## SMT steps
+
+Vampire can reason with an SMT solver: given Z3, AVATAR hands its components
+to it rather than to a SAT solver, and its theory instantiation asks it for
+values. What such a step records is what holds, not why -- the reasoning
+happened inside the solver -- so there is nothing in the derivation to follow.
+Those steps are replayed by asking an SMT solver in turn: cvc5, through
+[lean-smt](https://github.com/ufmg-smite/lean-smt), which answers with a proof
+that Lean checks like any other.
+
+Off by default, because Z3 is a large thing to build for something most goals
+never reach:
+
+```
+VAMPIRE_Z3=1 lake build
+```
+
+That fetches Z3 as part of vampire's checkout and builds it, which takes some
+minutes more than vampire itself. Without it vampire says "no Z3 found --
+compiling without SMT support" and works through its own SAT solver instead,
+which the replay follows without asking anyone.
+
+`test-smt/` holds the goals these steps are tested on; they need the build
+above and are not part of `lake test`.
+
+Two things do not work yet. `lean-smt` cannot translate a real numeral
+against this Lean and Mathlib, so a step over the reals that reaches cvc5
+fails there rather than here; and a handful of steps state clauses it will not
+take. Everything else in the corpus replays: with Z3 on, 392 of the 400
+problems, against 396 without it.
+
 ## Options
 
 Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`.

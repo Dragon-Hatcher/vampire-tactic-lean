@@ -147,4 +147,44 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
       let answer ← ask hyps (claim.map standingFor)
       return mkAppN (← mkLambdaFVars (locals ++ hyps) answer) (atoms ++ facts)
 
+/--
+The same, of terms named outright rather than found by walking.
+
+An SMT solver reads what a clause says -- its symbols, its quantifiers, its
+arithmetic -- so there is little to put aside; but what a skolem symbol
+stands for is a term chosen by Hilbert choice, and that rebuilds to a lambda,
+which SMT-LIB has no notion of. What it stands for does not matter to the
+question, the solver needing only to tell one such term from another, so each
+is put aside as a variable of its own and the answer applied back to it.
+
+Only terms that stand on their own can be put aside, which is what the caller
+passes: what vampire introduced is closed, being chosen for the formula
+rather than for the clause.
+-/
+def abstractingTerms (aside : Array Expr) (ask : Array Expr → Option Expr → MetaM Expr)
+    (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  let stated ← facts.mapM fun fact => do instantiateMVars (← inferType fact)
+  -- Only what is actually spoken of, so that nothing is quantified over for
+  -- the sake of a term the question never mentions.
+  let occurs (term : Expr) (e : Expr) : Bool := (e.find? (· == term)).isSome
+  let mentioned := aside.filter fun term =>
+    stated.any (occurs term) || claim.any (occurs term)
+  if mentioned.isEmpty then
+    return ← ask facts claim
+  let mut decls := #[]
+  for (term, i) in mentioned.zipIdx do
+    decls := decls.push (Name.mkSimple s!"t{i}", fun _ => inferType term)
+  withLocalDeclsD decls fun locals => do
+    let standingFor (e : Expr) : Expr :=
+      e.replace fun s =>
+        match mentioned.findIdx? (· == s) with
+        | some i => some locals[i]!
+        | none => none
+    let mut hypDecls := #[]
+    for (says, i) in stated.zipIdx do
+      hypDecls := hypDecls.push (Name.mkSimple s!"h{i}", fun _ => pure (standingFor says))
+    withLocalDeclsD hypDecls fun hyps => do
+      let answer ← ask hyps (claim.map standingFor)
+      return mkAppN (← mkLambdaFVars (locals ++ hyps) answer) (mentioned ++ facts)
+
 end VampireReplay.Abstract

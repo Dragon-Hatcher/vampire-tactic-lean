@@ -216,6 +216,7 @@ def run (proof : Proof) (symbols : Symbols)
     (contradiction : Array Expr → Option Expr → MetaM Expr)
     (rearranged : Expr → Expr → MetaM (Option Expr))
     (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
+    (smt : Array Expr → Expr → MetaM Expr)
     (checkSteps : Bool := false) :
     MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
@@ -233,7 +234,8 @@ def run (proof : Proof) (symbols : Symbols)
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, contradiction, rearranged, cancelling, checkSteps
+    (go.run { symbols, proof, givens, contradiction, rearranged, cancelling, smt,
+              checkSteps
               flipped := proof.polarityFlipBoundary }).run {}
   return some outcome
 

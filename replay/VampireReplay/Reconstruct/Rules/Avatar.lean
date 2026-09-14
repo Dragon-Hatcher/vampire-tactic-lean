@@ -467,4 +467,17 @@ def refutation (step : Step) : ReconstructM Expr := do
   let (_, order) := ((satOrder root).run ({}, #[])).2
   satBound origins order 0 {} {} #[]
 
+/--
+`avatar_refutation_smt`: the same, where what AVATAR handed its components to
+was an SMT solver.
+
+Vampire records no propositional refutation for this one, because there was
+none to record: the solver settled it inside itself, over the theory as well
+as the propositional structure, and what reaches the proof is that these
+clauses cannot all hold. So it is settled the same way it was found, by
+asking an SMT solver -- which is what `Context.smt` is.
+-/
+def refutationSmt (step : Step) : ReconstructM Expr := do
+  bySmt (step.premises.map (·.1)) (← step.conclusion)
+
 end Vampire.Reconstruct.Avatar

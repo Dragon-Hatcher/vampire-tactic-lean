@@ -25,6 +25,8 @@ cp "$dir/$stem".p "$work/" 2>/dev/null || cp "$dir/$stem".smt2 "$work/" 2>/dev/n
 libs=$(python3 -c "
 import json
 setup = json.load(open('.lake/build/ir/Vampire/Frontend.setup.json'))
-print(' '.join('--load-dynlib=' + (lib['path'] if isinstance(lib, dict) else lib)
-               for lib in setup.get('dynlibs', [])))")
+def paths(key):
+    return [x['path'] if isinstance(x, dict) else x for x in setup.get(key, [])]
+print(' '.join(['--load-dynlib=' + p for p in paths('dynlibs')]
+             + ['--plugin=' + p for p in paths('plugins')]))")
 LEAN_PATH=$(lake env printenv LEAN_PATH) lean $libs "$work/problem.lean"

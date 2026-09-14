@@ -6,3 +6,4 @@ import VampireReplay.Reconstruct.Literal
 import VampireReplay.Reconstruct.Equiv
 import VampireReplay.Reconstruct.Carry
 import VampireReplay.Reconstruct.Step
+import VampireReplay.Reconstruct.Smt

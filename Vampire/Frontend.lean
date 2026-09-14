@@ -2,6 +2,7 @@ import Lean
 import Auto.Tactic
 import Vampire.Arith
 import Vampire.Preprocess
+import Vampire.Smt
 import VampireReplay.Reconstruct
 import Vampire.Worker
 
@@ -213,7 +214,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
       try
         query.preprocessed.goal.withContext
           (Reconstruct.run query.proof query.symbols Arith.contradiction
-            Arith.rearranged Arith.cancelling cfg.checkSteps)
+            Arith.rearranged Arith.cancelling Smt.prove cfg.checkSteps)
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"

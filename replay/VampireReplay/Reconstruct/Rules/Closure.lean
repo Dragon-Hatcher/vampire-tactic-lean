@@ -40,8 +40,10 @@ def conflict (step : Step) : ReconstructM Expr := do
     | .ok steps => pure steps
     | .error e => throwError "{e}"
   if recorded.isEmpty then
-    throwError "nothing is recorded of why the literals of step \
-      {step.unit.number} cannot all be false"
+    -- Nothing recorded means nothing followed a congruence closure: with an
+    -- SMT solver behind AVATAR the conflict is one the theory saw, settled
+    -- inside the solver, and it is settled here the same way.
+    return ← bySmt (step.premises.map (·.1)) (← step.conclusion)
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
     let mut vars : Vars := {}

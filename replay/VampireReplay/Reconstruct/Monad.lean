@@ -83,6 +83,21 @@ structure Context where
   no procedure that reads its facts as linear constraints can see it.
   -/
   cancelling : Expr → Expr → Expr → MetaM (Option Expr) := fun _ _ _ => pure none
+  /--
+  What a set of facts settles, as an SMT solver settles it.
+
+  Vampire built with Z3 and told to use it settles some things inside the
+  solver and records only the conclusion: that these clauses cannot all hold.
+  Nothing in the derivation can be followed to rebuild that, so it is settled
+  the same way it was found -- `Vampire.Smt.prove` asks cvc5 through
+  `lean-smt` and builds the proof it answers with.
+
+  Handed in for the same reason as `contradiction`: the solver comes with a
+  library of its own, and none of it belongs to replay.
+  -/
+  smt : Array Expr → Expr → MetaM Expr := fun _ _ =>
+    throwError "no SMT solver was given to replay, and this step was settled \
+      inside one"
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/
