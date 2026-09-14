@@ -6,6 +6,10 @@ package vampire
 
 require "leanprover-community" / "mathlib" @ git "v4.33.0"
 require "leanprover-community" / "auto" @ git "v4.33.0"
+-- What replays the steps vampire justified with an SMT solver rather than
+-- with a derivation: it asks cvc5 for a proof of the same thing and builds
+-- that. See `Vampire.Smt`.
+require smt from git "https://github.com/ufmg-smite/lean-smt.git" @ "5bdc516"
 
 -- Replay, in a package of its own so that it can be precompiled; see
 -- `replay/lakefile.lean`.
@@ -16,7 +20,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "33162dce616a40348d8fc6efc569872e51c5dd96"
+def vampireRev : String := "3e17313effac5fb85070f6382d01ea3aafafaec3"
 
 /--
 The submodules vampire's build needs.
@@ -25,6 +29,18 @@ The submodules vampire's build needs.
 it is the bulk of the repository.
 -/
 def vampireSubmodules : Array String := #["cadical", "viras"]
+
+/--
+Whether to build vampire against Z3, which is what the parts of it that
+reason by SMT need.
+
+Off unless `VAMPIRE_Z3` is set, because Z3 is a large thing to build for
+something most goals never reach: without it vampire says so and carries on
+with its own SAT solver, and the tactic replays what that produces. With it,
+AVATAR can be handed to Z3 (`sas=z3`), and the steps that come back are
+replayed by asking cvc5 -- see `Vampire.Smt`.
+-/
+def vampireWithZ3 : BaseIO Bool := return (← IO.getEnv "VAMPIRE_Z3").isSome
 
 /-- `git`, with its output kept unless it fails. -/
 private def git (cwd : FilePath) (args : Array String) : IO Unit := do
@@ -67,8 +83,10 @@ def vampireSourceDir (pkg : Package) : IO FilePath := do
     git dir #["remote", "add", "origin", vampireRepo]
   git dir #["fetch", "--quiet", "--depth", "1", "origin", vampireRev]
   git dir #["checkout", "--quiet", "--force", "FETCH_HEAD"]
+  let submodules :=
+    if ← vampireWithZ3 then vampireSubmodules.push "z3" else vampireSubmodules
   git dir (#["submodule", "update", "--init", "--quiet", "--depth", "1"]
-    ++ vampireSubmodules)
+    ++ submodules)
   IO.FS.writeFile stamp vampireRev
   return dir
 
@@ -139,8 +157,31 @@ over the resulting binary.
 target «vampire-worker» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg
   -- Declared before the build so that editing either side re-runs it: what
-  -- git says of the vampire checkout, and the sources kept here.
+  -- git says of the vampire checkout, the sources kept here, and whether
+  -- this is a build with SMT support.
   addTrace (.ofHash (Hash.ofString (← vampireState vampireDir)))
+  addTrace (.ofHash (Hash.ofString s!"z3 {← vampireWithZ3}"))
+  -- Z3 where vampire looks for it, which is what its own build leaves in
+  -- `z3/build`. Left alone once it is there.
+  if ← vampireWithZ3 then
+    let z3 := vampireDir / "z3"
+    unless ← (z3 / "build" / "Z3Config.cmake").pathExists do
+      unless ← (z3 / "CMakeLists.txt").pathExists do
+        error s!"VAMPIRE_Z3 is set, but {z3} holds no checkout of Z3: a \
+          checkout of one's own needs its `z3` submodule"
+      logInfo "building z3, which vampire's SMT parts are compiled against"
+      proc (quiet := true) {
+        cmd := "cmake"
+        args := #["-S", z3.toString, "-B", (z3 / "build").toString,
+          "-DCMAKE_BUILD_TYPE=Release", "-DZ3_BUILD_LIBZ3_SHARED=OFF",
+          "-DZ3_BUILD_EXECUTABLE=OFF", "-DZ3_BUILD_TEST_EXECUTABLES=OFF",
+          "-DZ3_BUILD_PYTHON_BINDINGS=OFF"]
+      }
+      proc {
+        cmd := "cmake"
+        args := #["--build", (z3 / "build").toString,
+          "--parallel", ← cmakeParallelLevel]
+      }
   for source in ["worker.cpp", "CMakeLists.txt"] do
     addTrace (.ofHash (← computeFileHash (pkg.dir / "worker" / source)))
   let cmakeDir := pkg.buildDir / "cmake"
