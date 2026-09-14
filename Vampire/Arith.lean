@@ -95,7 +95,6 @@ def rearranged (a b : Expr) : MetaM (Option Expr) := do
 
 /-- `False` or `claim`, asked of the facts as they stand. -/
 private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
-  let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
   -- `omega` decides the integers and the naturals and nothing else, so asking
   -- it about the rationals or the reals is asking a question whose answer is
   -- known: it cannot say. What is asked here is asked once per literal of
@@ -105,22 +104,38 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
     (e.find? fun s => s.isConstOf ``Int || s.isConstOf ``Nat).isSome
   let discrete := claim.any integral
     || (← facts.anyM fun f => return integral (← instantiateMVars (← inferType f)))
-  try
-    -- `linarith` proves a comparison outright, which is what a theory axiom
-    -- like commutativity states; `omega` wants a goal of `False`, so it is
-    -- given one, the claim having been turned into a fact by the caller.
-    if claim.isSome || !discrete then
-      Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
-    else
+  -- `omega` proves `False` and nothing else. Asked for anything else it
+  -- proves `False` anyway and assigns that -- a proof of `False` standing
+  -- where the claim should be, which nothing but the kernel would catch -- so
+  -- a claim is turned into a fact here and refuted instead.
+  let byOmega : MetaM Expr := do
+    let refute (facts : Array Expr) : MetaM Expr := do
+      let goal ← mkFreshExprMVar (mkConst ``False)
       Lean.Elab.Tactic.Omega.omega facts.toList goal.mvarId!
-  catch omegaFailed =>
+      instantiateMVars goal
+    match claim with
+    | none => refute facts
+    | some c =>
+      let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) c) fun h => do
+        mkLambdaFVars #[h] (← refute (facts.push h))
+      mkAppM ``Classical.byContradiction #[refuted]
+  -- `linarith` proves a comparison outright, which is what a theory axiom
+  -- like commutativity states.
+  let byLinarith : MetaM Expr := do
+    let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
+    Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
+    instantiateMVars goal
+  let answer ←
+    try
+      if claim.isSome || !discrete then byLinarith else byOmega
+    catch omegaFailed =>
     try
       if !discrete then
         throw omegaFailed
       else if claim.isSome then
-        Lean.Elab.Tactic.Omega.omega facts.toList goal.mvarId!
+        byOmega
       else
-        Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
+        byLinarith
     catch linarithFailed =>
       let stated ← facts.mapM fun f => do
         return indentExpr (← instantiateMVars (← inferType f))
