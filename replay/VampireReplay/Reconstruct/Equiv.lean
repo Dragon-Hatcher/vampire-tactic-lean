@@ -145,6 +145,13 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       if let some i := index[d]? then
         return ← withLocalDeclD `l d fun l => do
           mkLambdaFVars #[l] (← injectPart ``Or target i l)
+      -- A comparison can be written either way round -- `x > 10` and
+      -- `10 < x` are one proposition and two terms -- and only one of the
+      -- two is a key, so what the index misses is asked of the parts.
+      for (part, i) in parts.zipIdx do
+        if ← isDefEq part d then
+          return ← withLocalDeclD `l d fun l => do
+            mkLambdaFVars #[l] (← injectPart ``Or target i l)
       if let some (α, a, b) := d.eq? then
         let flipped ← mkAppOptM ``Eq #[some α, some b, some a]
         if let some i := index[flipped]? then

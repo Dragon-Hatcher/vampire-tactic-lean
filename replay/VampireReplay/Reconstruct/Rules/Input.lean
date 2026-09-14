@@ -28,6 +28,14 @@ def input (step : Step) : ReconstructM Expr := do
   let stated ← inferType hypothesis
   if ← isDefEq stated conclusion then
     return hypothesis
-  mkAppM ``Iff.mp #[← equiv stated conclusion, hypothesis]
+  try
+    mkAppM ``Iff.mp #[← equiv stated conclusion, hypothesis]
+  catch _ =>
+    -- The two can also differ by the order of the clause's literals, which
+    -- `equiv` walks position by position and so cannot relate. Carrying each
+    -- literal into where the conclusion keeps it does not care about order,
+    -- and says the same thing one way round: what the hypothesis says is
+    -- what the step states.
+    return mkApp (← implies stated conclusion) hypothesis
 
 end Vampire.Reconstruct.Input

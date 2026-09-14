@@ -65,7 +65,15 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     let conclusion ← step.conclusion
     if ← isDefEq stated conclusion then
       return proof
-    return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+    try
+      return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+    catch _ =>
+      -- `equiv` walks the two formulas together, position by position, and a
+      -- step that reordered a junction's parts leaves them out of step. What
+      -- is wanted here is only that the premise gives the conclusion, and
+      -- carrying each part into where the conclusion keeps it does not care
+      -- what order they are in.
+      return mkApp (← implies stated conclusion) proof
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
     let mut vars : Vars := {}
