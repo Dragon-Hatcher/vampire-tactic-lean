@@ -173,7 +173,7 @@ Below this the schedule found the right strategy quickly, and writing one
 into the call buys a few milliseconds at the cost of a line that goes stale
 when the goal changes.
 -/
-private def worthNaming : Nat := 250
+private def suggestStrategyThreshold : Nat := 100
 
 @[tactic vampireStx]
 def evalVampire : Tactic := fun stx => withMainContext do
@@ -281,7 +281,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
         -- saves, and a schedule that reached the right strategy quickly
         -- saves nothing worth having. `+stats` says where the time went
         -- whether or not this does.
-        if saved ≥ worthNaming then
+        if saved ≥ suggestStrategyThreshold then
           let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
             match s.reprint with
             | some text =>
