@@ -61,7 +61,6 @@ def component (step : Step) : ReconstructM Expr := do
       return x
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
-    let place := placeLiteral target
     mkLambdaFVars xs (← carryAll stated target instance_)
 
 /--
