@@ -100,6 +100,11 @@ is found the tactic tells you which strategy found it, and you can write that
 into the call to skip the rest next time. This matters most for arithmetic,
 where the default strategies tend not to work as well.
 
+It offers that only where it is worth taking: a strategy is suggested when
+skipping the ones before it would save more than 250ms, since a line naming
+one goes stale as soon as the goal changes. `+stats` says where the search
+went whether or not one is suggested.
+
 ```lean
 -- slower
 theorem real_lin (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by

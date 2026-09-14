@@ -165,6 +165,16 @@ def elabHints : TSyntax ``vampireHints → TacticM (Array Auto.Lemma)
   | `(vampireHints| ) => return #[]
   | _ => throwUnsupportedSyntax
 
+/--
+How much a named strategy has to save before the tactic suggests naming it,
+in milliseconds.
+
+Below this the schedule found the right strategy quickly, and writing one
+into the call buys a few milliseconds at the cost of a line that goes stale
+when the goal changes.
+-/
+private def worthNaming : Nat := 250
+
 @[tactic vampireStx]
 def evalVampire : Tactic := fun stx => withMainContext do
   match stx with
@@ -260,14 +270,6 @@ def evalVampire : Tactic := fun stx => withMainContext do
     -- a proof holding a `sorry` cannot be said to be.
     if cfg.strategy.isEmpty && outcome.unimplemented.isEmpty then
       if let some strategy := query.proof.strategy? then
-        let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
-          match s.reprint with
-          | some text =>
-            let text := text.trimAscii.toString
-            if text.isEmpty then none else some text
-          | none => none
-        let call := " ".intercalate
-          (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
         -- What the schedule spent on the strategies this one won against:
         -- everything between the schedule starting and the proof being
         -- found, less the winner's own run. Starting the worker and handing
@@ -275,13 +277,23 @@ def evalVampire : Tactic := fun stx => withMainContext do
         let saved := query.proof.foundAtTime?.getD 0
           - min (query.proof.foundAtTime?.getD 0)
               (query.proof.setupTime?.getD 0 + query.proof.strategyTime?.getD 0)
-        let skipping :=
-          if saved < 50 then "naming it skips the others next time"
-          else s!"the others took about {saved}ms of the {query.search}ms search, \
-and naming it skips them next time"
-        Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
-          (header := s!"vampire found the proof with one strategy of its schedule; \
-{skipping}:")
+        -- Naming a strategy is worth a line of the file only for what it
+        -- saves, and a schedule that reached the right strategy quickly
+        -- saves nothing worth having. `+stats` says where the time went
+        -- whether or not this does.
+        if saved ≥ worthNaming then
+          let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
+            match s.reprint with
+            | some text =>
+              let text := text.trimAscii.toString
+              if text.isEmpty then none else some text
+            | none => none
+          let call := " ".intercalate
+            (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
+          Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
+            (header := s!"vampire found the proof with one strategy of its \
+schedule; the others took about {saved}ms of the {query.search}ms search, and \
+naming it skips them next time:")
   | _ => throwUnsupportedSyntax
 
 end Tactic
