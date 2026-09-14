@@ -16,7 +16,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "8ebd1593435b101228b5174608734bcef150d7d0"
+def vampireRev : String := "33162dce616a40348d8fc6efc569872e51c5dd96"
 
 /--
 The submodules vampire's build needs.
@@ -114,11 +114,32 @@ def cmakeParallelLevel : BaseIO String := do
   | none => return toString (min cores 4)
 
 /--
-Builds the `vampire-worker` executable. `cmake` handles incrementality, so this
-runs on every build and reports a trace over the resulting binary.
+What the vampire checkout is at, for a checkout being worked in.
+
+A pinned revision is fetched once and never changes, but `VAMPIRE_DIR` and a
+sibling checkout are somebody's working tree: the build has to notice when it
+has been edited, and lake will not re-run a target whose inputs it does not
+know. So what its git says of itself -- the revision, and what is modified on
+top of it -- is taken as the input.
+-/
+private def vampireState (dir : FilePath) : BaseIO String := do
+  let ask (args : Array String) : IO String := do
+    let out ← IO.Process.output { cmd := "git", args, cwd := dir.toString }
+    if out.exitCode != 0 then error "not a checkout" else return out.stdout
+  match ← (do return (← ask #["rev-parse", "HEAD"]) ++ (←
+      ask #["status", "--porcelain", "--untracked-files=no"])).toBaseIO with
+  | .ok state => return state
+  | .error _ => return ""
+
+/--
+Builds the `vampire-worker` executable. `cmake` handles incrementality, so
+this runs whenever the checkout it builds from has moved, and reports a trace
+over the resulting binary.
 -/
 target «vampire-worker» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg
+  -- Declared before the build so that editing the checkout re-runs it.
+  addTrace (.ofHash (Hash.ofString (← vampireState vampireDir)))
   let cmakeDir := pkg.buildDir / "cmake"
   let exe := cmakeDir / "vampire-worker"
   proc (quiet := true) {
