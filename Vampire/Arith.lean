@@ -144,7 +144,31 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
         of any numbers:{MessageData.joinSep stated.toList ""}\n\
         omega said: {omegaFailed.toMessageData}\n\
         linarith said: {linarithFailed.toMessageData}"
-  instantiateMVars goal
+  -- What a procedure assigned is checked against what it was asked, because
+  -- a procedure that answers the wrong question answers it convincingly.
+  let stated ← instantiateMVars (← inferType answer)
+  unless ← isDefEq stated (claim.getD (mkConst ``False)) do
+    throwError "a decision procedure was asked for{indentExpr
+      (claim.getD (mkConst ``False))}\nand gave something       proving{indentExpr stated}"
+  return answer
+
+/--
+`x ≠ 0 → x * z = x * w → z = w`, where the numbers cancel.
+
+`mul_left_cancel₀` says it of any ring without zero divisors, which the
+integers, the rationals and the reals are; a sort that does not cancel has no
+instance and gets nothing.
+-/
+def cancelling (x z w : Expr) : MetaM (Option Expr) := do
+  try
+    let cancel ← mkAppOptM ``mul_left_cancel₀
+      #[none, none, none, none, some x, some z, some w]
+    -- What is left to take is the two hypotheses; anything else unsettled
+    -- means the sort was not one that cancels.
+    let stated ← instantiateMVars (← inferType cancel)
+    if stated.hasExprMVar then return none
+    return some (← instantiateMVars cancel)
+  catch _ => return none
 
 /--
 `False` from facts that cannot all hold of any numbers, or `claim` from facts

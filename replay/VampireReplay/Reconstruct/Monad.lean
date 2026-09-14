@@ -73,6 +73,16 @@ structure Context where
   way round the equivalence goes.
   -/
   rearranged : Expr → Expr → MetaM (Option Expr) := fun _ _ => pure none
+  /--
+  `x ≠ 0 → x * z = x * w → z = w` at three numbers, and none where their sort
+  does not cancel.
+
+  Handed in for the same reason as `contradiction`, and needed because
+  vampire's divisibility axiom turns on exactly this: that multiplication by
+  anything but zero cancels is a fact about a ring without zero divisors, and
+  no procedure that reads its facts as linear constraints can see it.
+  -/
+  cancelling : Expr → Expr → Expr → MetaM (Option Expr) := fun _ _ _ => pure none
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/

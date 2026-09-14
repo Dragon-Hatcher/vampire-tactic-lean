@@ -194,11 +194,12 @@ def evalVampire : Tactic := fun stx => withMainContext do
       try
         query.preprocessed.goal.withContext
           (Reconstruct.run query.proof query.symbols Arith.contradiction
-            Arith.rearranged cfg.checkSteps)
+            Arith.rearranged Arith.cancelling cfg.checkSteps)
       catch e =>
         throwError "vampire refuted the goal but the proof could not be \
           replayed: {e.toMessageData}"
-    trace[vampire.timing] "replay took {(← IO.monoMsNow) - before}ms"
+    let replay := (← IO.monoMsNow) - before
+    trace[vampire.timing] "replay took {replay}ms"
     if ← isTracingEnabledFor `vampire then
       if let some outcome := outcome then
         let (_, (seen, applied)) :=

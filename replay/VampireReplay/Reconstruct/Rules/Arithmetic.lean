@@ -81,4 +81,101 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
         (fun _ h => do go (facts.push (← plainly h)) (i + 1)) proof
     mkLambdaFVars xs (← go #[] 0)
 
+/-- `a * b`, whichever numbers those are. -/
+private def asProduct (e : Expr) : Option (Expr × Expr) :=
+  match e.getAppFnArgs with
+  | (``HMul.hMul, #[_, _, _, _, a, b]) => some (a, b)
+  | _ => none
+
+/-- Whether a term is the number zero. -/
+private def isZero (e : Expr) : Bool := e.nat? == some 0
+
+/--
+`tha_divisibility`: `x = 0 ∨ x * z ≠ y ∨ x * w ≠ y ∨ z = w`.
+
+`TheoryAxioms::addMultiplyAxioms` states that multiplication by anything but
+zero cancels, in exactly those four literals. No procedure that reads its
+facts as linear constraints can see it -- both products are of two variables
+-- so the clause is proved from its own literals instead: suppose the
+multiplier is not zero and both products hold, and what is left is the
+cancellation itself.
+
+The literals are found by their shape, and each equality either way round,
+because what orders a clause's literals and orients its equations is
+vampire's term order rather than the order the axiom was written in.
+-/
+def divisibility (step : Step) : ReconstructM Expr := do
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let parts := junctionParts ``Or target
+    -- `x = 0`: which number the products multiply by.
+    let some (zeroed, x, zero, statedOfX) := parts.findSome? (fun part => do
+        let some (_, a, b) := part.eq? | none
+        if isZero b then some (part, a, b, true)
+        else if isZero a then some (part, b, a, false)
+        else none)
+      | throwError "a divisibility axiom without a literal saying a number is \
+        zero:{indentExpr target}"
+    -- `¬(x * z = y)` and `¬(x * w = y)`, which multiply that number and reach
+    -- the same one.
+    let products := parts.filterMap fun part => do
+      let some equation := part.not? | none
+      let some (_, a, b) := equation.eq? | none
+      if let some (l, r) := asProduct a then
+        if l == x then return (part, r, b)
+      if let some (l, r) := asProduct b then
+        if l == x then return (part, r, a)
+      none
+    let #[(failsZ, z, y), (failsW, w, y')] := products
+      | throwError "a divisibility axiom states {products.size} products of \
+        the number it says is zero, not two:{indentExpr target}"
+    unless y == y' do
+      throwError "a divisibility axiom's products reach{indentExpr y}\nand\
+        {indentExpr y'}, which are not the same"
+    -- `z = w`, which is what cancelling the multiplier gives.
+    let some equal := parts.find? (fun part =>
+        match part.eq? with
+        | some (_, a, b) => (a == z && b == w) || (a == w && b == z)
+        | none => false)
+      | throwError "a divisibility axiom without the equation it \
+        concludes:{indentExpr target}"
+    let some cancel ← (← read).cancelling x z w
+      | throwError "nothing says that multiplication by a nonzero \
+        {← inferType x} cancels"
+    let inject (part h : Expr) : ReconstructM Expr := do
+      let some i := parts.findIdx? (· == part)
+        | throwError "the clause does not say{indentExpr part}"
+      injectGiven parts i h
+    -- Either the multiplier is zero, or one of the products fails, or both
+    -- hold and the multiplier cancels.
+    let byCases (p : Expr) (yes no : Expr → ReconstructM Expr) :
+        ReconstructM Expr := do
+      let positive ← withLocalDeclD `h p fun h => do
+        mkLambdaFVars #[h] (← yes h)
+      let negative ← withLocalDeclD `h (mkApp (mkConst ``Not) p) fun h => do
+        mkLambdaFVars #[h] (← no h)
+      mkAppOptM ``Classical.byCases #[some p, some target, some positive,
+        some negative]
+    let body ← byCases zeroed (fun h => inject zeroed h) fun refuted => do
+      -- What cancellation asks for is that `x` is not zero; the clause can
+      -- say that the other way round.
+      let nonzero ←
+        if statedOfX then pure refuted
+        else withLocalDeclD `h (← mkEq x zero) fun h => do
+          mkLambdaFVars #[h] (mkApp refuted (← mkAppM ``Eq.symm #[h]))
+      let some statedZ := failsZ.not? | throwError "a refuted product is not one"
+      let some statedW := failsW.not? | throwError "a refuted product is not one"
+      byCases statedZ (fun holdsZ =>
+        byCases statedW (fun holdsW => do
+          -- `x * z = y` and `x * w = y`, so `x * z = x * w`, and `x` cancels.
+          let same ← mkAppM ``Eq.trans #[holdsZ, ← mkAppM ``Eq.symm #[holdsW]]
+          let equated ← mkAppM' cancel #[nonzero, same]
+          -- The clause can state it the other way round.
+          let some (_, a, _) := equal.eq? | throwError "not an equation"
+          let stated ← if a == z then pure equated else mkAppM ``Eq.symm #[equated]
+          inject equal stated)
+          (fun failsW' => inject failsW failsW'))
+        (fun failsZ' => inject failsZ failsZ')
+    mkLambdaFVars xs body
+
 end Vampire.Reconstruct.Arithmetic
