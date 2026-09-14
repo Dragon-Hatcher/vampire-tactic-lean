@@ -247,7 +247,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
         let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
           match s.reprint with
           | some text =>
-            let text := text.trim
+            let text := text.trimAscii.toString
             if text.isEmpty then none else some text
           | none => none
         let call := " ".intercalate

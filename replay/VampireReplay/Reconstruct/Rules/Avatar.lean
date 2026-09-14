@@ -152,7 +152,7 @@ private def contradicts (motive says refuting h negated : Expr) :
     else
       throwError "neither of{indentExpr says}\nand{indentExpr refuting}\n\
         is the negation of the other"
-  return mkApp4 (mkConst ``absurd [levelZero]) positiveSays motive positive
+  return mkApp4 (mkConst ``absurd [.zero]) positiveSays motive positive
     negation
 
 /--
