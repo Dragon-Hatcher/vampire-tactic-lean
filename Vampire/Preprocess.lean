@@ -7,6 +7,29 @@ namespace Vampire.Preprocess
 open Lean Meta Elab
 
 /--
+What a lemma says of this very term, if it says anything of it.
+
+Unifying the lemma's left side with the term is what settles everything the
+lemma is stated over -- the type, its `Monoid`, the base and the exponent --
+and it settles them from the term rather than by looking for them. That
+matters after monomorphization, which replaces the instance a term was
+written with by one of its own: `Monoid R` can no longer be found for the `R`
+a monomorphized goal speaks of, but it is still written in the term, which is
+where this reads it.
+
+`Nat` literals unify with `?n + 1`, so `pow_succ` applies to `x ^ 3` as it
+stands.
+-/
+private def saying (name : Name) (term : Expr) : MetaM (Option (Expr × Expr)) := do
+  let lemma_ ← mkConstWithFreshMVarLevels name
+  let (mvars, _, stated) ← forallMetaTelescope (← inferType lemma_)
+  let some (_, lhs, rhs) := stated.eq? | return none
+  unless ← isDefEq lhs term do return none
+  let says ← instantiateMVars (mkAppN lemma_ mvars)
+  if says.hasExprMVar then return none
+  return some (← instantiateMVars rhs, says)
+
+/--
 `x ^ n` at a literal natural exponent, written out as the multiplications it
 stands for, with a proof that it is the same term.
 
@@ -16,60 +39,66 @@ to be related by a proof rather than by definition. That is done here, before
 the goal is translated, so that what the prover is asked about and what the
 replay states are the one thing.
 
-A variable exponent is left alone, and so is `^` over anything but the natural
-numbers: `zpow` and `rpow` are not iterated multiplication.
+A variable exponent is left alone, and so is `^` over anything but the
+natural numbers: `zpow` and `rpow` are not iterated multiplication.
 -/
-private partial def powProduct (x : Expr) (n : Nat) : MetaM (Expr × Expr) := do
-  -- What the power comes to is read off the lemma that says so, rather than
-  -- built again here: which `1` a monoid's is, is the lemma's business.
-  let stated (says : Expr) : MetaM (Expr × Expr) := do
-    let some (_, _, rhs) := (← instantiateMVars (← inferType says)).eq?
-      | throwError "{says} does not say what a power comes to"
-    return (rhs, says)
-  if n == 0 then
-    return ← stated (← mkAppM ``pow_zero #[x])
-  if n == 1 then
-    return ← stated (← mkAppM ``pow_one #[x])
-  let (inner, says) ← powProduct x (n - 1)
-  -- `x ^ n = x ^ (n - 1) * x`, which is `pow_succ` read at a literal: the
-  -- exponent it states is `(n - 1) + 1`, and the two are the same number.
-  let step ← mkAppM ``pow_succ #[x, mkRawNatLit (n - 1)]
-  let product ← mkAppM ``HMul.hMul #[inner, x]
-  let congruence ← withLocalDeclD `t (← inferType x) fun t => do
-    mkCongrArg (← mkLambdaFVars #[t] (← mkAppM ``HMul.hMul #[t, x])) says
-  return (product, ← mkEqTrans step congruence)
-
-/-- The literal powers of a proposition, written out. -/
-private def expandPowers : Simp.Simproc := fun e => do
-  let_expr HPow.hPow α β _ _ x n := e | return .continue
-  unless (← whnf β).isConstOf ``Nat do return .continue
+private partial def powProduct (e : Expr) : MetaM (Option (Expr × Expr)) := do
+  let_expr HPow.hPow _ β _ _ _ n := e | return none
+  unless (← whnf β).isConstOf ``Nat do return none
   -- The exponent as it is written, which for a literal is `OfNat.ofNat`
   -- around the number rather than the number itself.
   let some exponent := n.nat? <|> (← withDefault (whnf n)).rawNatLit?
-    | return .continue
-  -- What `^` means here has to be the monoid's, which is what says that
-  -- writing it out is multiplication at all.
-  let expanded ←
-    try
-      let (product, says) ← powProduct x exponent
-      if ← isDefEq (← inferType product) α then pure (some (product, says))
-      else pure none
-    catch _ => pure none
-  let some (product, says) := expanded | return .continue
-  return .visit { expr := product, proof? := some says }
+    | return none
+  if exponent == 0 then return ← saying ``pow_zero e
+  if exponent == 1 then return ← saying ``pow_one e
+  -- `x ^ k = x ^ (k - 1) * x`, and then the same again of the smaller power.
+  let some (product, says) ← saying ``pow_succ e | return none
+  let_expr HMul.hMul _ _ _ _ inner x := product | return none
+  let some (expanded, innerSays) ← powProduct inner | return none
+  let congruence ← withLocalDeclD `t (← inferType x) fun t => do
+    mkCongrArg (← mkLambdaFVars #[t] (← mkAppM ``HMul.hMul #[t, x])) innerSays
+  return some (← mkAppM ``HMul.hMul #[expanded, x], ← mkEqTrans says congruence)
+
+/-- The literal powers of a proposition, written out. -/
+private def expandPowers : Simp.Simproc := fun e => do
+  match ← powProduct e with
+  | some (product, says) => return .visit { expr := product, proof? := some says }
+  | none => return .continue
 
 /--
 A hypothesis with the literal powers of what it says written out, or itself
 where it has none.
 -/
-def withoutPowers (h : Expr) : MetaM Expr := do
-  let stated ← instantiateMVars (← inferType h)
+private def rewritten (stated : Expr) : MetaM (Option (Expr × Expr)) := do
   let context ← Simp.mkContext {} (simpTheorems := #[])
     (congrTheorems := ← getSimpCongrTheorems)
   let (result, _) ← Simp.main stated context (methods := { post := expandPowers })
   match result.proof? with
-  | none => return h
-  | some says => mkEqMP says h
+  | none => return none
+  | some says => return some (result.expr, says)
+
+/--
+A proof of something with the literal powers of what it says written out, or
+itself where it says none.
+-/
+def withoutPowers (h : Expr) : MetaM Expr := do
+  let some (_, says) ← rewritten (← instantiateMVars (← inferType h)) | return h
+  mkEqMP says h
+
+/--
+A lemma with the literal powers of what it says written out.
+
+Every lemma monomorphization is given goes through this, before it is given
+them: what monomorphization leaves of `x ^ 3` is an opaque function applied
+to `x` and to the natural number `3`, with the instance that said what the
+power meant replaced by one of its own. There is nothing left to write out
+by then, and a natural number is not something the prover is told about.
+-/
+def lemmaWithoutPowers (fact : Auto.Lemma) : MetaM Auto.Lemma := do
+  let some (stated, says) ← rewritten (← instantiateMVars fact.type) | return fact
+  return { fact with
+    proof := ← mkEqMP says fact.proof
+    type := stated }
 
 /-- The hypotheses to refute, with their roles, and the goal they came from. -/
 structure Result where
@@ -161,7 +190,7 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which
     -- instances it is waiting for.
-    let lemmas ← (lctxLemmas ++ extra).mapM
+    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWithoutPowers).mapM
       (Auto.unfoldConstAndPreprocessLemma #[])
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
     let (proof, mv, _, dtrs) ← Auto.runMono none lemmas inhFacts

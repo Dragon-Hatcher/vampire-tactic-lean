@@ -82,7 +82,8 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
     else Preprocess.intros copy (hs.map (·.proof))
   -- Vampire has no exponentiation, so a literal power is written out as the
   -- multiplications it stands for -- in Lean, with a proof, so that what is
-  -- asked and what is replayed say the same thing.
+  -- asked and what is replayed say the same thing. Monomorphization does its
+  -- own, before it runs, since what it leaves has nothing to write out.
   let hypotheses ← preprocessed.goal.withContext <|
     preprocessed.hypotheses.mapM fun (h, role) => do
       return (← Preprocess.withoutPowers h, role)

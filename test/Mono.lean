@@ -19,3 +19,11 @@ example {ι : Type} (g : ι → ι) (a : ι) (h : ∀ x, g x = x) : g (g a) = a 
 -- can instantiate it -- the lemma reaches the prover as no axiom at all.
 example (G : Type) [Group G] (h : ∀ x : G, x * x = 1) : ∀ a b : G, a * b = b * a := by
   vampire +mono [h, mul_assoc, one_mul]
+
+-- A literal power has to be written out before monomorphization, not after:
+-- what monomorphization leaves of `x ^ 3` is an opaque function applied to
+-- `x` and to the natural number 3, and the prover is told of no such number.
+-- Jacobson's theorem for n = 3, which needs the ring axioms spelled out.
+example (R : Type) [Ring R] (h : ∀ x : R, x ^ 3 = x) (a b : R) : a * b = b * a := by
+  vampire +mono [h, add_assoc, add_comm, add_zero, zero_add, neg_add_cancel,
+    mul_assoc, mul_add, add_mul, mul_zero, zero_mul]
