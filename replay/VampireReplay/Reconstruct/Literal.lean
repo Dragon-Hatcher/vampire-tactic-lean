@@ -258,8 +258,12 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
   try
     contradiction facts (some goal)
   catch _ =>
+    -- Supposing it fails is another set of facts, and they are taken apart
+    -- the same way anything else is: a denied comparison among them says
+    -- nothing to a procedure until what it denies has been proved.
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
-      mkLambdaFVars #[h] (← contradiction (facts.push (← plainly h)) none)
+      mkLambdaFVars #[h]
+        (← byArithmetic (facts.push (← plainly h)) (mkConst ``False) fuel)
     return ofNotNot goal refuted
 
 /--
