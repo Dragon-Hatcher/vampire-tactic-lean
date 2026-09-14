@@ -20,4 +20,11 @@ awk '/^import Vampire$/ { print; print "set_option trace.vampire true"; next } {
   "$src" > "$work/problem.lean"
 # The problem file itself, which the tactic reads from beside the Lean file.
 cp "$dir/$stem".p "$work/" 2>/dev/null || cp "$dir/$stem".smt2 "$work/" 2>/dev/null || true
-LEAN_PATH=$(lake env printenv LEAN_PATH) lean "$work/problem.lean"
+# The libraries lake would load: the worker is started by a native function,
+# which `lean` can only call out of a library it has been given.
+libs=$(python3 -c "
+import json
+setup = json.load(open('.lake/build/ir/Vampire/Frontend.setup.json'))
+print(' '.join('--load-dynlib=' + (lib['path'] if isinstance(lib, dict) else lib)
+               for lib in setup.get('dynlibs', [])))")
+LEAN_PATH=$(lake env printenv LEAN_PATH) lean $libs "$work/problem.lean"

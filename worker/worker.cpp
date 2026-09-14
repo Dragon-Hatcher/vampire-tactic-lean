@@ -146,6 +146,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <unistd.h>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -1169,8 +1170,24 @@ int main(int argc, char** argv)
     g_outPath = argv[2];
     std::remove(g_outPath.c_str());
 
+    // Run where the problem is, rather than being told where it is: vampire
+    // writes the path it was given into the proof, and the caller's directory
+    // has a different name every time. The caller cannot set our directory
+    // for us -- doing that from a process holding gigabytes costs more than
+    // the proof does, which is why it starts us with `posix_spawn`.
+    std::string problem(argv[1]);
+    size_t slash = problem.find_last_of('/');
+    if (slash != std::string::npos) {
+      std::string dir = problem.substr(0, slash);
+      if (chdir(dir.c_str()) != 0) {
+        std::fprintf(stderr, "could not enter %s\n", dir.c_str());
+        return 2;
+      }
+      problem = problem.substr(slash + 1);
+    }
+
     Timer::reinitialise();
-    UIHelper::parseFile(argv[1], env.options->inputSyntax(), false);
+    UIHelper::parseFile(problem, env.options->inputSyntax(), false);
     Problem* prb = UIHelper::getInputProblem();
 
     // On reaching a limit vampire exits from its timer thread, skipping both

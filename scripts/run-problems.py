@@ -27,6 +27,24 @@ def lean_path() -> str:
     return p.stdout.strip()
 
 
+def dynlibs() -> list[str]:
+    """What lake loads when it elaborates a file importing `Vampire`.
+
+    The worker is started by a native function, and `lean` can only call one
+    out of a library it has been given; lake names them in each module's
+    setup, so they are read from there rather than guessed at.
+    """
+    setup = HERE / ".lake" / "build" / "ir" / "Vampire" / "Frontend.setup.json"
+    if not setup.exists():
+        return []
+    import json
+    libs = json.loads(setup.read_text()).get("dynlibs", [])
+    return [f"--load-dynlib={x['path'] if isinstance(x, dict) else x}" for x in libs]
+
+
+LIBS = dynlibs()
+
+
 def select(names: list[str]) -> list[Path]:
     """The problem files a command line asks for, in a stable order."""
     if not names:
@@ -64,7 +82,7 @@ def run(path: Path, env: dict[str, str], timeout: float) -> tuple[Path, float, s
     """The problem, the seconds it took, and why it failed if it did."""
     t0 = time.monotonic()
     try:
-        p = subprocess.run(["lean", path.name], cwd=path.parent, env=env,
+        p = subprocess.run(["lean", *LIBS, path.name], cwd=path.parent, env=env,
                            capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return path, time.monotonic() - t0, f"timed out after {timeout:.0f}s"

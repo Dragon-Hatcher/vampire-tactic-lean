@@ -1,4 +1,5 @@
 import Lean.Util.Path
+import VampireReplay.Spawn
 import VampireReplay.Wire
 
 namespace Vampire
@@ -144,21 +145,24 @@ def prove (problem : String) (cfg : Config := {})
     -- Run in the directory rather than naming it: vampire writes the path it
     -- was given into the proof, and a temporary directory has a different name
     -- every time.
-    let out ← IO.Process.output {
-      cmd := (← IO.FS.realPath worker).toString
-      cwd := dir
-      args := #["problem.p", "proof.bin"] ++ cfg.toArgs
-    }
+    let outPath := dir / "stdout"
+    let errPath := dir / "stderr"
+    let exitCode ← VampireReplay.spawn (← IO.FS.realPath worker).toString
+      (#[problemFile.toString, outFile.toString] ++ cfg.toArgs)
+      outPath.toString errPath.toString
     -- Vampire reports on stdout, so both streams matter when explaining itself.
+    let said (path : System.FilePath) : IO String := do
+      if ← path.pathExists then IO.FS.readFile path else return ""
     let diagnostics :=
-      (String.intercalate "\n" ([out.stdout, out.stderr].filter (!·.isEmpty)))
+      (String.intercalate "\n"
+        ([← said outPath, ← said errPath].filter (!·.isEmpty)))
         |>.trimAscii |>.toString
     -- Reaching a limit makes vampire exit non-zero from the beat that reached
     -- it, which is an ordinary outcome, so the file decides the result rather
     -- than the code.
     unless ← outFile.pathExists do
       return .error (.error s!"{workerName} produced no result \
-        (exit code {out.exitCode})\n{diagnostics}")
+        (exit code {exitCode})\n{diagnostics}")
     match Proof.ofByteArray (← IO.FS.readBinFile outFile) with
     | .error e => return .error e
     | .ok proof => return .ok (proof, diagnostics)

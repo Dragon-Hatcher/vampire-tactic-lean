@@ -156,6 +156,7 @@ how to tell a slow translation from a slow search from a slow replay.
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
 | `… which this tactic does not implement yet; those steps are admitted` | Vampire used an inference rule that has no reconstruction yet, so the proof holds a `sorry`. Lean reports that too |
 | `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
+| `Could not find native implementation of … spawn` | `lean` was started without the libraries Lake loads. Build and run through Lake — an editor, `lake build` and `lake test` all do — or pass the `--load-dynlib` flags `scripts/trace-problem.sh` reads out of Lake's own setup |
 | `vampire failed: …` | the worker could not be run at all |
 
 ## Licence
@@ -169,7 +170,8 @@ built worker is made of and what each piece is under.
 
 - `Vampire/` — the tactic: the goal it is given, the decision procedures it
   hands to replay, and the syntax.
-- `replay/` — a package of its own holding the replay: `Translate.lean` goes to
+- `replay/` — a package of its own holding the replay, and `spawn.c`, which
+  starts the worker without copying the address space: `Translate.lean` goes to
   TPTP, `Wire.lean` decodes what the prover wrote, and `Reconstruct/` replays
   it, one module per family of inference rules. Separate so that it can be
   precompiled and so run as native code rather than in the interpreter, which

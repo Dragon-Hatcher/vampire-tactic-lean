@@ -1,6 +1,6 @@
 import Lake
 
-open Lake DSL
+open Lake DSL System
 
 /-!
 The part of the tactic that is its own code: decoding what the prover wrote,
@@ -17,15 +17,33 @@ that is what lets the two sit in different packages.
 
 package vampireReplay
 
+/--
+Compiles the shim that starts the worker; `spawn.c` says why it exists.
+
+It lives in this package because a function with a native implementation can
+only be called from interpreted code if the module declaring it has been
+compiled into a library the interpreter loads -- and this is the package that
+is precompiled. The tactic's own half is interpreted, Mathlib not being
+precompiled, so the declaration could not sit next to the code that uses it.
+-/
+target spawnShim pkg : FilePath := do
+  let src ← inputTextFile <| pkg.dir / "spawn.c"
+  buildO (pkg.buildDir / "spawn.o") src
+    #["-I", (← getLeanIncludeDir).toString, "-fPIC", "-O2"]
+
+extern_lib vampireSpawn pkg := do
+  let name := nameToStaticLib "vampireSpawn"
+  buildStaticLib (pkg.staticLibDir / name) #[← spawnShim.fetch]
+
 @[default_target]
 lean_lib VampireReplay where
   roots := #[
     `VampireReplay.InferenceRule, `VampireReplay.Wire,
     `VampireReplay.Translate, `VampireReplay.Reconstruct,
-    `VampireReplay.Abstract]
+    `VampireReplay.Abstract, `VampireReplay.Spawn]
   globs := #[
     .one `VampireReplay.InferenceRule, .one `VampireReplay.Wire,
     .one `VampireReplay.Translate,
-    .one `VampireReplay.Abstract,
+    .one `VampireReplay.Abstract, .one `VampireReplay.Spawn,
     .andSubmodules `VampireReplay.Reconstruct]
   precompileModules := true
