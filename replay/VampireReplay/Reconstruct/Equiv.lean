@@ -240,6 +240,23 @@ def standingFor (types values : Array Expr)
   return mkAppN abstracted values
 
 /--
+Whether `e` is a comparison or an equation between numbers, or the denial of
+one: what vampire's normalisation rewrites, and so the only kind of atom an
+arithmetic fact can relate to another.
+-/
+def isArithmeticAtom (e : Expr) : MetaM Bool := do
+  let e := (e.not?).getD e
+  let τ? := match_expr e with
+    | LT.lt τ _ _ _ => some τ
+    | LE.le τ _ _ _ => some τ
+    | GT.gt τ _ _ _ => some τ
+    | GE.ge τ _ _ _ => some τ
+    | Eq τ _ _ => some τ
+    | _ => none
+  let some τ := τ? | return false
+  return (arithmeticSort (← whnf τ)).isSome
+
+/--
 `a ↔ b` when nothing in the shape of the two relates them.
 
 If they speak of numbers, what relates them is arithmetic: vampire's
@@ -254,10 +271,9 @@ them asks a decision procedure to prove a nested formula by cases, which for a
 formula of any depth is a question it cannot be asked.
 -/
 private def unrelated (a b : Expr) (why : MessageData) : ReconstructM Expr := do
-  try
-    arithmeticIff a b
-  catch _ =>
+  unless (← isArithmeticAtom a) && (← isArithmeticAtom b) do
     throwError "{why}"
+  arithmeticIff a b
 
 /--
 `a ↔ b`, where the two say the same thing up to the shape vampire keeps them in.
@@ -435,15 +451,21 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
   | _ =>
     match_expr e with
     | Not a =>
-      -- A comparison denied is a comparison the other way round.
-      match_expr a with
-      | LT.lt _ _ x y =>
-        let flipped ← mkAppM ``LE.le #[y, x]
-        return (flipped, ← arithmeticIff e flipped)
-      | LE.le _ _ x y =>
-        let flipped ← mkAppM ``LT.lt #[y, x]
-        return (flipped, ← arithmeticIff e flipped)
-      | _ =>
+      -- A comparison denied is a comparison the other way round, which over
+      -- numbers is `not_lt` or `not_le` and nothing to ask a procedure about.
+      -- Named rather than referred to: the lemmas are Mathlib's, which this
+      -- library does not import, and the goal that has numbers in it does.
+      let flip (τ : Expr) (lemma_ : Name) (x y : Expr) (flipped : Expr) :
+          ReconstructM (Option (Expr × Expr)) := do
+        unless (arithmeticSort (← whnf τ)).isSome do return none
+        return some (flipped, ← mkAppOptM lemma_ #[some τ, none, some x, some y])
+      let flipped? ← match_expr a with
+        | LT.lt τ _ x y => flip τ `not_lt x y (← mkAppM ``LE.le #[y, x])
+        | LE.le τ _ x y => flip τ `not_le x y (← mkAppM ``LT.lt #[y, x])
+        | _ => pure none
+      match flipped? with
+      | some result => return result
+      | none =>
         let (ca, pa) ← sameWayRound a
         return (mkApp (mkConst ``Not) ca, ← mkAppM ``not_congr #[pa])
     | And a b => congruence ``And a b
