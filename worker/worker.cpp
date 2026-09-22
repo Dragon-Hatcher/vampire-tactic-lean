@@ -1217,15 +1217,17 @@ struct Encoder {
       for (Literal* lit : from) {
         Literal* image = SubstHelper::apply(lit, bound);
         uint32_t entry = NONE;
-        for (unsigned j = 0; j < into->length() && entry == NONE; j++) {
-          Literal* there = (*into)[j];
-          if (there == image)
+        for (unsigned j = 0; j < into->length() && entry == NONE; j++)
+          if ((*into)[j] == image)
             entry = j;
-          else if (image->isEquality() && there->isEquality()
-                   && image->polarity() == there->polarity()
-                   && *image->nthArgument(0) == *there->nthArgument(1)
-                   && *image->nthArgument(1) == *there->nthArgument(0))
-            entry = j | 0x80000000u;
+        // Vampire shares an equation with its sides either way round, so the
+        // shared literal says nothing of which way the premise's own sides
+        // come out; replay substitutes into those, so they are what decide.
+        if (entry != NONE && lit->isEquality()) {
+          Literal* there = (*into)[entry];
+          TermList lhs = SubstHelper::apply(*lit->nthArgument(0), bound);
+          if (lhs != *there->nthArgument(0))
+            entry |= 0x80000000u;
         }
         placementEntries.push_back(entry);
       }
