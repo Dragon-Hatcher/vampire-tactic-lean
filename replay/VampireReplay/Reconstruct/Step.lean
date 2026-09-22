@@ -122,14 +122,17 @@ A premise can be used twice -- an inference can take a clause as both of its
 premises -- so a use is found by position rather than by which premise it is,
 counting the uses of that premise in the order they were recorded.
 -/
-def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
-  let some parent := step.unit.parents[i]?
-    | throwError "step {step.unit.number} has no premise in position {i}"
+def Step.useAt? (step : Step) (i : Nat) : Option PremiseUse := do
+  let parent ← step.unit.parents[i]?
   let earlier := (step.unit.parents.extract 0 i).countP (·.number == parent.number)
   let uses := step.unit.premiseUses.filter (·.premise == parent.number)
-  let some use := uses[earlier]?
-    | throwError "step {step.unit.number} did not record how it used step \
-      {parent.number}"
+  uses[earlier]?
+
+/-- `useAt?`, for a rule that cannot go on without the use. -/
+def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
+  let some use := step.useAt? i
+    | throwError "step {step.unit.number} did not record how it used its \
+      premise in position {i}"
   return use
 
 /--

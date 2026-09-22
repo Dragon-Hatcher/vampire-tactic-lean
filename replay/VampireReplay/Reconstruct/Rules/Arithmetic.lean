@@ -29,7 +29,7 @@ private def premisesOf (step : Step) (vars : Vars) :
       | throwError "no premise in position {i}"
     -- A step that bound the premise's variables recorded what to; one that
     -- took the premise as it stands recorded nothing, and then it is taken so.
-    match ← try some <$> step.useAt i catch _ => pure none with
+    match step.useAt? i with
     | some use =>
       out := out.push (← instantiateAt parent use (← coverVars parent vars step.unit.boundVarSorts) proof stated)
     | none =>

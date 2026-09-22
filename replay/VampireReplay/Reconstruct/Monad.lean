@@ -158,8 +158,8 @@ def throwIntroduced (kind name : String) : ReconstructM α :=
   throwError "vampire introduced {kind} `{name}`, which has no counterpart in \
     the goal; reconstruction cannot proceed"
 
-/-- The Lean type a TPTP sort stands for. -/
-def sortType (name : String) : ReconstructM Expr := do
+/-- The Lean type a TPTP sort stands for, if it stands for one. -/
+def sortType? (name : String) : ReconstructM (Option Expr) := do
   if let some τ := (← read).symbols.sorts[name]? then
     return τ
   -- TPTP's own arithmetic types, which a proof can reach for even where the
@@ -167,7 +167,12 @@ def sortType (name : String) : ReconstructM Expr := do
   if name == "$int" then return mkConst ``Int
   if name == "$rat" then return mkConst `Rat
   if name == "$real" then return mkConst `Real
-  throwIntroduced "the sort" name
+  return none
+
+/-- The Lean type a TPTP sort stands for. -/
+def sortType (name : String) : ReconstructM Expr := do
+  let some τ ← sortType? name | throwIntroduced "the sort" name
+  return τ
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

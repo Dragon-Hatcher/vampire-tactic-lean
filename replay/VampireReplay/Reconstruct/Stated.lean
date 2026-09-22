@@ -225,10 +225,9 @@ def interpreted (name : String) (args : Array Expr) :
     let τ ←
       match cast with
       | some name => pure (mkConst name)
-      | none =>
-        try sortType sort
-        catch _ => pure (mkConst (if sort == "$int" then ``Int
-          else if sort == "$rat" then `Rat else `Real))
+      | none => do
+        let some τ ← sortType? sort | throwIntroduced "the sort" sort
+        pure τ
     if d == 1 then
       return some (← wholeNumeral τ n)
     return some (← mkAppM ``HDiv.hDiv

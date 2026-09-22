@@ -50,7 +50,8 @@ private partial def treeOf (vars : Vars) (bindings : Std.HashMap UInt32 Term)
   else
     let some symbol := t.symbol?
       | throwError "term has unknown functor {t.functor}"
-    let head ← try some <$> symbolExpr symbol.name catch _ => pure none
+    let head ← if ← resolvesSymbol symbol.name then some <$> symbolExpr symbol.name
+      else pure none
     return .app symbol.name head (← t.args.mapM (treeOf vars bindings))
 
 private partial def Tree.toExpr : Tree → ReconstructM Expr
