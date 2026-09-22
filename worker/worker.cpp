@@ -12,9 +12,13 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    37 words, see `write`. The last word is the string offset of
- *             the strategy the proof was found by, and `NONE` when there is no
- *             proof: the same run can be had again from that alone
+ *   header    41 words, see `write`. Words 36 to 39 are the strategy the proof
+ *             was found by (a string offset, `NONE` when there is no proof: the
+ *             same run can be had again from that alone), what it ran for, what
+ *             starting up took and when the proof was found. Word 34 is how
+ *             many inference rules vampire declares and word 40 a hash of their
+ *             names in order (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt),
+ *             which is what the Lean side checks its generated copy against
  *   functions {nameOff, arity}          -- indexed by a term's functor
  *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
  *             flags: 1 = polarity flipping flipped this predicate, so that
@@ -187,7 +191,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 21;
+const uint32_t VERSION = 22;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -1099,6 +1103,9 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, enc.strategyMs);
   putWord(buf, enc.setupMs);
   putWord(buf, enc.foundAtMs);
+  // The count above notices a rule added or removed, and this one rules that
+  // traded places, which would otherwise decode as each other.
+  putWord(buf, VAMPIRE_RULE_FINGERPRINT);
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);

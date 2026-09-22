@@ -123,11 +123,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 21
+private def version : UInt32 := 22
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 40 * 4 then
+  if data.size < 41 * 4 then
     .error (.error s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     .error (.error "proof does not start with the expected magic bytes")
@@ -135,11 +135,17 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   if v != version then
     .error (.error s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
+  -- Rules are numbered by where vampire declares them, so the count notices
+  -- one added or removed and the fingerprint, a hash of their names in order,
+  -- two that traded places.
   let numRules := word 34
-  if numRules != InferenceRule.count then
-    .error (.error s!"vampire declares {numRules} inference rules but \
-      Vampire/InferenceRule.lean has {InferenceRule.count}; \
-      rerun scripts/gen-inference-rules.py")
+  let fingerprint := readU32 data (40 * 4)
+  if numRules != InferenceRule.count || fingerprint != InferenceRule.fingerprint then
+    .error (.error s!"the vampire the worker was built from declares \
+      {numRules} inference rules (fingerprint {fingerprint}), but \
+      replay/VampireReplay/InferenceRule.lean was generated for \
+      {InferenceRule.count} (fingerprint {InferenceRule.fingerprint}); rerun \
+      scripts/gen-inference-rules.py")
   let numFunctions := word 5
   let numPredicates := word 6
   let numSorts := word 7
@@ -169,7 +175,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numCongruenceArgs := word 31
   let stringsLen := word 32
   let proofTextLen := word 33
-  let functions := 40 * 4
+  let functions := 41 * 4
   let predicates := functions + numFunctions * 2 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Regenerates Vampire/InferenceRule.lean from vampire's Inference.hpp.
+"""Regenerates replay/VampireReplay/InferenceRule.lean from vampire's Inference.hpp.
 
-  ./scripts/gen-inference-rules.py ../vampire-fork
+  ./scripts/gen-inference-rules.py [vampire checkout]
+
+The checkout defaults to the one `lake build` builds against: a sibling
+`vampire-fork/` if there is one, and otherwise the pinned revision Lake fetched
+into `.lake/build/vampire`.
 """
+import hashlib
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+OUT = HERE / "replay" / "VampireReplay" / "InferenceRule.lean"
 
 LEAN_KEYWORDS = {
     "axiom", "def", "theorem", "instance", "end", "exists", "forall", "fun",
@@ -24,7 +33,12 @@ def camel(name: str) -> str:
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "../vampire-fork"
+    if len(sys.argv) > 1:
+        root = sys.argv[1]
+    elif (HERE.parent / "vampire-fork" / "CMakeLists.txt").exists():
+        root = str(HERE.parent / "vampire-fork")
+    else:
+        root = str(HERE / ".lake" / "build" / "vampire")
     header = f"{root}/Kernel/Inference.hpp"
     body = re.search(
         r"enum class InferenceRule : unsigned char \{(.*?)\n\};",
@@ -41,6 +55,9 @@ def main() -> int:
     if len(names) != len(set(names)):
         print("InferenceRule has duplicate names", file=sys.stderr)
         return 1
+    # The worker hashes the names the same way, in `worker/CMakeLists.txt`, so
+    # that rules trading places are noticed as well as rules being added.
+    fingerprint = hashlib.sha256(",".join(names).encode()).hexdigest()[:8]
     commit = subprocess.run(
         ["git", "-C", root, "rev-parse", "--short", "HEAD"],
         capture_output=True, text=True,
@@ -64,6 +81,12 @@ def main() -> int:
         f"/-- How many rules vampire declares. -/",
         f"def count : Nat := {len(names)}",
         "",
+        "/--",
+        "The first four bytes of the SHA-256 of the rules' names in order, joined",
+        "by commas: what the worker reports of the vampire it was built from.",
+        "-/",
+        f"def fingerprint : UInt32 := 0x{fingerprint}",
+        "",
         "/-- The rules, indexed as vampire numbers them. -/",
         "def all : Array InferenceRule :=",
         "  #[" + ", ".join("." + camel(n) for n in names) + "]",
@@ -84,8 +107,8 @@ def main() -> int:
         "end Vampire",
         "",
     ]
-    open("Vampire/InferenceRule.lean", "w").write("\n".join(out))
-    print(f"wrote Vampire/InferenceRule.lean with {len(names)} rules")
+    OUT.write_text("\n".join(out))
+    print(f"wrote {OUT.relative_to(HERE)} with {len(names)} rules")
     return 0
 
 
