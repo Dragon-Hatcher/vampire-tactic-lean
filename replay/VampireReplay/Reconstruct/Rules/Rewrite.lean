@@ -99,22 +99,17 @@ The equation a premise use points at, as an oriented rewrite: the side the
 inference matched, what it rewrites to, and a proof of the equation that way
 round.
 
-Which way round the equation was used is read off the recorded side, and the
-recorded substitution is what states that side in the premise's own variables.
+Which way round the equation was used is read off the recorded side, which is
+one of the equation's own arguments; the recorded substitution is what states
+that side in the premise's own variables.
 -/
-private def orientedEquation (use : PremiseUse) (vars : Vars) (proof stated : Expr) :
-    ReconstructM (Expr × Expr × Expr) := do
-  let some equationSide := use.term
-    | throwError "the step did not record which side of the equation it used"
-  let «from» ← term (← substitutedVars use vars) equationSide
+private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
+    (vars : Vars) (proof stated : Expr) : ReconstructM (Expr × Expr × Expr) := do
   let some (_, lhs, rhs) := (← instantiateMVars stated).eq?
     | throwError "the equation is not one:{indentExpr stated}"
-  if ← isDefEq lhs «from» then
-    return («from», rhs, proof)
-  if ← isDefEq rhs «from» then
-    return («from», lhs, ← mkAppM ``Eq.symm #[proof])
-  throwError "neither side of{indentExpr stated}\nis the term{indentExpr «from»}\n\
-    the equation was matched at"
+  if ← recordedSideIsLeft parent use ((use.literal.map (·.toNat)).getD 0) then
+    return (lhs, rhs, proof)
+  return (rhs, lhs, ← mkEqSymm proof)
 
 /--
 What a rewriting inference did to the premise it rewrote: which literal, and
@@ -217,7 +212,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let (_, to, heq) ← orientedEquation sideUse vars sideAt sideType
+    let (_, to, heq) ← orientedEquation sideParent sideUse vars sideAt sideType
     -- The rewrite happens inside the clause, so it is made where it stands.
     let «from» ← rw.target.toExpr
     let τ ← inferType «from»
@@ -262,7 +257,7 @@ def superposition (step : Step) : ReconstructM Expr := do
         carryPast sideType rest sideAt (· == equationLiteral.toNat)
           (fun _ hSide inner => do
             let («from», to, heq) ←
-              orientedEquation sideUse vars hSide (← inferType hSide)
+              orientedEquation sideParent sideUse vars hSide (← inferType hSide)
             let source ← rw.target.toExpr
             if ← isDefEq source «from» then
               return ← placeLiteral inner (← rewriteWith rw vars heq to i h)

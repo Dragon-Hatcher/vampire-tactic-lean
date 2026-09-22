@@ -232,32 +232,25 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent selected vars premiseProof premiseStated
-    -- The unified side of each equality, as the premise states it here.
-    let unified (use : PremiseUse) : ReconstructM Expr := do
-      let some recorded := use.term
-        | throwError "equality factoring did not record which side it unified"
-      -- Recorded as the premise states it, so it is read back in the premise's
-      -- own variables, under what the unifier bound them to.
-      term (← substitutedVars use vars) recorded
-    let sLHS ← unified selected
-    let fLHS ← unified side
+    -- Either side of an equality can be the one that was unified, and which
+    -- it was is the recorded side.
+    let selectedLeft ← recordedSideIsLeft parent selected selectedIdx.toNat
+    let sideLeft ← recordedSideIsLeft parent side sideIdx.toNat
     let parts := junctionParts ``Or premiseType
     let some sideLit := parts[sideIdx.toNat]?
       | throwError "the premise has no literal {sideIdx}"
     let some (_, fa, fb) := sideLit.eq?
       | throwError "the equality factored against is not an equality:\
         {indentExpr sideLit}"
-    -- Either side of an equality can be the one that was unified.
-    let fRHS := if ← isDefEq fa fLHS then fb else fa
+    let (fLHS, fRHS) := if sideLeft then (fa, fb) else (fb, fa)
     let body ← carryPast premiseType target premiseAt (· == selectedIdx.toNat)
       (fun _ h rest => do
         let stated ← instantiateMVars (← inferType h)
         let some (α, sa, sb) := stated.eq?
           | throwError "the equality factored is not an equality:\
             {indentExpr stated}"
-        let sRHS := if ← isDefEq sa sLHS then sb else sa
-        let h ← if ← isDefEq sa sLHS then pure h
-          else pure (← mkAppM ``Eq.symm #[h])
+        let sRHS := if selectedLeft then sb else sa
+        let h ← if selectedLeft then pure h else mkEqSymm h
         -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`.
         let differ ← withLocalDeclD `h (← mkAppM ``Ne #[sRHS, fRHS]) fun hne => do
           mkLambdaFVars #[hne] (← placeLiteral rest hne)

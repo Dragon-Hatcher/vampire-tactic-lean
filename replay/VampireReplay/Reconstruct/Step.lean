@@ -67,20 +67,6 @@ def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   return (mkAppN proof args, ← sharedClause (← instantiateForall stated args))
 
 /--
-What each of a premise's variables stands for under the substitution recorded
-against it.
-
-A term of the premise -- the subterm an inference rewrote, say -- is recorded
-as the premise states it, so reading it back needs the premise's own variables
-rather than the conclusion's.
--/
-def substitutedVars (use : PremiseUse) (vars : Vars) : ReconstructM Vars := do
-  let mut out : Vars := {}
-  for (v, image) in use.bindings do
-    out := out.insert v (← term vars image)
-  return out
-
-/--
 Something of the right sort for each of a premise's variables the conclusion
 did not keep, and for each of @b bound.
 
@@ -145,6 +131,30 @@ def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
     | throwError "step {step.unit.number} did not record how it used step \
       {parent.number}"
   return use
+
+/--
+Whether the term a use recorded is the left side of the equation it acted on,
+rather than the right.
+
+The use records the side as the premise states it, and vampire shares its
+terms, so it is one of the equation's two arguments by index: which side the
+inference used is read off rather than found by unifying either side with it.
+-/
+def recordedSideIsLeft (parent : Vampire.Unit) (use : PremiseUse) (literal : Nat) :
+    ReconstructM Bool := do
+  let some side := use.term
+    | throwError "step {parent.number} was used without recording which side of \
+        its equation"
+  let some clause := parent.clause?
+    | throwError "the equation used from step {parent.number} is not a clause"
+  let some l := clause.literals[literal]?
+    | throwError "step {parent.number} has no literal {literal}"
+  let #[lhs, rhs] := l.args
+    | throwError "the literal used from step {parent.number} is not an equation"
+  if lhs == side then return true
+  if rhs == side then return false
+  throwError "the term recorded against step {parent.number}, {side}, is neither \
+    side of {l}"
 
 /--
 A step whose conclusion restates its premise's literals, whatever it did to
