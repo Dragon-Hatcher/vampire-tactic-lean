@@ -10,9 +10,11 @@ theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
 ```
 
 Vampire finds the refutation; the tactic then **replays that refutation as a
-Lean proof term**, inference by inference. Nothing is admitted and no search
-tactic stands in: if a rule cannot be replayed the tactic says so rather than
-closing the goal quietly.
+Lean proof term**, inference by inference. Nothing is admitted: if a rule
+cannot be replayed the tactic says so rather than closing the goal. The one
+place a decision procedure stands in is arithmetic, where vampire's own rules
+record nothing of why a step holds, so `linarith` or `omega` proves that step
+from the literals it acted on.
 
 ## Theories
 
@@ -132,6 +134,7 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 | `showQuery` | false | print the TPTP problem instead of running the prover |
 | `stats` | false | report what each phase cost and how many steps the proof had (`+stats`) |
 | `checkSteps` | false | check each replayed step as it is built, naming the rule that fails |
+| `admit` | false | close the goal even where the proof uses a rule with no replay yet, admitting those steps as `sorry` (`+admit`) |
 
 `+stats` says where the time went:
 
@@ -168,7 +171,7 @@ how to tell a slow translation from a slow search from a slow replay.
 | --- | --- |
 | `vampire did not refute the goal (…)` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, that is the only one tried — remove it to put the schedule back |
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
-| `… which this tactic does not implement yet; those steps are admitted` | Vampire used an inference rule that has no reconstruction yet, so the proof holds a `sorry`. Lean reports that too |
+| `vampire's proof uses …, which this tactic does not replay yet` | Vampire used an inference rule that has no reconstruction yet. `+admit` closes the goal anyway, with a `sorry` for those steps and a warning saying so |
 | `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
 | `Could not find native implementation of … spawn` | `lean` was started without the libraries Lake loads. Build and run through Lake — an editor, `lake build` and `lake test` all do — or pass the `--load-dynlib` flags `scripts/trace-problem.sh` reads out of Lake's own setup |
 | `vampire failed: …` | the worker could not be run at all |

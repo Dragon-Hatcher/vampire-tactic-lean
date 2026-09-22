@@ -50,6 +50,12 @@ structure TacticConfig extends Config where
   step by step; this is the summary.
   -/
   stats : Bool := false
+  /--
+  Close the goal even where a step of the proof uses a rule this tactic does
+  not replay yet, admitting those steps with a `sorry` and a warning. Off, such
+  a proof is an error, so that nothing the tactic closes rests on `sorry`.
+  -/
+  admit : Bool := false
 deriving Inhabited
 
 /-- What running vampire on a goal produced. -/
@@ -229,12 +235,16 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let some outcome := outcome
       | throwError "vampire reported a refutation but produced no proof"
     unless outcome.unimplemented.isEmpty do
-      -- The proof term holds a `sorry` for each of these, so say so rather
-      -- than leaving the goal looking closed.
+      trace[vampire] "rules with no replay: {outcome.unimplemented}"
+      -- The proof term holds a `sorry` for each of these, so it closes the
+      -- goal only when asked to, and says so when it does.
+      unless cfg.admit do
+        throwError "vampire's proof uses {outcome.unimplemented}, which this \
+          tactic does not replay yet. `+admit` closes the goal anyway, with \
+          those steps admitted as `sorry`"
       logWarning m!"vampire's proof was replayed except for \
         {outcome.unimplemented}, which this tactic does not implement yet; \
         those steps are admitted, so the proof holds a `sorry`"
-      trace[vampire] "admitted rules: {outcome.unimplemented}"
     if cfg.stats then
       -- What Lean does with the term afterwards -- sharing its subterms and
       -- checking it -- is not counted here, because it happens once the
