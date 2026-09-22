@@ -18,31 +18,45 @@ namespace Vampire.Reconstruct.Splitting
 
 open Lean Meta
 
+/-- What a general splitting component says: its name and the half it holds. -/
+private structure Component where
+  /-- The name the splitting introduced. -/
+  name : String
+  /-- Where the name is among the component's literals. -/
+  nameAt : Nat
+  /-- The variables the name is applied to. -/
+  arguments : Array UInt32
+  /-- The literals of the half the name stands against. -/
+  rest : Array Literal
+  /-- Where each of those is among the component's literals. -/
+  restAt : Array Nat
+
 /--
 The name a general splitting introduced, the variables it is applied to, and
-the literals it stands against.
+the literals it stands against, each with where it is in the component.
 -/
-private def componentOf (u : Vampire.Unit) :
-    ReconstructM (String × Array UInt32 × Array Literal) := do
+private def componentOf (u : Vampire.Unit) : ReconstructM Component := do
   let some clause := u.clause?
     | throwError "a general splitting component is not a clause"
   let mut name := none
   let mut arguments := #[]
   let mut rest := #[]
-  for l in clause.literals do
+  let mut restAt := #[]
+  for (l, i) in clause.literals.zipIdx do
     let some symbol := l.symbol?
       | throwError "a literal with an unknown predicate"
     if name.isNone && !(← isGoalSymbol symbol.name) && l.polarity then
-      name := some symbol.name
+      name := some (symbol.name, i)
       arguments ← l.args.mapM fun arg => do
         unless arg.isVar do
           throwError "the name `{symbol.name}` is applied to {arg}, not a variable"
         return arg.var
     else
       rest := rest.push l
-  let some introduced := name
+      restAt := restAt.push i
+  let some (introduced, nameAt) := name
     | throwError "a general splitting component introduces no name"
-  return (introduced, arguments, rest)
+  return { name := introduced, nameAt, arguments, rest, restAt }
 
 /-- The variables of `u` that are not among `arguments`, with their sorts. -/
 private def splitVars (u : Vampire.Unit) (arguments : Array UInt32) :
@@ -54,7 +68,7 @@ Binds the name a general splitting introduced: that the half it was split from
 fails at some value of the split variable.
 -/
 def register (u : Vampire.Unit) : ReconstructM PUnit := do
-  let (name, arguments, rest) ← componentOf u
+  let { name, arguments, rest, .. } ← componentOf u
   if ← resolvesSymbol name then return
   let sorts := u.varSorts
   let bound := arguments.filterMap fun v =>
@@ -74,7 +88,7 @@ what the name says.
 -/
 def component (step : Step) : ReconstructM Expr := do
   register step.unit
-  let (_, arguments, rest) ← componentOf step.unit
+  let { arguments, rest, restAt, nameAt, .. } ← componentOf step.unit
   let some clause := step.unit.clause?
     | throwError "a general splitting component is not a clause"
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
@@ -83,6 +97,7 @@ def component (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       vars := vars.insert v x
     let parts ← clause.literals.mapM (Reconstruct.literal vars)
+    let suffix := suffixJunctions ``Or ``False parts
     let halves ← rest.mapM (Reconstruct.literal vars)
     -- What the name says, at the variables it is applied to.
     let quantified ← withVars (splitVars step.unit arguments) vars fun inner split => do
@@ -96,26 +111,16 @@ def component (step : Step) : ReconstructM Expr := do
         | none => someElement (← sortType sortName)
       mkLambdaFVars #[h]
         (← elimGiven halves (fun j hj => do
-            let some part := halves[j]? | throwError "a missing literal"
-            let mut found := none
-            for (whole, i) in parts.zipIdx do
-              if ← isDefEq whole part then
-                found := some i
-                break
-            let some i := found | throwError "a literal of the half is not one \
-              of the clause's"
-            injectGiven parts i hj)
+            -- Where each literal of the half is in the clause was settled
+            -- when the clause was read.
+            let some i := restAt[j]? | throwError "a missing literal"
+            injectGiven parts i hj (suffix? := some suffix))
           (mkAppN h args))
     let failed ← withLocalDeclD `h (mkApp (mkConst ``Not) quantified) fun h => do
       -- Which is what the name stands for.
-      let mut found := none
-      for (part, i) in parts.zipIdx do
-        if ← isDefEq part (mkApp (mkConst ``Not) quantified) then
-          found := some i
-          break
-      let some i := found
-        | throwError "the clause does not hold the name the splitting introduced"
-      mkLambdaFVars #[h] (← injectGiven parts i h)
+      mkLambdaFVars #[h]
+        (← injectGiven parts nameAt (← mkExpectedTypeHint h (parts[nameAt]!))
+          (suffix? := some suffix))
     mkLambdaFVars xs
       (← mkAppM ``Or.elim
         #[← mkAppOptM ``Classical.em #[some quantified], held, failed])
@@ -138,7 +143,7 @@ def general (step : Step) : ReconstructM Expr := do
     | throwError "a general splitting is not given a clause"
   let some conclusion := step.unit.clause?
     | throwError "a general splitting is not a clause"
-  let (name, arguments, rest) ← componentOf component
+  let { name, arguments, rest, .. } ← componentOf component
   let split := splitVars component arguments
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
@@ -177,11 +182,13 @@ def general (step : Step) : ReconstructM Expr := do
       for (v, witness) in witnesses do
         halves := halves.insert v witness
       let refutedParts ← rest.mapM (Reconstruct.literal halves)
-      let mut negations : Array (Expr × Expr) := #[]
+      let refutedSuffix := suffixJunctions ``Or ``False refutedParts
+      let mut negations : Array Expr := #[]
       for (part, j) in refutedParts.zipIdx do
         let negation ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp against (← injectGiven refutedParts j l))
-        negations := negations.push (part, negation)
+          mkLambdaFVars #[l]
+            (mkApp against (← injectGiven refutedParts j l (suffix? := some refutedSuffix)))
+        negations := negations.push negation
       -- The clause at those witnesses says one of its literals holds, and the
       -- ones of that half do not.
       let mut args := #[]
@@ -190,18 +197,20 @@ def general (step : Step) : ReconstructM Expr := do
         | some x => args := args.push x
         | none => args := args.push (← someElement (← sortType sortName))
       let sourceParts ← source.literals.mapM (Reconstruct.literal halves)
-      mkLambdaFVars #[h] (← elimGiven sourceParts (fun _ hl => do
-        let says ← instantiateMVars (← inferType hl)
-        for (part, negation) in negations do
-          if ← isDefEq part says then
-            -- That literal fails at the witnesses, so this case cannot arise.
-            return ← mkAppOptM ``False.elim
-              #[some target, some (mkApp negation hl)]
-        for (part, j) in parts.zipIdx do
-          if ← isDefEq part says then
-            return ← injectGiven parts j hl
-        throwError "the literal{indentExpr says}\nis neither of the half the \
-          name stands against nor of the conclusion")
+      let suffix := suffixJunctions ``Or ``False parts
+      -- The two halves are built from the source clause's own literals, which
+      -- vampire shares, so where each went is found by which literal it is.
+      let conclusionLiterals := conclusion.literals
+      mkLambdaFVars #[h] (← elimGiven sourceParts (fun i hl => do
+        let some l := source.literals[i]? | throwError "a missing literal"
+        if let some j := rest.findIdx? (· == l) then
+          -- That literal fails at the witnesses, so this case cannot arise.
+          let some negation := negations[j]? | throwError "a missing literal"
+          return ← mkAppOptM ``False.elim #[some target, some (mkApp negation hl)]
+        if let some j := conclusionLiterals.findIdx? (· == l) then
+          return ← injectGiven parts j hl (suffix? := some suffix)
+        throwError "the literal{indentExpr (← instantiateMVars (← inferType hl))}\n\
+          is neither of the half the name stands against nor of the conclusion")
         (mkAppN clauseProof args))
     mkLambdaFVars xs
       (← mkAppM ``Or.elim

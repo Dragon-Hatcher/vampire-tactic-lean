@@ -400,6 +400,13 @@ structure SatClause where
 instance : BEq Formula where
   beq a b := a.idx == b.idx
 
+/--
+Two literals are the same when they are the same one: the worker writes each of
+vampire's literals once, and a clause built from another's literals shares them.
+-/
+instance : BEq Literal where
+  beq a b := a.idx == b.idx
+
 /-- Two terms are the same when they are the same one: they are shared. -/
 instance : BEq Term where
   beq a b := a.idx == b.idx

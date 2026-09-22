@@ -22,3 +22,9 @@ example {ι : Type} (f g : ι → ι) (p : ι → Prop) (h : ∀ x, g x = f x)
 example {ι : Type} (f : ι → ι) (a b c : ι) (h : ∀ x, f x = a) (h2 : b = f c)
     (h3 : ∀ x, x ≠ a ∨ x ≠ b) : False := by
   vampire [h, h2, h3]
+
+-- General splitting: a clause cut in two at a variable few literals share.
+example {ι : Type} (p s : ι → Prop) (r q : ι → ι → Prop) (a : ι)
+    (h : ∀ x y z, p x ∨ r x y ∨ q y z ∨ s z) (h1 : ∀ x, ¬ p x) (h2 : ∀ y z, ¬ q y z)
+    (h3 : ∀ x y, ¬ r x y) (h4 : ∀ z, ¬ s z) : False := by
+  vampire (options := #[("general_splitting", "on")]) [h, h1, h2, h3, h4]
