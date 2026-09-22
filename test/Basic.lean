@@ -62,3 +62,15 @@ example (p q : Prop)
     (h : (p ∨ False) ∧ (True → q) ∧ (False → p) ∧ (q ↔ True) ∧ (p ↔ False ∨ p))
     (h2 : ¬ q ∨ (¬ p ∧ True)) : False := by
   vampire [h, h2]
+
+-- The other clausifier, through negations stacked over quantifiers, junctions
+-- and equivalences.
+#guard_msgs (drop info) in
+example {ι : Type} (p q : ι → Prop) (r : Prop) (a : ι)
+    (h : ¬¬(∀ x, ¬¬p x ∨ ¬¬(q x ↔ ¬r))) (h2 : ¬ ∃ x, ¬¬ p x) (h3 : ¬¬ (∀ x, q x))
+    (h4 : ¬¬ r) : False := by
+  vampire (options := #[("newcnf", "on")]) [h, h2, h3, h4]
+
+#guard_msgs (drop info) in
+example (a b c : Prop) (h : ¬¬(a ↔ ¬(b ↔ ¬¬c))) (ha : a) (hb : b) (hc : c) : False := by
+  vampire (options := #[("newcnf", "on")]) [h, ha, hb, hc]

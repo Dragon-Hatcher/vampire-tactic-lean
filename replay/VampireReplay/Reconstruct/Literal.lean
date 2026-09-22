@@ -45,7 +45,7 @@ def doubleNegations (h : Expr) : ReconstructM (Array Expr) := do
   return out
 
 /-- `a` with its double negations stripped. -/
-private partial def stripped (a : Expr) : Expr :=
+partial def stripped (a : Expr) : Expr :=
   match a.not? with
   | some inner =>
     match inner.not? with
@@ -66,14 +66,13 @@ private partial def strippedOf (a : Expr) : ReconstructM (Expr × Expr) := do
 `a ↔ b`, when the two differ only by double negations.
 
 Clausification records what it put in a clause before its own normalisation
-has unwrapped a negation into the sign it carries, so the two can meet with a
-double negation between them.
+has unwrapped a negation into the sign it carries -- a negative literal under a
+negative sign, which the clause states as the positive one -- so the two can
+meet with a double negation between them. Which double negations is a matter
+of their shape, so the two are compared stripped of them, as they stand.
 -/
 def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
-  -- Asked of every literal of a clause against every literal of the clause it
-  -- was reached from, so what says the two are the same is built only once one
-  -- knows they are.
-  unless ← isDefEq (stripped a) (stripped b) do return none
+  unless stripped a == stripped b do return none
   let (_, saysA) ← strippedOf a
   let (_, saysB) ← strippedOf b
   return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])

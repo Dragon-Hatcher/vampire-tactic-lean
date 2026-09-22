@@ -223,6 +223,9 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
       let suffix := suffixJunctions ``Or ``False parts
+      -- The clause's parts with their double negations stripped, to find a
+      -- part by what it says without comparing it with each of them.
+      let strippedParts := parts.map stripped
       let refuted (e : Expr) : ReconstructM Expr := do
         -- The clause usually says just what the step put in it, so that is
         -- looked for first: a clause of a few hundred literals is refuted a
@@ -231,12 +234,14 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
           return ← withLocalDeclD `p e fun p => do
             mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
         -- What a step put in a clause is recorded before the clausifier's own
-        -- normalisation has unwrapped a negation into the sign it carries.
-        for (part, i) in parts.zipIdx do
-          let some says ← sameUpToDoubleNegation part e | continue
-          let refutation ← withLocalDeclD `p part fun p => do
-            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
-          return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], refutation]
+        -- normalisation has unwrapped a negation into the sign it carries, so
+        -- the part is looked up by what the two say with that undone.
+        if let some i := strippedParts.findIdx? (· == stripped e) then
+          let part := parts[i]!
+          if let some says ← sameUpToDoubleNegation part e then
+            let refutation ← withLocalDeclD `p part fun p => do
+              mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
+            return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], refutation]
         throwError "the clause does not say{indentExpr e}\nwhich a step it was \
           reached from does"
       let body ←
