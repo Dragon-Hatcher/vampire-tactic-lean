@@ -527,16 +527,69 @@ def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
 /--
 `equality_proxy_axiom`: an axiom about the proxy, which is equality.
 
-The proxy is bound to equality itself, so what the axiom states of it -- that
-it is reflexive, say -- is what equality states of itself, and holds of itself.
-The conclusion applies that binding rather than having it reduced, so it is
+The proxy is bound to equality itself, so what the axiom states of it holds of
+equality. `EqualityProxy` states reflexivity, and under `ep=RS`, `RST` and
+`RSTC` symmetry, transitivity and congruence too: a clause denying equalities
+between variables and asserting one more literal. Suppose the clause fails;
+then each equality it denies holds, and substituting them away leaves the
+literal it asserts failing of terms that are now the same -- `¬(t = t)`, or a
+predicate both holding and failing.
+
+The conclusion applies the binding rather than having it reduced, so it is
 reduced here for the shape to be read, and the proof restated at the shape the
 step states: the two are one term to the kernel.
 -/
 def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
   let conclusion ← step.conclusion
   let reduced ← Meta.transform conclusion (post := fun e => return .done e.headBeta)
-  mkExpectedTypeHint (← byDefinition reduced) conclusion
+  let proof ← forallTelescopeReducing reduced fun xs body => do
+    let parts := junctionParts ``Or body
+    let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) body) fun h => do
+      -- What says each literal fails, the whole clause having failed.
+      let failing ← parts.mapIdxM fun i part => do
+        withLocalDeclD `l part fun l => do
+          mkLambdaFVars #[l] (mkApp h (← injectPart ``Or body i l))
+      -- A goal of `False` over the equalities denied, and the failing of
+      -- everything else; the equalities are substituted away and what is left
+      -- contradicts itself.
+      let mut hypotheses := #[]
+      let mut values := #[]
+      for (part, fails) in parts.zip failing do
+        match part.not? with
+        | some equality =>
+          if equality.isAppOfArity ``Eq 3 then
+            hypotheses := hypotheses.push equality
+            values := values.push (ofNotNot equality fails)
+            continue
+          hypotheses := hypotheses.push (mkApp (mkConst ``Not) part)
+          values := values.push fails
+        | none =>
+          hypotheses := hypotheses.push (mkApp (mkConst ``Not) part)
+          values := values.push fails
+      let goalType ← hypotheses.foldrM (init := mkConst ``False) fun τ acc =>
+        mkArrow τ acc
+      let goal ← mkFreshExprMVar goalType
+      let (_, mvarId) ← goal.mvarId!.introN hypotheses.size
+      let mvarId ← substVars mvarId
+      mvarId.withContext do
+        let facts ← (← getLCtx).getFVarIds.filterMapM fun id => do
+          let decl ← id.getDecl
+          if decl.isImplementationDetail then return none
+          return some (decl.toExpr, ← instantiateMVars decl.type)
+        let closing ← facts.findSomeM? fun (fact, stated) => do
+          let some denied := stated.not? | return none
+          if let some (_, a, b) := denied.eq? then
+            if a == b then return some (mkApp fact (← mkEqRefl a))
+          for (other, says) in facts do
+            if says == denied then return some (mkApp fact other)
+          return none
+        let some closing := closing
+          | throwError "an equality proxy axiom is not closed by substituting \
+              the equalities it denies:{indentExpr body}"
+        mvarId.assign closing
+      mkLambdaFVars #[h] (mkAppN (← instantiateMVars goal) values)
+    mkLambdaFVars xs (ofNotNot body refuted)
+  mkExpectedTypeHint proof conclusion
 
 /-- Any of the definition rules. -/
 def definitionStep (step : Step) : ReconstructM Expr := do
