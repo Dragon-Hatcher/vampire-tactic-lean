@@ -300,7 +300,16 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
   -- written at one type and used at another, and what it names is the number,
   -- so the integer division in `((16 : ℤ) / 5 : ℝ)` is integer division.
   | Int.cast _ _ a => return some (.app (castInto sort) #[← translateTerm a])
-  | Nat.cast _ _ a => return some (.app (castInto sort) #[← translateTerm a])
+  -- TPTP has no natural numbers, so what is cast from one has no sort to be
+  -- cast from: a natural number variable becomes an individual of a sort of
+  -- its own, which `$to_int` and the rest do not take. A numeral is the one
+  -- natural number that can be written, as the number it is at this sort.
+  | Nat.cast _ _ a =>
+    match numeral? a with
+    | some n => return some (.app (renderNumeral sort n) #[])
+    | none =>
+      throwError "cannot translate {e} to TPTP: it casts{indentExpr a}\nfrom ℕ, \
+        which TPTP has no sort for; only a numeral can be cast from ℕ"
   | _ => return none
 
 /-- Translates a Lean expression of non-`Prop` type into a TPTP term. -/
