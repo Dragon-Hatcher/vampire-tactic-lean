@@ -217,6 +217,96 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let expected := proofText + pad proofTextLen
   if data.size < expected then
     Error.fail (s!"proof is {data.size} bytes, expected at least {expected}")
+  -- Every index is checked against the section it points into, once, here:
+  -- the accessors read with `!`, and an index past the end of its section
+  -- would read another section's words, or zeros past the buffer's end,
+  -- and replay would go on with them.
+  let at_ (base width i off : Nat) : Nat := (readU32 data (base + (width * i + off) * 4)).toNat
+  let none := none32.toNat
+  let index (what : String) (i bound : Nat) : Except Error Unit :=
+    if i < bound then pure () else Error.fail s!"proof has {what} {i}, of {bound}"
+  let optional (what : String) (i bound : Nat) : Except Error Unit :=
+    if i == none then pure () else index what i bound
+  let range (what : String) (first count bound : Nat) : Except Error Unit :=
+    if count == 0 || first + count ≤ bound then pure ()
+    else Error.fail s!"proof has {what} {first} to {first + count}, of {bound}"
+  for i in [0:numFunctions] do index "function name" (at_ functions 2 i 0) stringsLen
+  for i in [0:numPredicates] do index "predicate name" (at_ predicates 3 i 0) stringsLen
+  for i in [0:numSorts] do index "sort name" (at_ sorts 1 i 0) stringsLen
+  for i in [0:numTerms] do
+    if at_ terms 4 i 0 != 0 then
+      index "functor" (at_ terms 4 i 1) numFunctions
+      range "term arguments" (at_ terms 4 i 2) (at_ terms 4 i 3) numArgs
+  for i in [0:numArgs] do index "argument" (at_ args 1 i 0) numTerms
+  for i in [0:numLiterals] do
+    index "predicate" (at_ literals 5 i 0) numPredicates
+    range "literal arguments" (at_ literals 5 i 2) (at_ literals 5 i 3) numArgs
+    optional "equality sort" (at_ literals 5 i 4) numSorts
+  for i in [0:numFormulas] do
+    optional "atom" (at_ formulas 7 i 1) numLiterals
+    range "subformulas" (at_ formulas 7 i 2) (at_ formulas 7 i 3) numSubs
+    range "bound variables" (at_ formulas 7 i 4) (at_ formulas 7 i 5) numVars
+    optional "formula name" (at_ formulas 7 i 6) stringsLen
+  for i in [0:numSubs] do index "subformula" (at_ subs 1 i 0) numFormulas
+  for i in [0:numUnits] do
+    let u (off : Nat) := at_ units 28 i off
+    if u 3 &&& 1 != 0 then range "clause literals" (u 4) (u 5) numUnitLits
+    else index "unit formula" (u 4) numFormulas
+    range "premises" (u 6) (u 7) numParents
+    range "variable sorts" (u 8) (u 9 + u 25) numVarSorts
+    range "skolems" (u 10) (u 11) numSkolems
+    optional "input name" (u 12) stringsLen
+    range "premise uses" (u 13) (u 14) numUses
+    range "splits" (u 15) (u 16) numSplits
+    optional "SAT premise" (u 17) numSatClauses
+    range "namings" (u 18) (u 19) numNamings
+    optional "generalised clause" (u 20) numGenStates
+    range "conjunct choices" (u 21) (u 22) numChoices
+    range "congruence steps" (u 23) (u 24) numCongruences
+    range "constraints" (u 26) (u 27) (u 5)
+  for i in [0:numUnitLits] do index "clause literal" (at_ unitLits 1 i 0) numLiterals
+  for i in [0:numParents] do index "premise" (at_ parents 1 i 0) numUnits
+  for i in [0:numVarSorts] do index "variable sort" (at_ varSorts 2 i 1) numSorts
+  for i in [0:numSkolems] do index "skolem term" (at_ skolems 2 i 1) numTerms
+  for i in [0:numSplits] do index "split name" (at_ splits 1 i 0) stringsLen
+  for i in [0:numSatClauses] do
+    range "SAT literals" (at_ satClauses 5 i 0) (at_ satClauses 5 i 1) numSatLits
+    range "SAT premises" (at_ satClauses 5 i 2) (at_ satClauses 5 i 3) numSatPremises
+    optional "SAT origin" (at_ satClauses 5 i 4) numUnits
+  for i in [0:numSatLits] do index "SAT literal" (at_ satLits 1 i 0) stringsLen
+  for i in [0:numSatPremises] do index "SAT premise" (at_ satPremises 1 i 0) numSatClauses
+  for i in [0:numNamings] do
+    index "naming" (at_ namings 4 i 0) stringsLen
+    range "naming arguments" (at_ namings 4 i 1) (at_ namings 4 i 2) numNamingArgs
+    index "named formula" (at_ namings 4 i 3) numFormulas
+  for i in [0:numGenStates] do
+    optional "generalised clause parent" (at_ genStates 8 i 0) numGenStates
+    range "generalised literals" (at_ genStates 8 i 2) (at_ genStates 8 i 3) numGenLits
+    range "replacement" (at_ genStates 8 i 4) (at_ genStates 8 i 5) numGenLits
+    range "generalised bindings" (at_ genStates 8 i 6) (at_ genStates 8 i 7) numBindings
+  for i in [0:numGenLits] do index "generalised literal" (at_ genLits 2 i 0) numFormulas
+  for i in [0:numChoices] do index "conjunction" (at_ choices 2 i 0) numFormulas
+  for i in [0:numUses] do
+    optional "used term" (at_ uses 6 i 2) numTerms
+    range "use bindings" (at_ uses 6 i 4) (at_ uses 6 i 5) numBindings
+  for i in [0:numBindings] do index "binding" (at_ bindings 2 i 1) numTerms
+  for i in [0:numCongruences] do
+    match at_ congruences 5 i 0 with
+    | 1 =>
+      index "congruence term" (at_ congruences 5 i 1) numTerms
+      index "congruence term" (at_ congruences 5 i 2) numTerms
+    -- A step stands on the ones recorded before it.
+    | 2 =>
+      index "congruence step" (at_ congruences 5 i 1) numCongruences
+      index "congruence step" (at_ congruences 5 i 2) numCongruences
+    | 3 => index "congruence step" (at_ congruences 5 i 1) numCongruences
+    | _ => pure ()
+    range "congruence arguments" (at_ congruences 5 i 3) (at_ congruences 5 i 4)
+      numCongruenceArgs
+  for i in [0:numCongruenceArgs] do
+    optional "congruence argument" (at_ congruenceArgs 1 i 0) numCongruences
+  if readU32 data 12 != 0 then index "refutation" (word 4) numUnits
+  optional "strategy" (word 36) stringsLen
   let reason ← ofIndex
     #[.refutation, .satisfiable, .refutationNotFound, .inappropriate, .unknown,
       .timeLimit, .instructionLimit, .memoryLimit, .activationLimit]
