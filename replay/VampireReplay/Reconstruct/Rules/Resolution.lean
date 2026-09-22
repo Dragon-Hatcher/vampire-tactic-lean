@@ -29,11 +29,7 @@ def resolution (step : Step) : ReconstructM Expr := do
   let some resolved₂ := use₂.literal
     | throwError "resolution did not record the literal it resolved on in step \
       {parent₂.number}"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Resolving away the last literal a variable occurs in leaves it out of
     -- the conclusion, while the unifier still speaks of it; such a variable
     -- stands for an arbitrary element, the same one wherever it is met.
@@ -48,7 +44,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
       (fun _ h₁ rest => carryPast t₂ rest p₂ (· == resolved₂.toNat)
         (fun _ h₂ inner => closeComplementary inner h₁ h₂))
-    mkLambdaFVars xs body
+    pure body
 
 /--
 `unit_resulting_resolution`: a clause every literal of which but one is
@@ -65,11 +61,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
   let some main := step.unit.parents[0]?
     | throwError "unit resulting resolution without a clause"
   let mainUse ← step.useAt 0
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Every literal but one is resolved away, and with it any variable it was
     -- the last to mention.
     let mut vars ← coverVars main kept step.unit.boundVarSorts
@@ -94,7 +86,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
           | throwError "no unit resolved literal {i} away"
         carryPast unitType rest unitAt (fun _ => true)
           (fun _ hu inner => closeComplementary inner h hu))
-    mkLambdaFVars xs body
+    pure body
 
 /--
 `factoring`: the premise at the unifier that makes two of its literals one.
@@ -109,15 +101,11 @@ def factoring (step : Step) : ReconstructM Expr := do
   let some parent := step.unit.parents[0]?
     | throwError "factoring without a premise"
   let use ← step.useAt 0
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    mkLambdaFVars xs (← carryAll premiseType target premiseAt)
+    carryAll premiseType target premiseAt
 
 /--
 `rest`, where an abstracting unifier left constraints among the conclusion's
@@ -170,11 +158,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
   let some resolved := use.literal
     | throwError "equality resolution with deletion did not record the \
       inequality it resolved"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
@@ -194,7 +178,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
             #[some inner, some rest, some (← mkEqRefl lhs), some h]
         else
           fromConstraints step vars rest inner h)
-    mkLambdaFVars xs body
+    pure body
 
 /--
 `equality_factoring`: one of the premise's equalities factored against another.
@@ -224,11 +208,7 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
   let some sideIdx := side.literal
     | throwError "equality factoring did not record the equality it factored \
       against"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent selected vars premiseProof premiseStated
@@ -260,6 +240,6 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
             let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
             mkLambdaFVars #[he] (← placeLiteral rest (← mkExpectedTypeHint chain stated))
         mkAppM ``Classical.byCases #[agree, differ])
-    mkLambdaFVars xs body
+    pure body
 
 end Vampire.Reconstruct.Resolution

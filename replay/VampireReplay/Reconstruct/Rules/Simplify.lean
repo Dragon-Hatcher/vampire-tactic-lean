@@ -232,8 +232,7 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
       return (if isIff then equivalence else negate equivalence, congruence)
   | .«forall» | .«exists» =>
     let isForall := (← connectiveOf f) matches .«forall»
-    let bound := f.boundVars.filterMap fun v =>
-      (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    let bound := boundSorts sorts f.boundVars
     quantified sorts (← sub 0) isForall bound.toList vars
   | c => throwError "cannot absorb the truth values of a formula with \
     connective {repr c}"

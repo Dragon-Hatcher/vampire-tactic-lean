@@ -71,8 +71,7 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
   let { name, arguments, rest, .. } ← componentOf u
   if ← resolvesSymbol name then return
   let sorts := u.varSorts
-  let bound := arguments.filterMap fun v =>
-    (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+  let bound := boundSorts sorts arguments
   let definition ← withVars bound {} fun vars locals => do
     let inner ← withVars (splitVars u arguments) vars fun vars split => do
       mkForallFVars split (junction ``Or ``False (← rest.mapM (Reconstruct.literal vars)))
@@ -191,11 +190,7 @@ def general (step : Step) : ReconstructM Expr := do
         negations := negations.push negation
       -- The clause at those witnesses says one of its literals holds, and the
       -- ones of that half do not.
-      let mut args := #[]
-      for (v, sortName) in parent.varSorts do
-        match halves[v]? with
-        | some x => args := args.push x
-        | none => args := args.push (← someElement (← sortType sortName))
+      let args ← argsFor parent halves
       let sourceParts ← source.literals.mapM (Reconstruct.literal halves)
       let suffix := suffixJunctions ``Or ``False parts
       -- The two halves are built from the source clause's own literals, which

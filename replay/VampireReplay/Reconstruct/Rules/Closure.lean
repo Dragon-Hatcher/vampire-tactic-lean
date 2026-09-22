@@ -32,11 +32,7 @@ def conflict (step : Step) : ReconstructM Expr := do
   if recorded.isEmpty then
     throwError "nothing is recorded of why the literals of step \
       {step.unit.number} cannot all be false"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+  step.underVars fun vars target => do
     let literals := clause.literals
     let parts ← literals.mapM (literal vars)
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
@@ -114,6 +110,6 @@ def conflict (step : Step) : ReconstructM Expr := do
       let some contradiction := closed
         | throwError "what is recorded of step {step.unit.number} settles nothing"
       mkLambdaFVars #[h] contradiction
-    mkLambdaFVars xs (ofNotNot target refuted)
+    pure (ofNotNot target refuted)
 
 end Vampire.Reconstruct.Closure

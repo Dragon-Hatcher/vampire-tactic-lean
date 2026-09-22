@@ -514,4 +514,14 @@ def equiv (a b : Expr) : ReconstructM Expr := do
   mkAppM ``Iff.trans
     #[qa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[qb]]]
 
+/--
+A proof of `conclusion` from `proof : stated`, where the two are one formula
+written two ways: the proof itself where they are the same, and otherwise the
+equivalence `equiv` finds between them.
+-/
+def restate (proof stated conclusion : Expr) : ReconstructM Expr := do
+  if ← isDefEq (← instantiateMVars stated) conclusion then
+    return proof
+  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+
 end Vampire.Reconstruct

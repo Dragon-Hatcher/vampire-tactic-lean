@@ -39,11 +39,7 @@ private def premisesOf (step : Step) (vars : Vars) :
       -- have is one the step evaluated or dropped the literal of, and the
       -- premise is a fact of every element of its sort, so which element is
       -- taken for it cannot matter.
-      let mut args := #[]
-      for (v, sortName) in parent.varSorts do
-        match vars[v]? with
-        | some x => args := args.push x
-        | none => args := args.push (← someElement (← sortType sortName))
+      let args ← argsFor parent vars
       out := out.push (mkAppN proof args,
         ← sharedClause (← instantiateForall stated args))
   return out
@@ -135,15 +131,8 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
   if step.unit.clause?.isNone then
     let #[(proof, stated)] := step.premises
       | throwError "a formula normalised from {step.premises.size} premises"
-    let conclusion ← step.conclusion
-    if ← isDefEq stated conclusion then
-      return proof
-    return ← mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+    return ← restate proof stated (← step.conclusion)
+  step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let targetParts := junctionParts ``Or target
     let suffix := suffixJunctions ``Or ``False targetParts
@@ -163,7 +152,7 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
             return ← injectGiven targetParts j h (suffix? := some suffix)
           go (facts.push (← plainly h)) (i + 1)) proof
     let statements := #[target] ++ premises.map (·.2)
-    mkLambdaFVars xs (← withRoundings statements fun roundings => go roundings 0)
+    withRoundings statements fun roundings => go roundings 0
 
 /-- `a * b`, whichever numbers those are. -/
 private def asProduct (e : Expr) : Option (Expr × Expr) :=

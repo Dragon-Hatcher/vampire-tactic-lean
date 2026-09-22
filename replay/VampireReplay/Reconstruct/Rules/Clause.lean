@@ -23,11 +23,7 @@ domains are never empty.
 -/
 def instantiateAt (parent : Vampire.Unit) (vars : Vars) (proof stated : Expr) :
     ReconstructM (Expr × Expr) := do
-  let mut args := #[]
-  for (v, sortName) in parent.varSorts do
-    match vars[v]? with
-    | some x => args := args.push x
-    | none => args := args.push (← someElement (← sortType sortName))
+  let args ← argsFor parent vars
   return (mkAppN proof args, ← instantiateForall stated args)
 
 /-- A step whose conclusion restates its premise's literals. -/
@@ -53,17 +49,13 @@ def condensation (step : Step) : ReconstructM Expr := do
   let some parent := step.unit.parents[0]?
     | throwError "condensation without a premise"
   let use ← step.useAt 0
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       Reconstruct.instantiateAt parent use vars premiseProof premiseStated
     -- Every literal of the instance is one of the conclusion's, the two that
     -- were unified having become one of them; `implies` looks each up.
-    mkLambdaFVars xs (mkApp (← implies premiseType target) premiseAt)
+    pure (mkApp (← implies premiseType target) premiseAt)
 
 /--
 `polarity_flipping`: nothing, once the predicates it flipped are read as

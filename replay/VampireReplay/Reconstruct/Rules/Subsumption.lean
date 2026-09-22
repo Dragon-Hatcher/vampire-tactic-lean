@@ -42,11 +42,7 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
   unless sideUse.literal.isNone do
     throwError "subsumption resolution recorded a literal against the side \
       premise, so which premise is which is not clear"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- The removed literal can be the only one mentioning a variable, which the
     -- conclusion then does not keep; σ may still mention it.
     let vars ← coverVars mainParent kept step.unit.boundVarSorts
@@ -76,6 +72,6 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
                 #[some (← inferType positive), some inner, some positive,
                   some negative]
             placeLiteral inner hSide))
-    mkLambdaFVars xs body
+    pure body
 
 end Vampire.Reconstruct.Subsumption

@@ -420,11 +420,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
           mkLambdaFVars #[l] (mkApp against (← injectPart ``Or disjunction j l))
         negations := negations.push (part, negation)
     -- The clause at all of those witnesses at once has every literal refuted.
-    let mut arguments' := #[]
-    for (v, sortName) in parent.varSorts do
-      match arguments[v]? with
-      | some witness => arguments' := arguments'.push witness
-      | none => arguments' := arguments'.push (← someElement (← sortType sortName))
+    let arguments' ← argsFor parent arguments
     let instance_ := mkAppN proof arguments'
     let instantiated ← instantiateForall stated arguments'
     let contradiction ← elimParts instantiated 0 (fun _ hl => do

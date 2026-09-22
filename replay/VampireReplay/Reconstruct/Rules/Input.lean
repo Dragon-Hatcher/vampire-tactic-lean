@@ -24,10 +24,6 @@ def input (step : Step) : ReconstructM Expr := do
     | throwError "an input step should carry the name of the formula it states"
   let some hypothesis := (← read).symbols.hypotheses[name]?
     | throwError "no hypothesis was given the name `{name}`"
-  let conclusion ← step.conclusion
-  let stated ← inferType hypothesis
-  if ← isDefEq stated conclusion then
-    return hypothesis
-  mkAppM ``Iff.mp #[← equiv stated conclusion, hypothesis]
+  restate hypothesis (← inferType hypothesis) (← step.conclusion)
 
 end Vampire.Reconstruct.Input

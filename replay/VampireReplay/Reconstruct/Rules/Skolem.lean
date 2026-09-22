@@ -82,7 +82,7 @@ partial def walk (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt3
     return (c, ← literalIff p c)
 where
   boundVars (f : Formula) : Array (UInt32 × String) :=
-    f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    boundSorts sorts f.boundVars
 
   /-- An n-ary junction, congruent argument by argument. -/
   congrJunction (fn unit lemma : Name) : ReconstructM (Expr × Expr) := do

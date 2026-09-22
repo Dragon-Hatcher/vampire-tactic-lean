@@ -36,7 +36,7 @@ private def genParts (sorts : Array (UInt32 × String)) (vars : Vars)
 /-- The variables a quantifier binds, with their sorts. -/
 private def boundOf (sorts : Array (UInt32 × String)) (f : Formula) :
     Array (UInt32 × String) :=
-  f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+  boundSorts sorts f.boundVars
 
 /--
 Whether a quantifier is skolemised where it occurs: it is at the polarity that

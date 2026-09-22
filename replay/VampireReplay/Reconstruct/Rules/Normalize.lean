@@ -207,8 +207,7 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
   | .«forall» | .«exists» =>
     let isForall := (← connectiveOf f) matches .«forall»
     let body ← sub 0
-    let bound := f.boundVars.filterMap fun v =>
-      (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    let bound := boundSorts sorts f.boundVars
     quantified expand sorts body polarity isForall bound.toList vars
 
   | c => throwError "cannot normalise a formula with connective {repr c}"
@@ -273,11 +272,7 @@ private def normalizeStep (expand : Bool) (step : Step) : ReconstructM Expr := d
   -- Normalising here settles what the formula becomes, but not the order
   -- vampire keeps a junction's arguments in, which is its own; so what the
   -- step claims is what this is stated as.
-  let conclusion ← step.conclusion
-  let stated ← inferType normalised
-  if ← isDefEq stated conclusion then
-    return normalised
-  mkAppM ``Iff.mp #[← equiv stated conclusion, normalised]
+  restate normalised (← inferType normalised) (← step.conclusion)
 
 /-- `ennf`: negations pushed inward, with equivalences left standing. -/
 def ennf (step : Step) : ReconstructM Expr := normalizeStep false step

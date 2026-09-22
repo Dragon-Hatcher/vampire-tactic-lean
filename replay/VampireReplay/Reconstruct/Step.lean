@@ -86,6 +86,17 @@ def coverVars (parent : Vampire.Unit) (vars : Vars)
       vars := vars.insert v (← someElement (← sortType sortName))
   return vars
 
+/--
+What a premise is instantiated at: for each of its variables, what `vars` has
+for it, and otherwise something of its sort -- a variable the conclusion did
+not keep stands for nothing in particular.
+-/
+def argsFor (parent : Vampire.Unit) (vars : Vars) : ReconstructM (Array Expr) :=
+  parent.varSorts.mapM fun (v, sortName) => do
+    match vars[v]? with
+    | some x => pure x
+    | none => someElement (← sortType sortName)
+
 /-- A step of vampire's proof, with everything needed to justify it. -/
 structure Step where
   unit : Vampire.Unit
@@ -114,6 +125,20 @@ def coreOf (u : Vampire.Unit) : ReconstructM Expr := do
 
 /-- The step's conclusion, as a Lean proposition. -/
 def Step.conclusion (step : Step) : ReconstructM Expr := coreOf step.unit
+
+/--
+`k` under the step's own variables: the locals its conclusion binds, what each
+of vampire's variables stands for, and what the conclusion says of them. What
+`k` proves is abstracted over those locals again.
+-/
+def Step.underVars (step : Step) (k : Vars → Expr → ReconstructM Expr) :
+    ReconstructM Expr := do
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut vars : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      vars := vars.insert v x
+    mkLambdaFVars xs (← k vars target)
 
 /--
 How a step used the premise in position `i` among its parents.
@@ -177,18 +202,10 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
   let some conclusion := step.unit.clause?
     | return mkApp (← implies (← instantiateMVars premiseStated)
         (← step.conclusion)) premiseProof
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Dropping a literal can drop the last occurrence of a variable with it.
     let vars ← coverVars parent kept step.unit.boundVarSorts
-    let mut args := #[]
-    for (v, sortName) in parent.varSorts do
-      match vars[v]? with
-      | some x => args := args.push x
-      | none => args := args.push (← someElement (← sortType sortName))
+    let args ← argsFor parent vars
     -- The premise's literals are read as the premise means them: polarity
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
@@ -238,7 +255,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       fun _ h rest => accountedFor h rest
     if let some carried ←
         carrying (junction ``Or ``False sourceParts) target 0 inStep whole then
-      return ← mkLambdaFVars xs (mkApp carried (mkAppN premiseProof args))
+      return mkApp carried (mkAppN premiseProof args)
     let body ← elimGiven sourceParts (fun _ h => do
       match ← accountedFor h target with
       | some placed => return placed
@@ -246,7 +263,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
         throwError "the literal{indentExpr (← stating h)}\nis neither among\
           {indentExpr target}\nnor refutable on its own")
       (mkAppN premiseProof args)
-    mkLambdaFVars xs body
+    pure body
 
 /--
 A rule that cannot reach a proof the tactic asked for, and says why.

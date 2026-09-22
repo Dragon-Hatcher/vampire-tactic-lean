@@ -203,11 +203,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
     | throwError "demodulation should have two premises"
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Rewriting can be what removes a variable from the clause.
     let vars ← coverVars mainParent kept step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
@@ -224,7 +220,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
     -- What the premise says once rewritten, which is what the conclusion says
     -- up to the order its literals come in.
     let says ← clauseRewritten rw vars mainType to
-    mkLambdaFVars xs (← carryAll says target rewritten)
+    carryAll says target rewritten
 
 /--
 `superposition`: the clause being rewritten and the equation rewriting it, both
@@ -239,11 +235,7 @@ def superposition (step : Step) : ReconstructM Expr := do
   let sideUse ← step.useAt 1
   let some equationLiteral := sideUse.literal
     | throwError "superposition did not record which literal is the equation"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars sideParent (← coverVars mainParent kept)
       step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
@@ -276,7 +268,7 @@ def superposition (step : Step) : ReconstructM Expr := do
                     every pair the unifier deferred equal"
               let bridged ← mkEqTrans same heq
               placeLiteral inner (← rewriteWith rw vars bridged to i h)))
-    mkLambdaFVars xs body
+    pure body
 
 /--
 `inner_rewriting`: a clause with one of its own disequalities `l ≠ r` used to
@@ -300,17 +292,10 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
   let i := rewriting.toNat
   let leftRewritten ← recordedSideIsLeft parent use i
   let count := clause.literals.size
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Rewriting substitutes nothing, but it can rewrite a variable away.
     let vars ← coverVars parent kept step.unit.boundVarSorts
-    let args ← parent.varSorts.mapM fun (v, sortName) => do
-      match vars[v]? with
-      | some x => pure x
-      | none => someElement (← sortType sortName)
+    let args ← argsFor parent vars
     let premiseAt := mkAppN premiseProof args
     let parts ← clausePartsOf (← instantiateForall premiseStated args) count
 
@@ -336,6 +321,6 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
       let fails ← withLocalDeclD `h (mkApp (mkConst ``Not) equation) fun hne => do
         mkLambdaFVars #[hne] (← placeLiteral target hne)
       mkAppM ``Classical.byCases #[holds, fails]) premiseAt
-    mkLambdaFVars xs body
+    pure body
 
 end Vampire.Reconstruct.Rewrite

@@ -246,11 +246,7 @@ private partial def unfold
   | none => return (applied, congruence)
   | some (definition, parameters, body, proof, flipped) =>
     let bound := Std.HashMap.ofList (parameters.zip args).toList
-    let mut instances := #[]
-    for (v, sortName) in definition.varSorts do
-      match bound[v]? with
-      | some e => instances := instances.push e
-      | none => instances := instances.push (← someElement (← sortType sortName))
+    let instances ← argsFor definition bound
     let equation ← do
       let instantiated := mkAppN proof instances
       -- The symbol a definition defines can be either side of it.
@@ -285,21 +281,11 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
   let some clause := parent.clause?
     | throwError "definition_unfolding should be given a clause"
   let defs ← definitions step
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
-    let body ← carryWith (← instantiateForall (← conclusionOf parent)
-        (← parent.varSorts.mapM fun (v, sortName) => do
-          match vars[v]? with
-          | some x => pure x
-          | none => someElement (← sortType sortName))) target
-      (mkAppN clauseProof (← parent.varSorts.mapM fun (v, sortName) => do
-        match vars[v]? with
-        | some x => pure x
-        | none => someElement (← sortType sortName)))
+    let args ← argsFor parent vars
+    let body ← carryWith (← instantiateForall (← conclusionOf parent) args) target
+      (mkAppN clauseProof args)
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
@@ -328,7 +314,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
           if ← literalPolarity l then pure congruence
           else mkCongrArg (mkConst ``Not) congruence
         mkAppM ``Eq.mp #[atom, h])
-    mkLambdaFVars xs body
+    pure body
 
 /--
 A proof of what is kept of a definition, from the definition.
@@ -468,17 +454,13 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
     | throwError "inequality splitting without a clause to split"
   let some (proof, stated) := step.premises[i]?
     | throwError "inequality splitting without a proof of the clause it split"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut kept : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      kept := kept.insert v x
+  step.underVars fun kept target => do
     -- Splitting substitutes nothing, so the conclusion keeps the premise's
     -- variables; it records no unifier because there is none to record.
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       Clause.instantiateAt parent vars proof stated
-    mkLambdaFVars xs (← carryAll premiseType target premiseAt)
+    carryAll premiseType target premiseAt
 
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool

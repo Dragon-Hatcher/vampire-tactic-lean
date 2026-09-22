@@ -363,6 +363,18 @@ partial def sharedClause (e : Expr) : ReconstructM Expr := do
 def clause (vars : Vars) (c : Clause) : ReconstructM Expr := do
   sharedClause (junction ``Or ``False (← c.literals.mapM (literal vars)))
 
+/--
+The variables a quantifier binds, each with the sort the step recorded for it.
+
+One with no recorded sort is left out, which is not a loss: vampire records the
+sorts of the variables that occur, so such a quantifier binds nothing its body
+mentions, and dropping it is what rectification does anyway. A variable that
+does occur is reported when the body reaches it.
+-/
+def boundSorts (sorts : Array (UInt32 × String)) (vars : Array UInt32) :
+    Array (UInt32 × String) :=
+  vars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+
 /-- Introduces a local for each variable in `sorts`, in order. -/
 def withVars (sorts : Array (UInt32 × String)) (vars : Vars)
     (k : Vars → Array Expr → ReconstructM α) : ReconstructM α := do
@@ -405,8 +417,7 @@ private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Var
   -- different sorts for the same variable.
   let quantified (bind : Array Expr → Expr → ReconstructM Expr) :
       ReconstructM (Expr × Bool) := do
-    let bound := f.boundVars.filterMap fun v =>
-      (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    let bound := boundSorts sorts f.boundVars
     let built ← withVars bound vars fun vars locals => do
       let (body, _) ← formulaGround sorts vars (← do
         let some g := f.subformulas[0]? | throwError "quantifier without a body"

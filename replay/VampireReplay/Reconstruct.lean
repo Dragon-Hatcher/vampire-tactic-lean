@@ -166,8 +166,7 @@ private partial def bindIntroduced : ReconstructM PUnit := do
     for (name, arguments, named) in u.namings do
       unless ← resolvesSymbol name do
         let sorts := u.varSorts
-        let bound := arguments.filterMap fun v =>
-          (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+        let bound := boundSorts sorts arguments
         unless bound.size == arguments.size do
           throwError "step {u.number} named a formula over variables it does \
             not record the sorts of"

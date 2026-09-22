@@ -17,10 +17,7 @@ open Lean Meta
 def restated (step : Step) : ReconstructM Expr := do
   let #[(proof, stated)] := step.premises
     | throwError "expected one premise, got {step.premises.size}"
-  let conclusion ← step.conclusion
-  if ← isDefEq (← instantiateMVars stated) conclusion then
-    return proof
-  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+  restate proof stated (← step.conclusion)
 
 /--
 A step that restates its first premise, the others being definitions it

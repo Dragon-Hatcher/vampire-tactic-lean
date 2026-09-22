@@ -145,7 +145,7 @@ partial def registerSkolems (sorts : Array (UInt32 × String))
     (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) :
     ReconstructM PUnit := do
   let bound (f : Formula) : Array (UInt32 × String) :=
-    f.boundVars.filterMap fun v => (sorts.find? (·.1 == v)).map fun (_, s) => (v, s)
+    boundSorts sorts f.boundVars
   match ← connectiveOf f with
   | .«exists» =>
     let some body := f.subformulas[0]? | throwError "quantifier without a body"
