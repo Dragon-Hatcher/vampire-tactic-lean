@@ -33,10 +33,33 @@ occurrences of that expression would replace ones the inference left alone.
 -/
 private inductive Tree where
   /-- An applied symbol, by the name TPTP gives it and what the goal has for
-  it, which is nothing for a symbol TPTP interprets itself. -/
-  | app (name : String) (head : Option Expr) (args : Array Tree)
+  it, which is nothing for a symbol TPTP interprets itself. `hash` is the
+  tree's, kept so that telling two trees apart is not walking both. -/
+  | app (name : String) (head : Option Expr) (args : Array Tree) (hash : UInt64)
   | leaf (e : Expr)
-deriving BEq, Inhabited
+deriving Inhabited
+
+private def Tree.hash : Tree → UInt64
+  | .app _ _ _ h => h
+  | .leaf e => e.hash
+
+/-- An applied symbol, its hash worked out from its arguments' once. -/
+private def Tree.node (name : String) (head : Option Expr) (args : Array Tree) : Tree :=
+  .app name head args (args.foldl (fun h a => mixHash h a.hash) (Hashable.hash name))
+
+/--
+Whether two trees are one. The hashes decide almost every pair that is not:
+`replacing` asks this of every node of a literal against the term rewritten,
+and comparing shapes there costs the product of their sizes.
+-/
+private partial def Tree.beq : Tree → Tree → Bool
+  | .leaf a, .leaf b => a == b
+  | .app n h as ha, .app m k bs hb =>
+    ha == hb && n == m && h == k && as.size == bs.size
+      && (as.zip bs).all fun (a, b) => Tree.beq a b
+  | _, _ => false
+
+private instance : BEq Tree := ⟨Tree.beq⟩
 
 private partial def treeOf (vars : Vars) (bindings : Std.HashMap UInt32 Term)
     (t : Term) : ReconstructM Tree := do
@@ -52,11 +75,11 @@ private partial def treeOf (vars : Vars) (bindings : Std.HashMap UInt32 Term)
       | throwError "term has unknown functor {t.functor}"
     let head ← if ← resolvesSymbol symbol.name then some <$> symbolExpr symbol.name
       else pure none
-    return .app symbol.name head (← t.args.mapM (treeOf vars bindings))
+    return .node symbol.name head (← t.args.mapM (treeOf vars bindings))
 
 private partial def Tree.toExpr : Tree → ReconstructM Expr
   | .leaf e => return e
-  | .app name head args => do
+  | .app name head args _ => do
     let args ← args.mapM Tree.toExpr
     if let some interpretation ← interpreted name args then
       return interpretation
@@ -65,9 +88,9 @@ private partial def Tree.toExpr : Tree → ReconstructM Expr
 
 private partial def Tree.replacing (target : Tree) (x : Expr) : Tree → Tree
   | t@(.leaf _) => if t == target then .leaf x else t
-  | t@(.app name head args) =>
+  | t@(.app name head args _) =>
     if t == target then .leaf x
-    else .app name head (args.map (Tree.replacing target x))
+    else .node name head (args.map (Tree.replacing target x))
 
 /--
 A premise's literal at the recorded substitution, with `hole`'s term abstracted
