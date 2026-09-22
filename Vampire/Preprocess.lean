@@ -177,7 +177,11 @@ def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
 /--
 Monomorphizes with `lean-auto`, reducing Lean's dependent type theory to
 something first-order. `lean-auto` negates the goal itself, so this also leaves
-a `False` goal over `Prop` hypotheses. It collects the whole local context.
+a `False` goal over `Prop` hypotheses.
+
+What is sent is what `intros` sends: the hypotheses introduced from the goal,
+the negated goal, and whatever the caller passed in brackets. The rest of the
+local context goes only if named, or with `*`.
 -/
 def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
   let (goalBinders, mv) ← mv.intros
@@ -185,7 +189,10 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     | throwError "could not negate the goal"
   let (ngoal, absurd) ← nngoal.intro goalMarker
   absurd.withContext do
-    let lctxLemmas ← Auto.collectLctxLemmas true (goalBinders.push ngoal)
+    -- `false` is what confines this to the binders and the negated goal:
+    -- `true` would have `lean-auto` take the whole local context, whatever was
+    -- named, and a hypothesis named in brackets would then be sent twice.
+    let lctxLemmas ← Auto.collectLctxLemmas false (goalBinders.push ngoal)
     -- The terms named in brackets come as `lean-auto` elaborated them, whole:
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which

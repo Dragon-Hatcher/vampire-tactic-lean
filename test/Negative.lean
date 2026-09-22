@@ -13,3 +13,9 @@ example {ι : Type} (f : ι → ι) (a : ι) : f a = a := by vampire (timeout :=
 /-- error: vampire did not refute the goal (Vampire.TerminationReason.satisfiable). Try passing more hypotheses, raising the timeout, or `+mono`. -/
 #guard_msgs in
 example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire (timeout := 5)
+
+-- The same under `+mono`: monomorphization is sent what `vampire` is, and the
+-- local context only when it is named.
+/-- error: vampire did not refute the goal (Vampire.TerminationReason.satisfiable). Try passing more hypotheses, raising the timeout, or `+mono`. -/
+#guard_msgs in
+example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire +mono (timeout := 5)

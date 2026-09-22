@@ -7,10 +7,12 @@ example (f : ∀ {α : Type}, α → α) (h : ∀ {α : Type} (x : α), f x = x)
     f n = n := by
   vampire +mono [h]
 
-example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire +mono
+example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire +mono [hp, hpq]
+
+example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire +mono [*]
 
 example {ι : Type} (g : ι → ι) (a : ι) (h : ∀ x, g x = x) : g (g a) = a := by
-  vampire +mono
+  vampire +mono [h]
 
 -- A lemma named in brackets can still be waiting on what it is stated of:
 -- `mul_assoc` says nothing until a type and its `Semigroup` instance are
