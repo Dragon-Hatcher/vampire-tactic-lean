@@ -40,6 +40,8 @@ private structure Layout where
   bindings : Nat
   congruences : Nat
   congruenceArgs : Nat
+  placements : Nat
+  placementEntries : Nat
   strings : Nat
   proofText : Nat
   numFunctions : Nat
@@ -132,11 +134,11 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 23
+private def version : UInt32 := 24
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 41 * 4 then
+  if data.size < 43 * 4 then
     Error.fail (s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
     Error.fail ("proof does not start with the expected magic bytes")
@@ -184,7 +186,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numCongruenceArgs := word 31
   let stringsLen := word 32
   let proofTextLen := word 33
-  let functions := 41 * 4
+  let functions := 43 * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -194,7 +196,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 28 * 4
+  let unitLits := units + numUnits * 30 * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -211,7 +213,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let bindings := uses + numUses * 6 * 4
   let congruences := bindings + numBindings * 2 * 4
   let congruenceArgs := congruences + numCongruences * 5 * 4
-  let strings := congruenceArgs + numCongruenceArgs * 4
+  let numPlacements := word 41
+  let numPlacementEntries := word 42
+  let placements := congruenceArgs + numCongruenceArgs * 4
+  let placementEntries := placements + numPlacements * 4 * 4
+  let strings := placementEntries + numPlacementEntries * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -252,7 +258,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     optional "formula name" (at_ formulas 7 i 6) stringsLen
   for i in [0:numSubs] do index "subformula" (at_ subs 1 i 0) numFormulas
   for i in [0:numUnits] do
-    let u (off : Nat) := at_ units 28 i off
+    let u (off : Nat) := at_ units 30 i off
     if u 3 &&& 1 != 0 then range "clause literals" (u 4) (u 5) numUnitLits
     else index "unit formula" (u 4) numFormulas
     range "premises" (u 6) (u 7) numParents
@@ -267,6 +273,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     range "conjunct choices" (u 21) (u 22) numChoices
     range "congruence steps" (u 23) (u 24) numCongruences
     range "constraints" (u 26) (u 27) (u 5)
+    range "placements" (u 28) (u 29) numPlacements
   for i in [0:numUnitLits] do index "clause literal" (at_ unitLits 1 i 0) numLiterals
   for i in [0:numParents] do index "premise" (at_ parents 1 i 0) numUnits
   for i in [0:numVarSorts] do index "variable sort" (at_ varSorts 2 i 1) numSorts
@@ -308,6 +315,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       numCongruenceArgs
   for i in [0:numCongruenceArgs] do
     optional "congruence argument" (at_ congruenceArgs 1 i 0) numCongruences
+  for i in [0:numPlacements] do
+    range "placement entries" (at_ placements 4 i 2) (at_ placements 4 i 3)
+      numPlacementEntries
   if readU32 data 12 != 0 then index "refutation" (word 4) numUnits
   optional "strategy" (word 36) stringsLen
   let reason ← ofIndex
@@ -321,7 +331,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
-      bindings, congruences, congruenceArgs, strings, proofText, numFunctions,
+      bindings, congruences, congruenceArgs, placements, placementEntries,
+      strings, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -680,14 +691,14 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 28 c.idx.toNat 4
-  let count := p.field p.layout.units 28 c.idx.toNat 5
+  let first := p.field p.layout.units 30 c.idx.toNat 4
+  let count := p.field p.layout.units 30 c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
 /-- The number of literals, read off the clause rather than counted. -/
 def size (c : Clause) : Nat :=
-  (c.proof.field c.proof.layout.units 28 c.idx.toNat 5).toNat
+  (c.proof.field c.proof.layout.units 30 c.idx.toNat 5).toNat
 
 /-- Whether this is the empty clause. -/
 def isEmpty (c : Clause) : Bool := c.size == 0
@@ -778,7 +789,7 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 28 u.idx.toNat off
+  u.proof.field u.proof.layout.units 30 u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
@@ -956,6 +967,33 @@ def congruences (u : Unit) : Except Error (Array Congruence) := do
       | 5 => pure (.goalLiterals a.toNat b.toNat args)
       | kind => Error.fail (s!"unknown congruence step kind {kind}"))
   return out
+
+/--
+Where the literals of the premise in `position` went in this step's clause,
+under the `use`th substitution recorded against it: for each of its literals,
+the conclusion's literal it became and whether with its equation turned round,
+or `none` for one it became none of. `none` altogether where nothing was
+recorded -- for a formula, say.
+
+The worker works it out by substituting and comparing literals, which vampire
+shares, so a literal is placed rather than looked for.
+-/
+def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
+    Option (Array (Option (Nat × Bool))) := do
+  let p := u.proof
+  let first := u.field 28
+  let count := u.field 29
+  let records := Array.range count.toNat
+  let i ← records.find? fun k =>
+    let base := p.layout.placements + (first.toNat + k) * 4 * 4
+    (readU32 p.data base).toNat == position && (readU32 p.data (base + 4)).toNat == use
+  let base := p.layout.placements + (first.toNat + i) * 4 * 4
+  let firstEntry := readU32 p.data (base + 8)
+  let numEntries := readU32 p.data (base + 12)
+  return Array.ofFn (n := numEntries.toNat) fun j =>
+    let entry := readU32 p.data (p.layout.placementEntries + (firstEntry.toNat + j.val) * 4)
+    if entry == none32 then none
+    else some ((entry &&& 0x7FFFFFFF).toNat, entry &&& 0x80000000 != 0)
 
 /-- The generalised clause this clause came out of, if clausification made it. -/
 def genClause? (u : Unit) : Option GenClause :=

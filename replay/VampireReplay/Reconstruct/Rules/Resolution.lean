@@ -41,9 +41,12 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- The resolved pair is complementary, which closes that case -- against
     -- what the two carries have left of the conclusion, which is what the
     -- innermost of them says it is and not what the outer one was given.
+    let into := step.into target
     let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
-      (fun _ h₁ rest => carryPast t₂ rest p₂ (· == resolved₂.toNat)
-        (fun _ h₂ inner => closeComplementary inner h₁ h₂))
+      (fun _ h₁ rest at_ => carryPast t₂ rest p₂ (· == resolved₂.toNat)
+        (fun _ h₂ inner _ => closeComplementary inner h₁ h₂)
+        (placed := step.placedAt 1) (into := into.from at_))
+      (placed := step.placedAt 0) (into := into)
     pure body
 
 /--
@@ -81,11 +84,12 @@ def unitResulting (step : Step) : ReconstructM Expr := do
           {parent.number} resolved away"
       units := units.insert literal.toNat (← instantiateAt parent use vars proof stated)
     let body ← carryPast mainType target mainAt (units.contains ·)
-      (fun i h rest => do
+      (fun i h rest _ => do
         let some (unitAt, unitType) := units[i]?
           | throwError "no unit resolved literal {i} away"
         carryPast unitType rest unitAt (fun _ => true)
-          (fun _ hu inner => closeComplementary inner h hu))
+          (fun _ hu inner _ => closeComplementary inner h hu))
+      (placed := step.placedAt 0) (into := step.into target)
     pure body
 
 /--
@@ -105,7 +109,8 @@ def factoring (step : Step) : ReconstructM Expr := do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    carryAll premiseType target premiseAt
+    carryAll premiseType target premiseAt (placed := step.placedAt 0)
+      (into := step.into target)
 
 /--
 `rest`, where an abstracting unifier left constraints among the conclusion's
@@ -163,7 +168,8 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
-      (fun _ h rest => do
+      (placed := step.placedAt 0) (into := step.into target)
+      (fun _ h rest _ => do
         -- The binding is what makes the two sides of the inequality one term,
         -- unless the unifier abstracted: then what it could not unify it left
         -- as disequalities among the conclusion's own literals, and the two
@@ -224,7 +230,8 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
         {indentExpr sideLit}"
     let (fLHS, fRHS) := if sideLeft then (fa, fb) else (fb, fa)
     let body ← carryPast premiseType target premiseAt (· == selectedIdx.toNat)
-      (fun _ h rest => do
+      (placed := step.placedAt 0) (into := step.into target)
+      (fun _ h rest _ => do
         let stated ← instantiateMVars (← inferType h)
         let some (α, sa, sb) := stated.eq?
           | throwError "the equality factored is not an equality:\

@@ -48,10 +48,22 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     let vars ← coverVars mainParent kept step.unit.boundVarSorts
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
+    let into := step.into target
+    -- The side premise's literals at σ are the conclusion's but for the one
+    -- that is the removed literal's complement, and the worker recorded where
+    -- each went: the literals placed are carried, and the one that is not is
+    -- the one to close the case with.
+    let sidePlaced := step.placedAt 1
+    let unplaced (k : Nat) : Bool :=
+      match sidePlaced with
+      | some placed => (placed[k]?.join).isNone
+      | none => true
     let body ← carryPast mainType target mainAt (· == resolved.toNat)
-      (fun _ h rest =>
-        carryPast sideType rest sideAt (fun _ => true)
-          (fun _ hSide inner => do
+      (placed := step.placedAt 0) (into := into)
+      (fun _ h rest at_ =>
+        carryPast sideType rest sideAt unplaced
+          (placed := sidePlaced) (into := into.from at_)
+          (fun _ hSide inner _ => do
             let removed ← instantiateMVars (← inferType h)
             -- The one literal of the side premise the substitution makes
             -- complementary to the removed one closes the case; the rest are

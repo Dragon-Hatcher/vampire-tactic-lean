@@ -267,11 +267,14 @@ def superposition (step : Step) : ReconstructM Expr := do
     -- The equation is a literal of its own premise, so the case where it holds
     -- is the one that rewrites; its other literals are literals of the
     -- conclusion, as are the ones the rewritten premise keeps.
+    let into := step.into target
     let body ← carryPast mainType target mainAt
+      (placed := step.placedAt 0) (into := into)
       (fun i => i == rw.literal || rw.wholePremise)
-      (fun i h rest =>
+      (fun i h rest at_ =>
         carryPast sideType rest sideAt (· == equationLiteral.toNat)
-          (fun _ hSide inner => do
+          (placed := step.placedAt 1) (into := into.from at_)
+          (fun _ hSide inner _ => do
             let («from», to, heq) ←
               orientedEquation sideParent sideUse vars hSide (← inferType hSide)
             let source ← rw.target.toExpr

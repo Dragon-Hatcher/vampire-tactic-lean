@@ -161,6 +161,19 @@ def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
   return use
 
 /--
+Where the literals of the premise in position `i` went in the conclusion, as
+the worker recorded it under the use `useAt i` reads: `none` where nothing was.
+-/
+def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
+  let parent ← step.unit.parents[i]?
+  let earlier := (step.unit.parents.extract 0 i).countP (·.number == parent.number)
+  step.unit.placement? i earlier
+
+/-- The conclusion's literals, `target` being what it says, to place into. -/
+def Step.into (step : Step) (target : Expr) : Into :=
+  Into.of target ((step.unit.clause?.map (·.size)).getD 0)
+
+/--
 Whether the term a use recorded is the left side of the equation it acted on,
 rather than the right.
 
@@ -235,8 +248,17 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- occurrence, so that the earlier ones still have it to be placed at.
     let recurs := sourceParts.mapIdx fun i part =>
       (sourceParts.extract (i + 1) sourceParts.size).contains part
-    let inStep : Nat → Expr → Expr → ReconstructM (Option Expr) := fun i h t => do
+    -- Where the worker recorded each literal went, which is where it goes;
+    -- one it did not is looked for.
+    let placed := (step.unit.parents.findIdx? (·.number == parent.number)).bind
+      step.placedAt
+    let into := step.into target
+    let inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j h t => do
       if recurs[i]! then return none
+      if let some placed := placed then
+        if let some (some (k, flipped)) := placed[i]? then
+          unless k == j do return none
+          if flipped then return ← flipEquality h else return some h
       for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
         if ← isDefEq (← stating candidate) t then
           return some candidate
@@ -256,12 +278,17 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       return none
     -- The literals usually run in step, and then the clause is carried across
     -- following the shape of both rather than put back a literal at a time.
-    let whole : Nat → Expr → Expr → ReconstructM (Option Expr) :=
-      fun _ h rest => accountedFor h rest
+    let whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) :=
+      fun i j h rest => do
+        if let some placed := placed then
+          if let some done ← placeAt into placed i j h then return some done
+        accountedFor h rest
     if let some carried ←
-        carrying (junction ``Or ``False sourceParts) target 0 inStep whole then
+        carrying (junction ``Or ``False sourceParts) target 0 0 inStep whole then
       return mkApp carried (mkAppN premiseProof args)
-    let body ← elimGiven sourceParts (fun _ h => do
+    let body ← elimGiven sourceParts (fun i h => do
+      if let some placed := placed then
+        if let some done ← placeAt into placed i 0 h then return done
       match ← accountedFor h target with
       | some placed => return placed
       | none =>

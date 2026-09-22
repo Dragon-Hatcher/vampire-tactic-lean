@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    41 words, see `write`. Words 36 to 39 are the strategy the proof
+ *   header    43 words, see `write`. Words 36 to 39 are the strategy the proof
  *             was found by (a string offset, `NONE` when there is no proof: the
  *             same run can be had again from that alone), what it ran for, what
  *             starting up took and when the proof was found. Word 34 is how
@@ -49,7 +49,7 @@
  *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
  *              genState, firstChoice, numChoices, firstCongruence,
  *              numCongruences, numBoundSorts, firstConstraint,
- *              numConstraints}
+ *              numConstraints, firstPlacement, numPlacements}
  *             `firstConstraint` and `numConstraints` say which of a clause's
  *             literals are the disequalities an abstracting unifier left
  *             behind: what it could not unify it defers into literals the
@@ -145,6 +145,20 @@
  *             their arguments are equal. The last step of a unit's run is one
  *             of the last two kinds
  *   congruenceArgs indices into `congruences`
+ *   placements {position, use, firstEntry, numEntries}: where the literals of
+ *             one premise went. `position` is the premise's place among the
+ *             unit's parents and `use` which of the uses recorded against it,
+ *             counting from zero, or zero where none was. Each entry is the
+ *             index of the conclusion's literal a premise literal became under
+ *             the use's substitution, the top bit set where it became that
+ *             literal with its equation turned round, and `NONE` where it
+ *             became none of them -- resolved away, say. Vampire shares its
+ *             literals, so this is pointer equality after substituting, and
+ *             replay places each literal rather than looking for it. For an
+ *             AVATAR split clause, the entries of a component's definition are
+ *             for the component's literals, under the renaming recorded
+ *             against it, and index the clause being split
+ *   placementEntries words, the entries of `placements`
  *   skolems   {variable, term} pairs: the existential variable a skolemisation
  *             step replaced, and the term it became. Skolemisation works on
  *             NNF rather than prenex input and a skolem takes only the
@@ -202,7 +216,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 23;
+const uint32_t VERSION = 24;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -608,7 +622,8 @@ struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
-      genStates, genLits, choices, congruences, congruenceArgs;
+      genStates, genLits, choices, congruences, congruenceArgs, placements,
+      placementEntries;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -950,8 +965,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 28);
-    units.resize(units.size() + 28, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / 30);
+    units.resize(units.size() + 30, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -1025,18 +1040,18 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[28 * idx + 0] = u->number();
-    units[28 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[28 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[28 * idx + 3] = flags;
-    units[28 * idx + 4] = payload;
-    units[28 * idx + 5] = numLits;
-    units[28 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[28 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[28 * idx + 9] = numVarSorts;
-    units[28 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[28 * idx + 11] = numSkolems;
-    units[28 * idx + 12] = nameOff;
+    units[30 * idx + 0] = u->number();
+    units[30 * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[30 * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[30 * idx + 3] = flags;
+    units[30 * idx + 4] = payload;
+    units[30 * idx + 5] = numLits;
+    units[30 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[30 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[30 * idx + 9] = numVarSorts;
+    units[30 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[30 * idx + 11] = numSkolems;
+    units[30 * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -1148,19 +1163,19 @@ struct Encoder {
         numBoundSorts++;
       }
     }
-    units[28 * idx + 8] =
+    units[30 * idx + 8] =
       numVarSorts == 0 && numBoundSorts == 0 ? NONE : firstVarSort;
-    units[28 * idx + 25] = numBoundSorts;
+    units[30 * idx + 25] = numBoundSorts;
     auto [firstConstraint, numConstraints] =
       InferenceStore::instance()->constraints(u);
-    units[28 * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
-    units[28 * idx + 27] = numConstraints;
+    units[30 * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
+    units[30 * idx + 27] = numConstraints;
 
-    units[28 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[28 * idx + 14] = numUses;
-    units[28 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[28 * idx + 16] = numSplits;
-    units[28 * idx + 17] =
+    units[30 * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[30 * idx + 14] = numUses;
+    units[30 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[30 * idx + 16] = numSplits;
+    units[30 * idx + 17] =
       inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
 
     uint32_t firstNaming = static_cast<uint32_t>(namings.size() / 4);
@@ -1178,10 +1193,110 @@ struct Encoder {
         numNamings++;
       }
     }
-    units[28 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
-    units[28 * idx + 19] = numNamings;
-    units[28 * idx + 20] =
+    units[30 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
+    units[30 * idx + 19] = numNamings;
+    units[30 * idx + 20] =
       encodeGenClauseState(InferenceStore::instance()->genClauseOfClause(u));
+
+    uint32_t firstPlacement = static_cast<uint32_t>(placements.size() / 4);
+    uint32_t numPlacements = 0;
+    auto place = [&](uint32_t position, uint32_t useIndex,
+                     const std::vector<Literal*>& from, Clause* into,
+                     const Stack<std::pair<unsigned, TermList>>* bindings) {
+      struct Bound {
+        DHMap<unsigned, TermList> map;
+        TermList apply(unsigned v) {
+          TermList t;
+          return map.find(v, t) ? t : TermList(v, false);
+        }
+      } bound;
+      if (bindings)
+        for (const auto& [var, term] : *bindings)
+          bound.map.set(var, term);
+      uint32_t first = static_cast<uint32_t>(placementEntries.size());
+      for (Literal* lit : from) {
+        Literal* image = SubstHelper::apply(lit, bound);
+        uint32_t entry = NONE;
+        for (unsigned j = 0; j < into->length() && entry == NONE; j++) {
+          Literal* there = (*into)[j];
+          if (there == image)
+            entry = j;
+          else if (image->isEquality() && there->isEquality()
+                   && image->polarity() == there->polarity()
+                   && *image->nthArgument(0) == *there->nthArgument(1)
+                   && *image->nthArgument(1) == *there->nthArgument(0))
+            entry = j | 0x80000000u;
+        }
+        placementEntries.push_back(entry);
+      }
+      placements.push_back(position);
+      placements.push_back(useIndex);
+      placements.push_back(first);
+      placements.push_back(static_cast<uint32_t>(from.size()));
+      numPlacements++;
+    };
+    if (u->isClause()) {
+      const Stack<InferenceStore::PremiseUse>* recorded =
+        InferenceStore::instance()->premiseUses(u);
+      // The uses recorded against a premise, in order.
+      auto usesOf = [&](unsigned number) {
+        std::vector<const InferenceStore::PremiseUse*> out;
+        if (recorded)
+          for (const auto& use : *recorded)
+            if (use.premise == number)
+              out.push_back(&use);
+        return out;
+      };
+      std::vector<Unit*> premisesInOrder;
+      Inference::Iterator pit = inference.iterator();
+      while (inference.hasNext(pit))
+        premisesInOrder.push_back(inference.next(pit));
+      std::unordered_map<unsigned, uint32_t> occurrences;
+      bool splitClause = inference.rule() == InferenceRule::AVATAR_SPLIT_CLAUSE;
+      for (uint32_t pos = 0; pos < premisesInOrder.size(); pos++) {
+        Unit* premise = premisesInOrder[pos];
+        uint32_t occurrence = occurrences[premise->number()]++;
+        auto uses = usesOf(premise->number());
+        if (premise->isClause() && !splitClause) {
+          std::vector<Literal*> lits;
+          for (unsigned i = 0; i < premise->asClause()->length(); i++)
+            lits.push_back((*premise->asClause())[i]);
+          const auto* use = occurrence < uses.size() ? uses[occurrence] : nullptr;
+          place(pos, occurrence, lits, u->asClause(), use ? &use->bindings : nullptr);
+        } else if (splitClause && !premise->isClause() && pos > 0
+                   && premisesInOrder[0]->isClause()) {
+          // A component's definition, `name <=> component`: its literals, under
+          // each renaming recorded against it, into the clause being split.
+          Formula* definition = premise->getFormula();
+          if (definition->connective() != IFF)
+            continue;
+          Formula* component = definition->left()->connective() == NAME
+            ? definition->right() : definition->left();
+          if (component->connective() == FORALL)
+            component = component->qarg();
+          std::vector<Formula*> parts;
+          if (component->connective() == OR)
+            for (const FormulaList* it = component->args(); it; it = it->tail())
+              parts.push_back(it->head());
+          else
+            parts.push_back(component);
+          std::vector<Literal*> lits;
+          for (Formula* part : parts) {
+            if (part->connective() != LITERAL) {
+              lits.clear();
+              break;
+            }
+            lits.push_back(part->literal());
+          }
+          if (lits.size() != parts.size())
+            continue;
+          for (uint32_t k = 0; k < uses.size(); k++)
+            place(pos, k, lits, premisesInOrder[0]->asClause(), &uses[k]->bindings);
+        }
+      }
+    }
+    units[30 * idx + 28] = numPlacements == 0 ? NONE : firstPlacement;
+    units[30 * idx + 29] = numPlacements;
 
     uint32_t firstCongruence = static_cast<uint32_t>(congruences.size() / 5);
     uint32_t numCongruences = 0;
@@ -1206,8 +1321,8 @@ struct Encoder {
           numCongruences++;
         }
     }
-    units[28 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
-    units[28 * idx + 24] = numCongruences;
+    units[30 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
+    units[30 * idx + 24] = numCongruences;
 
     uint32_t firstChoice = static_cast<uint32_t>(choices.size() / 2);
     uint32_t numChoices = 0;
@@ -1219,8 +1334,8 @@ struct Encoder {
         numChoices++;
       }
     }
-    units[28 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
-    units[28 * idx + 22] = numChoices;
+    units[30 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
+    units[30 * idx + 22] = numChoices;
     return idx;
   }
 };
@@ -1265,7 +1380,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 28));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / 30));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
@@ -1296,6 +1411,8 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   // The count above notices a rule added or removed, and this one rules that
   // traded places, which would otherwise decode as each other.
   putWord(buf, VAMPIRE_RULE_FINGERPRINT);
+  putWord(buf, static_cast<uint32_t>(enc.placements.size() / 4));
+  putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1324,6 +1441,8 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.bindings);
   putWords(buf, enc.congruences);
   putWords(buf, enc.congruenceArgs);
+  putWords(buf, enc.placements);
+  putWords(buf, enc.placementEntries);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 
