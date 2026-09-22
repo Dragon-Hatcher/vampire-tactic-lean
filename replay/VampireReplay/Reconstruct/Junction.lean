@@ -104,12 +104,18 @@ def suffixJunctions (fn unit : Name) (parts : Array Expr) : Array Expr := Id.run
       (if i + 1 == n then parts[i]! else mkApp2 (mkConst fn) parts[i]! tail)
   return rev.reverse
 
-/-- A proof of `junction ``Or ``False parts` from a proof of its `i`th part. -/
-def injectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
-    ReconstructM Expr := do
+/--
+A proof of `junction ``Or ``False parts` from a proof of its `i`th part.
+
+@b suffix? is `suffixJunctions ``Or ``False parts`, for a caller injecting into
+the same parts again and again: building it is the length of the junction, and
+doing that at every injection is its square.
+-/
+def injectGiven (parts : Array Expr) (i : Nat) (h : Expr)
+    (suffix? : Option (Array Expr) := none) : ReconstructM Expr := do
   if parts.size <= 1 then return h
   let i := min i (parts.size - 1)
-  let suffix := suffixJunctions ``Or ``False parts
+  let suffix := suffix?.getD (suffixJunctions ``Or ``False parts)
   let mut acc :=
     if i + 1 == parts.size then h
     else mkApp3 (mkConst ``Or.inl) parts[i]! suffix[i + 1]! h

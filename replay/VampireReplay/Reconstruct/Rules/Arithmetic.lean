@@ -72,13 +72,23 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     for (x, (v, _)) in xs.zip step.unit.varSorts do
       vars := vars.insert v x
     let premises ← premisesOf step vars
+    let targetParts := junctionParts ``Or target
+    let suffix := suffixJunctions ``Or ``False targetParts
     -- Each premise holds, so one of its literals does, which is a case; every
-    -- case has to make the conclusion, which is what the numbers settle.
+    -- case has to make the conclusion. A literal the step carried over is one
+    -- of the conclusion's own -- the premise is instantiated at the step's
+    -- substitution, and its literals rebuilt as the conclusion's are -- so
+    -- that case is closed by finding it there. What is left is the literals
+    -- the step acted on, and those are what the numbers settle.
     let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
       let some (proof, stated) := premises[i]?
         | return ← byArithmetic facts target
-      elimGiven (junctionParts ``Or stated)
-        (fun _ h => do go (facts.push (← plainly h)) (i + 1)) proof
+      elimGiven (junctionParts ``Or stated) (motive? := some target)
+        (fun _ h => do
+          let says ← instantiateMVars (← inferType h)
+          if let some j := targetParts.findIdx? (· == says) then
+            return ← injectGiven targetParts j h (suffix? := some suffix)
+          go (facts.push (← plainly h)) (i + 1)) proof
     mkLambdaFVars xs (← go #[] 0)
 
 /-- `a * b`, whichever numbers those are. -/

@@ -218,11 +218,9 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
       for fact in facts do
         if ← isDefEq part (← instantiateMVars (← inferType fact)) then
           return ← injectGiven parts i fact
-    -- Whichever disjunct the numbers give; failing that, suppose none of them.
-    for (part, i) in parts.zipIdx do
-      try
-        return ← injectGiven parts i (← byArithmetic facts part fuel)
-      catch _ => pure ()
+    -- Otherwise suppose none of them holds. That covers whichever disjunct the
+    -- numbers would have given, so asking for each in turn first is asking a
+    -- decision procedure, once per disjunct, what this asks it once.
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
       let mut extended := facts
       for (part, i) in parts.zipIdx do
@@ -242,12 +240,14 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
           if ← isDefEq denied (← instantiateMVars (← inferType other)) then
             return ← mkAppOptM ``absurd
               #[some denied, some (mkConst ``False), some other, some fact]
-    -- A fact that denies a comparison is used by making the comparison: what
-    -- the procedures read are facts of the form `a ≤ b`, and a denial of one
-    -- says nothing to them. What it denies is proved from the rest instead.
+    -- A fact that denies an equality is used by making the equality: `linarith`
+    -- reads `¬(a < b)` as `b ≤ a` but takes nothing from `a ≠ b`, so what it
+    -- denies is proved from the rest instead. A denied comparison needs none
+    -- of this, being a comparison the other way round.
     if fuel > 0 then
       for (fact, i) in facts.zipIdx do
         if let some denied := (← instantiateMVars (← inferType fact)).not? then
+          unless denied.isAppOfArity ``Eq 3 do continue
           try
             let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
             return ← mkAppOptM ``absurd
