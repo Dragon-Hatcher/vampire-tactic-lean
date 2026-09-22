@@ -49,6 +49,79 @@ private def premisesOf (step : Step) (vars : Vars) :
   return out
 
 /--
+The roundings a formula speaks of: the floors and ceilings, cast back to the
+type they were taken at, and the conditionals truncation is stated with.
+
+A decision procedure over ordered fields knows nothing of `⌊x⌋` but that it is
+some number; what makes a floor a floor is a pair of bounds, which are
+Mathlib's lemmas and are handed to it here.
+-/
+private partial def roundingsOf (e : Expr) (acc : Array Expr × Std.HashSet Expr) :
+    Array Expr × Std.HashSet Expr :=
+  if acc.2.contains e then acc
+  else
+    let acc := (acc.1, acc.2.insert e)
+    let acc :=
+      if e.isAppOfArity ``Int.cast 3 then
+        let inner := e.appArg!
+        if inner.isAppOfArity `Int.floor 5 || inner.isAppOfArity `Int.ceil 5
+          then (acc.1.push e, acc.2) else acc
+      else if e.isAppOfArity ``ite 5 then (acc.1.push e, acc.2)
+      else acc
+    match e with
+    | .app f a => roundingsOf a (roundingsOf f acc)
+    | .lam _ d b _ | .forallE _ d b _ => roundingsOf b (roundingsOf d acc)
+    | .mdata _ b => roundingsOf b acc
+    | _ => acc
+
+/--
+`k`, handed what bounds each rounding the formulas speak of, with a case made of
+each conditional among them.
+
+`⌊x⌋ ≤ x < ⌊x⌋ + 1` and `x ≤ ⌈x⌉ < x + 1` are what the numbers need to know of a
+floor or a ceiling, which is what `tha_floor_*`, `tha_ceiling_*` and ALASCA's
+floor steps turn on. Truncation is a floor or a ceiling according to the sign
+of what it truncates, so it is a case: the condition holds and the conditional
+is its first branch, or it fails and it is the second -- which is what
+`tha_trunc*` turn on.
+-/
+private partial def withRoundings (formulas : Array Expr)
+    (k : Array Expr → ReconstructM Expr) : ReconstructM Expr := do
+  let (found, _) := formulas.foldl (fun acc e => roundingsOf e acc) (#[], {})
+  let mut bounds := #[]
+  let mut conditionals := #[]
+  for e in found do
+    if e.isAppOfArity ``ite 5 then
+      conditionals := conditionals.push e
+      continue
+    let inner := e.appArg!
+    let x := inner.appArg!
+    let lemmas := if inner.isAppOfArity `Int.floor 5
+      then [`Int.floor_le, `Int.lt_floor_add_one]
+      else [`Int.le_ceil, `Int.ceil_lt_add_one]
+    for lemma_ in lemmas do
+      let bound ← mkAppM lemma_ #[x]
+      -- Stated of the very term the step speaks of: the lemma reaches the cast
+      -- through instances of its own, and a procedure that tells terms apart
+      -- by their shape would take the two for two numbers.
+      let stated := (← instantiateMVars (← inferType bound)).replace fun s =>
+        if s.isAppOfArity ``Int.cast 3 && s.appArg!.getAppFn == inner.getAppFn
+          then some e else none
+      bounds := bounds.push (← mkExpectedTypeHint bound stated)
+  let rec cases (i : Nat) (facts : Array Expr) : ReconstructM Expr := do
+    let some e := conditionals[i]? | k facts
+    let #[α, c, inst, yes, no] := e.getAppArgs | k facts
+    let level ← getLevel α
+    let holds ← withLocalDeclD `h c fun h => do
+      let first := mkApp6 (mkConst ``if_pos [level]) c inst h α yes no
+      mkLambdaFVars #[h] (← cases (i + 1) (facts ++ #[h, first]))
+    let fails ← withLocalDeclD `h (mkApp (mkConst ``Not) c) fun h => do
+      let second := mkApp6 (mkConst ``if_neg [level]) c inst h α yes no
+      mkLambdaFVars #[h] (← cases (i + 1) (facts ++ #[h, second]))
+    mkAppM ``Classical.byCases #[holds, fails]
+  cases 0 bounds
+
+/--
 A step whose conclusion follows from its premises by arithmetic.
 
 Suppose the conclusion fails. Then each of its literals fails, which is a fact;
@@ -89,7 +162,8 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
           if let some j := targetParts.findIdx? (· == says) then
             return ← injectGiven targetParts j h (suffix? := some suffix)
           go (facts.push (← plainly h)) (i + 1)) proof
-    mkLambdaFVars xs (← go #[] 0)
+    let statements := #[target] ++ premises.map (·.2)
+    mkLambdaFVars xs (← withRoundings statements fun roundings => go roundings 0)
 
 /-- `a * b`, whichever numbers those are. -/
 private def asProduct (e : Expr) : Option (Expr × Expr) :=

@@ -29,3 +29,9 @@ example (x y : ℤ) (f : ℤ → ℤ) (p : ℤ → Prop) (h1 : x = y ∨ p x) (h
   vampire (options := #[("avatar_congruence_closure", "on"),
     ("forward_demodulation", "off"), ("backward_demodulation", "off"),
     ("superposition", "off")]) [h1, h3, h4, h5]
+
+-- Floors and ceilings: vampire's axioms and ALASCA's bounds for them are
+-- replayed from Mathlib's bounds, which are what makes a floor one.
+example (x : ℝ) : (⌊x⌋ : ℝ) ≤ x := by vampire
+example (x : ℝ) : x < ⌊x⌋ + 1 := by vampire
+example (x : ℝ) : x ≤ ⌈x⌉ := by vampire

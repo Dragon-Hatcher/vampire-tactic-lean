@@ -315,6 +315,22 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
     return some (.app (renderNumeral sort n) #[])
   let binary (fn : String) (a b : Expr) : TranslateM (Option Tm) := do
     return some (.app fn #[← translateTerm a, ← translateTerm b])
+  -- `$to_int` is the floor, and the ceiling is the floor of the negation,
+  -- negated. Named rather than matched: the two are Mathlib's.
+  if e.getAppFn.isConstOf `Int.floor && e.getAppNumArgs == 5 then
+    return some (.app "$to_int" #[← translateTerm e.appArg!])
+  if e.getAppFn.isConstOf `Int.ceil && e.getAppNumArgs == 5 then
+    return some (.app "$uminus"
+      #[.app "$to_int" #[.app "$uminus" #[← translateTerm e.appArg!]]])
+  -- A floor or a ceiling cast back to the type it was taken at is TPTP's
+  -- own `$floor` or `$ceiling` there, which is what vampire's axioms for them
+  -- are stated of.
+  if let some inner := (match_expr e with | Int.cast _ _ a => some a | _ => none) then
+    for (fn, name) in [(`Int.floor, "$floor"), (`Int.ceil, "$ceiling")] do
+      if inner.getAppFn.isConstOf fn && inner.getAppNumArgs == 5 then
+        let a := inner.appArg!
+        if arithmeticSort (← whnf (← inferType a)) == some sort then
+          return some (.app name #[← translateTerm a])
   match_expr e with
   | HAdd.hAdd _ _ _ _ a b => binary "$sum" a b
   | HSub.hSub _ _ _ _ a b => binary "$difference" a b
@@ -327,6 +343,7 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
   -- written at one type and used at another, and what it names is the number,
   -- so the integer division in `((16 : ℤ) / 5 : ℝ)` is integer division.
   | Int.cast _ _ a => return some (.app (castInto sort) #[← translateTerm a])
+
   -- TPTP has no natural numbers, so what is cast from one has no sort to be
   -- cast from: a natural number variable becomes an individual of a sort of
   -- its own, which `$to_int` and the rest do not take. A numeral is the one
