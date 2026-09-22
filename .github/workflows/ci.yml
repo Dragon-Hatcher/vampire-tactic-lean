@@ -1,0 +1,54 @@
+# Builds the tactic and the worker, and runs `lake test`, which includes the
+# smoke split of the corpus. The whole corpus is slower -- twenty minutes and
+# more -- so it runs once a week and when asked for.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: "Also run the whole corpus"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # Lake's packages and the vampire it builds are keyed by what pins them:
+      # the manifest, and the revision `lakefile.lean` names.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .lake/packages
+            .lake/build/vampire
+            .lake/build/cmake
+          key: lake-${{ runner.os }}-${{ hashFiles('lake-manifest.json', 'lean-toolchain', 'lakefile.lean', 'worker/**') }}
+          restore-keys: lake-${{ runner.os }}-
+
+      - name: Fetch Mathlib's build
+        run: lake exe cache get
+
+      - name: Build
+        run: lake build
+
+      - name: Test
+        run: lake test
+
+      - name: Corpus
+        if: github.event_name == 'schedule' || inputs.corpus
+        run: lake run problems -j 3
