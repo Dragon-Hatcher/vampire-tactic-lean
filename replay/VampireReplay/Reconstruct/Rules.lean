@@ -23,7 +23,8 @@ open Lean Meta
 /--
 Justifies a step. Every rule vampire can emit has a case, so a rule added to
 the fork will not compile until it is accounted for; the ones with no
-implementation yet fall to `unimplemented`, which admits the conclusion.
+implementation yet fall to `unimplemented`, which admits the conclusion only
+under `+admit`, and the ones that cannot arise to `unreachable`.
 
 A rule that introduces a name binds it in its own case, before asking for the
 conclusion, since the conclusion is stated in that very name.
@@ -74,29 +75,15 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .definitionFolding => Congruence.unfolded step
   | .purePredicateRemoval => Definition.purePredicateRemoval step
   | .reduceFalseTrue => Simplify.reduceFalseTrue step
-
-  -- Not implemented yet.
-  | .genericFormulaClauseTransformation => unimplemented step
-  | .negatedConjecture => unreachable step "it negates a TPTP conjecture, and \
-    the tactic states the goal as a negated conjecture already"
-  | .answerLiteralInjection => unimplemented step
-  | .answerLiteralInputSkolemisation => unimplemented step
-  | .claimDefinition => unimplemented step
   | .closure => Congruence.restated step
   | .theoryNormalization => Arithmetic.theoryStep step
   | .alascaIntegerTransformation => Arithmetic.theoryStep step
-  | .skolemSymbolIntroduction => unimplemented step
-  | .genericFormulaClauseTransformationLast => unimplemented step
-  | .genericSimplifyingInference => unimplemented step
-  | .reorderLiterals => unimplemented step
   -- A disequality whose sides unify dropped, the unifier only renaming what
   -- is left; the worker records it as equality resolution at that unifier.
   | .subsumptionEqualityResolution =>
     Resolution.equalityResolutionWithDeletion step
   | .alascaFwdDemodulation => Arithmetic.theoryStep step
   | .alascaBwdDemodulation => Arithmetic.theoryStep step
-  | .backwardSubsumptionDemodulation => unreachable step "this vampire records \
-    nothing of how it used its premises, and the tactic forces `bsd=off`"
   | .innerRewriting => Rewrite.innerRewriting step
   | .condensation => Clause.condensation step
   | .evaluation => Arithmetic.theoryStep step
@@ -106,50 +93,16 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .cancellation => Arithmetic.theoryStep step
   | .interpretedSimplification => Arithmetic.theoryStep step
   | .theoryFlattening => Arithmetic.theoryStep step
-  | .termAlgebraDistinctness => unimplemented step
-  | .termAlgebraPositiveInjectivitySimplifying => unimplemented step
-  | .termAlgebraNegativeInjectivitySimplifying => unimplemented step
-  | .globalSubsumption => unreachable step "it rests on a propositional proof \
-    this vampire does not keep, and the tactic forces `gs=off`"
   -- A literal equating two numbers that are not equal, dropped.
   | .distinctEqualityRemoval => Arithmetic.theoryStep step
   | .gaussianVariableEliminiation => Arithmetic.theoryStep step
   | .arithmeticSubtermGeneralization => Arithmetic.theoryStep step
-  | .answerLiteralRemoval => unimplemented step
-  | .answerLiteralJoinWithConstraints => unimplemented step
-  | .answerLiteralJoinAsIte => unimplemented step
-  | .avatarAssertionReintroduction => unreachable step "only synthesis runs it, \
-    which the tactic does not ask for"
-  | .casesSimp => unimplemented step
   | .alascaVirasQe => Arithmetic.theoryStep step
-  | .boolSimp => unimplemented step
-  | .flexFlexSimplification => unimplemented step
-  | .betaEtaNormalization => unimplemented step
-  | .notProxyClausificationSimplifying => unimplemented step
-  | .andProxyClausificationSimplifying => unimplemented step
-  | .orProxyClausificationSimplifying => unimplemented step
-  | .impProxyClausificationSimplifying => unimplemented step
-  | .iffProxyClausificationSimplifying => unimplemented step
-  | .xorProxyClausificationSimplifying => unimplemented step
-  | .sigmaProxyClausificationSimplifying => unimplemented step
-  | .piProxyClausificationSimplifying => unimplemented step
-  | .equalityProxyClausificationSimplifying => unimplemented step
-  | .functionDefinitionDemodulation => unreachable step "it rewrites with \
-    recursive function definitions, which the tactic does not send"
-  | .genericSimplifyingInferenceLast => unimplemented step
-  | .genericGeneratingInference => unimplemented step
   | .constrainedResolution => Arithmetic.theoryStep step
-  | .constrainedFactoring => unreachable step "no inference of this vampire \
-    makes it"
-  | .functionDefinitionRewriting => unimplemented step
   -- Constrained superposition is superposition with the pairs the unifier
   -- could not unify left among the conclusion's literals.
   | .constrainedSuperposition => Rewrite.superposition step
   | .equalityFactoring => Resolution.equalityFactoring step
-  | .termAlgebraInjectivityGenerating => unimplemented step
-  | .termAlgebraAcyclicity => unimplemented step
-  | .foolParamodulation => unimplemented step
-  | .inductionHyperresolution => unimplemented step
   | .instantiation => Arithmetic.theoryStep step
   | .alascaFourierMotzkin => Arithmetic.theoryStep step
   | .alascaIntegerFourierMotzkin => Arithmetic.theoryStep step
@@ -161,60 +114,13 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaCoherence => Arithmetic.theoryStep step
   | .alascaCoherenceNormalization => Arithmetic.theoryStep step
   | .alascaVariableElimination => Arithmetic.theoryStep step
-  | .argCong => unimplemented step
-  | .injectivity => unimplemented step
-  | .primitiveInstantiation => unimplemented step
-  | .imitation => unimplemented step
-  | .projection => unimplemented step
-  | .leibnizElimination => unimplemented step
-  | .negativeExtensionality => unimplemented step
-  | .positiveExtensionality => unimplemented step
-  | .eqToDiseq => unimplemented step
-  | .heuristicInstantiation => unimplemented step
-  | .notProxyClausification => unimplemented step
-  | .andProxyClausification => unimplemented step
-  | .orProxyClausification => unimplemented step
-  | .impProxyClausification => unimplemented step
-  | .iffProxyClausification => unimplemented step
-  | .xorProxyClausification => unimplemented step
-  | .sigmaProxyClausification => unimplemented step
-  | .piProxyClausification => unimplemented step
-  | .equalityProxyClausification => unimplemented step
-  | .genericGeneratingInferenceLast => unimplemented step
-  | .genericNonspecificInference => unimplemented step
-  | .hilbertsChoiceInstance => unimplemented step
   | .equalityProxyReplacement => Definition.equalityProxyReplacement step
   | .equalityProxyDefinition => Definition.definitionStep step
   | .equalityProxyAxiom => Definition.equalityProxyAxiom step
   | .alascaIntegralityAxiom => Arithmetic.theoryStep step
-  | .predicateDefinitionUnfolding => unimplemented step
-  | .predicateDefinitionMerging => unimplemented step
-  | .predicateElimination => unimplemented step
   | .inequalitySplitting => Definition.inequalitySplitting step
   | .inequalitySplittingNameIntroduction => Definition.inequalitySplittingName step
-  | .distinctnessAxiom => unimplemented step
-  | .booleanTermEncoding => unimplemented step
-  | .foolElimination => unimplemented step
-  | .foolIteDefinition => unimplemented step
-  | .foolLetDefinition => unimplemented step
-  | .foolFormulaDefinition => unimplemented step
-  | .foolMatchDefinition => unimplemented step
-  | .colorUnblocking => unimplemented step
-  | .satColorElimination => unimplemented step
-  | .formulify => unimplemented step
-  | .fmbFlattening => unimplemented step
-  | .fmbFuncDef => unimplemented step
-  | .fmbDefIntro => unimplemented step
-  | .modelNotFound => unimplemented step
-  | .addSortPredicates => unimplemented step
-  | .addSortFunctions => unimplemented step
-  | .answerLiteralResolver => unimplemented step
   | .theoryTautologySatConflict => Closure.conflict step
-  | .genericAvatarInference => unimplemented step
-  | .avatarRefutationSmt => unimplemented step
-  | .genericAvatarInferenceLast => unimplemented step
-  | .genericNonspecificInferenceLast => unimplemented step
-  | .genericTheoryAxiom => unimplemented step
   | .thaCommutativity => Arithmetic.theoryStep step
   | .thaAssociativity => Arithmetic.theoryStep step
   | .thaRightIdentity => Arithmetic.theoryStep step
@@ -253,6 +159,103 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .thaTrunc4 => Arithmetic.theoryStep step
   | .thaArrayExtensionality => Arithmetic.theoryStep step
   | .thaBooleanArrayExtensionality => Arithmetic.theoryStep step
+
+  -- Ruled out: these cannot reach a proof the tactic asked for, and say why.
+  | .negatedConjecture => unreachable step "it negates a TPTP conjecture, and \
+    the tactic states the goal as a negated conjecture already"
+  | .backwardSubsumptionDemodulation => unreachable step "this vampire records \
+    nothing of how it used its premises, and the tactic forces `bsd=off`"
+  | .globalSubsumption => unreachable step "it rests on a propositional proof \
+    this vampire does not keep, and the tactic forces `gs=off`"
+  | .avatarAssertionReintroduction => unreachable step "only synthesis runs it, \
+    which the tactic does not ask for"
+  | .functionDefinitionDemodulation => unreachable step "it rewrites with \
+    recursive function definitions, which the tactic does not send"
+  | .constrainedFactoring => unreachable step "no inference of this vampire \
+    makes it"
+
+  -- Not implemented yet: admitted only under `+admit`.
+  | .genericFormulaClauseTransformation => unimplemented step
+  | .answerLiteralInjection => unimplemented step
+  | .answerLiteralInputSkolemisation => unimplemented step
+  | .claimDefinition => unimplemented step
+  | .skolemSymbolIntroduction => unimplemented step
+  | .genericFormulaClauseTransformationLast => unimplemented step
+  | .genericSimplifyingInference => unimplemented step
+  | .reorderLiterals => unimplemented step
+  | .termAlgebraDistinctness => unimplemented step
+  | .termAlgebraPositiveInjectivitySimplifying => unimplemented step
+  | .termAlgebraNegativeInjectivitySimplifying => unimplemented step
+  | .answerLiteralRemoval => unimplemented step
+  | .answerLiteralJoinWithConstraints => unimplemented step
+  | .answerLiteralJoinAsIte => unimplemented step
+  | .casesSimp => unimplemented step
+  | .boolSimp => unimplemented step
+  | .flexFlexSimplification => unimplemented step
+  | .betaEtaNormalization => unimplemented step
+  | .notProxyClausificationSimplifying => unimplemented step
+  | .andProxyClausificationSimplifying => unimplemented step
+  | .orProxyClausificationSimplifying => unimplemented step
+  | .impProxyClausificationSimplifying => unimplemented step
+  | .iffProxyClausificationSimplifying => unimplemented step
+  | .xorProxyClausificationSimplifying => unimplemented step
+  | .sigmaProxyClausificationSimplifying => unimplemented step
+  | .piProxyClausificationSimplifying => unimplemented step
+  | .equalityProxyClausificationSimplifying => unimplemented step
+  | .genericSimplifyingInferenceLast => unimplemented step
+  | .genericGeneratingInference => unimplemented step
+  | .functionDefinitionRewriting => unimplemented step
+  | .termAlgebraInjectivityGenerating => unimplemented step
+  | .termAlgebraAcyclicity => unimplemented step
+  | .foolParamodulation => unimplemented step
+  | .inductionHyperresolution => unimplemented step
+  | .argCong => unimplemented step
+  | .injectivity => unimplemented step
+  | .primitiveInstantiation => unimplemented step
+  | .imitation => unimplemented step
+  | .projection => unimplemented step
+  | .leibnizElimination => unimplemented step
+  | .negativeExtensionality => unimplemented step
+  | .positiveExtensionality => unimplemented step
+  | .eqToDiseq => unimplemented step
+  | .heuristicInstantiation => unimplemented step
+  | .notProxyClausification => unimplemented step
+  | .andProxyClausification => unimplemented step
+  | .orProxyClausification => unimplemented step
+  | .impProxyClausification => unimplemented step
+  | .iffProxyClausification => unimplemented step
+  | .xorProxyClausification => unimplemented step
+  | .sigmaProxyClausification => unimplemented step
+  | .piProxyClausification => unimplemented step
+  | .equalityProxyClausification => unimplemented step
+  | .genericGeneratingInferenceLast => unimplemented step
+  | .genericNonspecificInference => unimplemented step
+  | .hilbertsChoiceInstance => unimplemented step
+  | .predicateDefinitionUnfolding => unimplemented step
+  | .predicateDefinitionMerging => unimplemented step
+  | .predicateElimination => unimplemented step
+  | .distinctnessAxiom => unimplemented step
+  | .booleanTermEncoding => unimplemented step
+  | .foolElimination => unimplemented step
+  | .foolIteDefinition => unimplemented step
+  | .foolLetDefinition => unimplemented step
+  | .foolFormulaDefinition => unimplemented step
+  | .foolMatchDefinition => unimplemented step
+  | .colorUnblocking => unimplemented step
+  | .satColorElimination => unimplemented step
+  | .formulify => unimplemented step
+  | .fmbFlattening => unimplemented step
+  | .fmbFuncDef => unimplemented step
+  | .fmbDefIntro => unimplemented step
+  | .modelNotFound => unimplemented step
+  | .addSortPredicates => unimplemented step
+  | .addSortFunctions => unimplemented step
+  | .answerLiteralResolver => unimplemented step
+  | .genericAvatarInference => unimplemented step
+  | .avatarRefutationSmt => unimplemented step
+  | .genericAvatarInferenceLast => unimplemented step
+  | .genericNonspecificInferenceLast => unimplemented step
+  | .genericTheoryAxiom => unimplemented step
   | .thaBooleanArrayWrite1 => unimplemented step
   | .thaBooleanArrayWrite2 => unimplemented step
   | .thaArrayWrite1 => unimplemented step
