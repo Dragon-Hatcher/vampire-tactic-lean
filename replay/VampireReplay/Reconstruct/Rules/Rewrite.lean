@@ -267,19 +267,19 @@ def superposition (step : Step) : ReconstructM Expr := do
             if ← isDefEq source «from» then
               return ← placeLiteral inner (← rewriteWith rw vars heq to i h)
             -- An abstracting unifier did not make the rewritten term and the
-            -- equation's side one: what it could not unify it left as a
-            -- disequality among the conclusion's literals. So either that
-            -- disequality holds, and it is the conclusion, or the two terms
-            -- are equal after all and the equation rewrites the premise once
-            -- composed with them being equal.
-            let differ ← withLocalDeclD `h (← mkAppM ``Ne #[source, «from»])
-              fun hne => do mkLambdaFVars #[hne] (← placeLiteral inner hne)
-            let agree ← withLocalDeclD `h (← mkAppM ``Eq #[source, «from»])
-              fun hc => do
-                let bridged ← mkAppM ``Eq.trans #[hc, heq]
-                mkLambdaFVars #[hc]
-                  (← placeLiteral inner (← rewriteWith rw vars bridged to i h))
-            mkAppM ``Classical.byCases #[agree, differ]))
+            -- equation's side one: what it could not unify it left as
+            -- disequalities among the conclusion's literals, between subterms
+            -- of the two. So either one of those holds, and it is the
+            -- conclusion, or each pair is equal, the two terms are equal by
+            -- congruence at those pairs, and the equation rewrites the premise
+            -- once composed with that.
+            underConstraints step vars inner fun equal => do
+              let some same ← equalUnder equal source «from»
+                | throwError "the term rewritten{indentExpr source}\nis not \
+                    the side of the equation{indentExpr «from»}\neven with \
+                    every pair the unifier deferred equal"
+              let bridged ← mkEqTrans same heq
+              placeLiteral inner (← rewriteWith rw vars bridged to i h)))
     mkLambdaFVars xs body
 
 end Vampire.Reconstruct.Rewrite
