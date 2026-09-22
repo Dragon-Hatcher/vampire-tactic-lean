@@ -249,15 +249,17 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
         if let some denied := (← instantiateMVars (← inferType fact)).not? then
           -- Through a definition applied, as an equality proxy is.
           unless denied.headBeta.isAppOfArity ``Eq 3 do continue
+          -- Rolled back if it fails, as every attempt that may not succeed is.
           try
-            let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
-            return ← mkAppOptM ``absurd
-              #[some denied, some (mkConst ``False), some held, some fact]
+            return ← rollingBack do
+              let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
+              mkAppOptM ``absurd
+                #[some denied, some (mkConst ``False), some held, some fact]
           catch _ => pure ()
     return ← contradiction facts none
   -- A comparison, which is what the numbers settle.
   try
-    contradiction facts (some goal)
+    rollingBack (contradiction facts (some goal))
   catch _ =>
     -- Supposing it fails is another set of facts, and they are taken apart
     -- the same way anything else is: a denied comparison among them says

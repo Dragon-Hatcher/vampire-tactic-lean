@@ -150,6 +150,17 @@ structure State where
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
 /--
+`x`, with what it did to the metavariables undone if it fails.
+
+An attempt that may not succeed -- asking a decision procedure, say -- can
+assign metavariables before it gives up, and those assignments would otherwise
+outlive it. Replay's own caches are kept: what they hold is true either way.
+-/
+def rollingBack (x : ReconstructM α) : ReconstructM α := do
+  let saved ← Meta.saveState
+  try x catch e => saved.restore; throw e
+
+/--
 Raised for a name vampire introduced itself, by skolemisation or AVATAR. Such a
 name stands for nothing in the Lean goal, so the step it appears in cannot even
 be stated until those rules are implemented.

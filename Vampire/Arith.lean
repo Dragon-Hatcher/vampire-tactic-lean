@@ -80,8 +80,10 @@ def rearranged (a b : Expr) : MetaM (Option Expr) := do
   let some (nonnegB, dB, _, saysB) ← below b | return none
   unless nonnegA == nonnegB do return none
   let same ← mkFreshExprMVar (← mkEq dA dB)
+  -- A failed attempt is rolled back, so that what it assigned on the way does
+  -- not outlive it.
   try
-    AtomM.run .reducible (Mathlib.Tactic.Ring.proveEq same.mvarId!)
+    commitIfNoEx (AtomM.run .reducible (Mathlib.Tactic.Ring.proveEq same.mvarId!))
   catch _ => return none
   -- The two differ only where the difference stands, so one is the other with
   -- it replaced, and `same` says the replacement holds.
@@ -146,7 +148,9 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
         of any numbers:{MessageData.joinSep stated.toList ""}\
         {MessageData.joinSep said ""}"
     | (name, ask) :: rest =>
-      try ask
+      -- A procedure that fails is rolled back before the next is asked:
+      -- what it assigned on the way would otherwise be left for the next.
+      try commitIfNoEx ask
       catch e => firstAnswer rest (failures.push (name, e))
   let answer ← firstAnswer procedures #[]
   -- What a procedure assigned is checked against what it was asked, because
@@ -165,7 +169,7 @@ integers, the rationals and the reals are; a sort that does not cancel has no
 instance and gets nothing.
 -/
 def cancelling (x z w : Expr) : MetaM (Option Expr) := do
-  try
+  try commitIfNoEx do
     let cancel ← mkAppOptM ``mul_left_cancel₀
       #[none, none, none, none, some x, some z, some w]
     -- What is left to take is the two hypotheses; anything else unsettled
