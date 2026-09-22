@@ -169,3 +169,13 @@ lean_lib Vampire where
 @[test_driver]
 lean_lib test where
   globs := #[.submodules `test]
+
+/--
+Elaborates the corpus under `problems/` and reports what failed: all of it by
+default, or what the arguments name -- a directory of it, problem names, or
+`--split` and a file of `scripts/splits/`. `lake test` runs the `smoke` split.
+-/
+script problems (args) do
+  let child ← IO.Process.spawn {
+    cmd := "python3", args := #["scripts/run-problems.py"] ++ args.toArray }
+  return (← child.wait).toUInt8.toUInt32

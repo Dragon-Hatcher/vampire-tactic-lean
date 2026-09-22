@@ -4,6 +4,7 @@
     ./scripts/run-problems.py                 # the whole corpus
     ./scripts/run-problems.py tptp            # one directory of it
     ./scripts/run-problems.py ALG033+1 ...    # named problems, wherever they live
+    ./scripts/run-problems.py --split smoke   # the problems a file of scripts/splits/ names
 
 Each problem is a standalone Lean file whose only proof is `by vampire`, so running
 one is just `lean` on it under the package's `LEAN_PATH`. They are independent, so
@@ -95,7 +96,11 @@ def main() -> None:
     ap.add_argument("-j", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--full", action="store_true", help="whole error, not its first line")
+    ap.add_argument("--split", help="a file under scripts/splits/, one problem per line")
     args = ap.parse_args()
+    if args.split:
+        split = HERE / "scripts" / "splits" / args.split
+        args.names += [l.strip() for l in split.read_text().split("\n") if l.strip()]
 
     env = dict(os.environ, LEAN_PATH=lean_path())
     files = select(args.names)
