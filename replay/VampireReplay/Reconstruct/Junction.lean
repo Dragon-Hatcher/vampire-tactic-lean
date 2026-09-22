@@ -215,6 +215,41 @@ partial def introParts (chain : Expr) (offset : Nat)
   return mkApp4 (mkConst ``And.intro) left right
     (← introParts left offset component) (← introParts right (offset + n) component)
 
+/-!
+Equivalences where `none` stands for "unchanged", as `Simp.Result` has it: a
+walk over a formula mostly leaves what it walks alone, and writing
+`Iff.refl` there, and `Iff.trans` around it, is most of the term it builds.
+-/
+
+/-- `a ↔ a` where nothing changed, and the equivalence itself otherwise. -/
+def iffOrRefl (a : Expr) (proof? : Option Expr) : ReconstructM Expr :=
+  match proof? with
+  | some proof => pure proof
+  | none => mkAppOptM ``Iff.refl #[some a]
+
+/-- One equivalence and then the other, either of which may be no change. -/
+def iffTrans? (first second : Option Expr) : ReconstructM (Option Expr) :=
+  match first, second with
+  | none, q => pure q
+  | p, none => pure p
+  | some p, some q => some <$> mkAppM ``Iff.trans #[p, q]
+
+/--
+A congruence lemma over two parts -- `and_congr`, `imp_congr` and the like --
+applied where either part changed, and no change where neither did.
+-/
+def congr2? (lemma_ : Name) (a b : Expr) (pa pb : Option Expr) :
+    ReconstructM (Option Expr) := do
+  if pa.isNone && pb.isNone then return none
+  some <$> mkAppM lemma_ #[← iffOrRefl a pa, ← iffOrRefl b pb]
+
+/--
+A congruence lemma over one part -- `not_congr`, `forall_congr'`,
+`exists_congr` -- applied where it changed.
+-/
+def congr1? (lemma_ : Name) (proof? : Option Expr) : ReconstructM (Option Expr) :=
+  proof?.mapM fun proof => mkAppM lemma_ #[proof]
+
 /--
 The congruence of a junction's arguments, folded the way `junction` folds them.
 

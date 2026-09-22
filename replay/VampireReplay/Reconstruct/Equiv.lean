@@ -62,37 +62,41 @@ what relates them. Every case moves toward the normal form, so it terminates.
 Junction nesting is left alone: merging it is a separate step, and comparing
 parts by index already allows for either shape.
 -/
-partial def toNNF (e : Expr) : ReconstructM (Expr × Expr) := do
+partial def toNNF (e : Expr) : ReconstructM (Expr × Option Expr) := do
   let e ← instantiateMVars e
   if let some (rewritten, step) ← nnfStep e then
     let (normal, rest) ← toNNF rewritten
-    return (normal, ← mkAppM ``Iff.trans #[step, rest])
+    return (normal, ← iffTrans? (some step) rest)
   for (fn, lemma) in [(``And, ``and_congr), (``Or, ``or_congr)] do
     if e.isAppOfArity fn 2 then
       let (l, pl) ← toNNF e.appFn!.appArg!
       let (r, pr) ← toNNF e.appArg!
-      return (mkApp2 (mkConst fn) l r, ← mkAppM lemma #[pl, pr])
+      if pl.isNone && pr.isNone then return (e, none)
+      return (mkApp2 (mkConst fn) l r,
+        ← congr2? lemma e.appFn!.appArg! e.appArg! pl pr)
   if e.not?.isSome then
     -- Anything but an atom under a negation was taken apart above.
-    return (e, ← mkAppOptM ``Iff.refl #[some e])
+    return (e, none)
   if e.isAppOfArity ``Exists 2 then
     match e.appArg! with
     | .lam n d body bi =>
       return ← withLocalDeclD `x d fun x => do
-        let (normal, proof) ← toNNF (body.instantiate1 x)
+        let (normal, proof?) ← toNNF (body.instantiate1 x)
+        let some proof := proof? | return (e, none)
         let normalLam := Expr.lam n d (normal.abstract #[x]) bi
         return (← mkAppM ``Exists #[normalLam],
-          ← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof])
-    | _ => return (e, ← mkAppOptM ``Iff.refl #[some e])
+          some (← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof]))
+    | _ => return (e, none)
   match e with
   | .forallE _ d body _ =>
     if !(← isProp d) || body.hasLooseBVars then
       return ← withLocalDeclD `x d fun x => do
-        let (normal, proof) ← toNNF (body.instantiate1 x)
+        let (normal, proof?) ← toNNF (body.instantiate1 x)
+        let some proof := proof? | return (e, none)
         return (← mkForallFVars #[x] normal,
-          ← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof])
-    return (e, ← mkAppOptM ``Iff.refl #[some e])
-  | _ => return (e, ← mkAppOptM ``Iff.refl #[some e])
+          some (← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof]))
+    return (e, none)
+  | _ => return (e, none)
 
 /--
 `source → target`, where the two say the same thing up to the order and nesting
@@ -427,25 +431,26 @@ changes what a negation sits on and so what the shapes of the two sides are.
 Both are put the same way round first, so that what is compared is the shape
 and not which way a literal happens to be written.
 -/
-private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
-  let refl (e : Expr) : ReconstructM (Expr × Expr) := do
-    return (e, ← mkAppOptM ``Iff.refl #[some e])
-  let congruence (fn : Name) (a b : Expr) : ReconstructM (Expr × Expr) := do
+private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr) := do
+  let congruence (fn : Name) (a b : Expr) : ReconstructM (Expr × Option Expr) := do
     let (ca, pa) ← sameWayRound a
     let (cb, pb) ← sameWayRound b
+    if pa.isNone && pb.isNone then return (e, none)
     let lemmaName := if fn == ``And then ``and_congr
       else if fn == ``Or then ``or_congr else ``iff_congr
-    return (mkApp2 (mkConst fn) ca cb, ← mkAppM lemmaName #[pa, pb])
+    return (mkApp2 (mkConst fn) ca cb, ← congr2? lemmaName a b pa pb)
   match e with
   | .forallE name τ body _ =>
     if (← isProp τ) && !body.hasLooseBVars then
       let (ca, pa) ← sameWayRound τ
       let (cb, pb) ← sameWayRound body
-      return (← mkArrow ca cb, ← mkAppM ``imp_congr #[pa, pb])
+      if pa.isNone && pb.isNone then return (e, none)
+      return (← mkArrow ca cb, ← congr2? ``imp_congr τ body pa pb)
     withLocalDeclD name τ fun x => do
-      let (inner, proof) ← sameWayRound (body.instantiate1 x)
+      let (inner, proof?) ← sameWayRound (body.instantiate1 x)
+      let some proof := proof? | return (e, none)
       return (← mkForallFVars #[x] inner,
-        ← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof])
+        some (← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof]))
   | .mdata _ inner => sameWayRound inner
   | _ =>
     match_expr e with
@@ -455,9 +460,9 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
       -- Named rather than referred to: the lemmas are Mathlib's, which this
       -- library does not import, and the goal that has numbers in it does.
       let flip (τ : Expr) (lemma_ : Name) (x y : Expr) (flipped : Expr) :
-          ReconstructM (Option (Expr × Expr)) := do
+          ReconstructM (Option (Expr × Option Expr)) := do
         unless (arithmeticSort (← whnf τ)).isSome do return none
-        return some (flipped, ← mkAppOptM lemma_ #[some τ, none, some x, some y])
+        return some (flipped, some (← mkAppOptM lemma_ #[some τ, none, some x, some y]))
       let flipped? ← match_expr a with
         | LT.lt τ _ x y => flip τ `not_lt x y (← mkAppM ``LE.le #[y, x])
         | LE.le τ _ x y => flip τ `not_le x y (← mkAppM ``LT.lt #[y, x])
@@ -466,13 +471,14 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
       | some result => return result
       | none =>
         let (ca, pa) ← sameWayRound a
-        return (mkApp (mkConst ``Not) ca, ← mkAppM ``not_congr #[pa])
+        let some pa := pa | return (e, none)
+        return (mkApp (mkConst ``Not) ca, some (← mkAppM ``not_congr #[pa]))
     -- `a ≠ b` is `¬(a = b)` by definition, and stated that way the equation
     -- inside can be turned about like any other.
     | Ne α x y =>
       let negated := mkApp (mkConst ``Not) (← mkAppOptM ``Eq #[some α, some x, some y])
-      return (negated, ← mkExpectedTypeHint (← mkAppOptM ``Iff.refl #[some e])
-        (mkApp2 (mkConst ``Iff) e negated))
+      return (negated, some (← mkExpectedTypeHint (← mkAppOptM ``Iff.refl #[some e])
+        (mkApp2 (mkConst ``Iff) e negated)))
     | And a b => congruence ``And a b
     | Or a b => congruence ``Or a b
     | Iff a b => congruence ``Iff a b
@@ -486,17 +492,18 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
           #[← mkAppOptM ``iff_of_eq #[some x, some y],
             ← mkAppOptM ``propext #[some x, some y]]
         return (mkApp2 (mkConst ``Iff) cx cy,
-          ← mkAppM ``Iff.trans #[bridge, ← mkAppM ``iff_congr #[px, py]])
-      refl e
+          ← iffTrans? (some bridge) (← congr2? ``iff_congr x y px py))
+      return (e, none)
     | Exists _ p =>
       match p with
       | .lam name τ body _ =>
         withLocalDeclD name τ fun x => do
-          let (inner, proof) ← sameWayRound (body.instantiate1 x)
+          let (inner, proof?) ← sameWayRound (body.instantiate1 x)
+          let some proof := proof? | return (e, none)
           return (← mkAppM ``Exists #[← mkLambdaFVars #[x] inner],
-            ← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof])
-      | _ => refl e
-    | _ => refl e
+            some (← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof]))
+      | _ => return (e, none)
+    | _ => return (e, none)
 
 /-- `a ↔ b`, for two ways of writing one formula. -/
 def equiv (a b : Expr) : ReconstructM Expr := do
@@ -504,15 +511,21 @@ def equiv (a b : Expr) : ReconstructM Expr := do
   let b ← instantiateMVars b
   if ← isDefEq a b then
     return ← mkAppOptM ``Iff.refl #[some a]
+  -- Each side put the same way round and into negation normal form, and the
+  -- two results related: `a ↔ wa ↔ na ↔ nb ↔ wb ↔ b`, where any of the steps
+  -- that changed nothing is left out.
   let (wa, qa) ← sameWayRound a
   let (wb, qb) ← sameWayRound b
   let (na, pa) ← toNNF wa
   let (nb, pb) ← toNNF wb
   let core ← equivNormal na nb
-  let core ← mkAppM ``Iff.trans
-    #[pa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[pb]]]
-  mkAppM ``Iff.trans
-    #[qa, ← mkAppM ``Iff.trans #[core, ← mkAppM ``Iff.symm #[qb]]]
+  let symm? (p? : Option Expr) : ReconstructM (Option Expr) :=
+    p?.mapM fun p => mkAppM ``Iff.symm #[p]
+  let toA ← iffTrans? qa pa
+  let fromB ← iffTrans? (← symm? pb) (← symm? qb)
+  let some whole ← iffTrans? (← iffTrans? toA (some core)) fromB
+    | unreachable!
+  return whole
 
 /--
 A proof of `conclusion` from `proof : stated`, where the two are one formula

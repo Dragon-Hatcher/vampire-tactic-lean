@@ -47,13 +47,21 @@ private def impIffNotOr (a b : Expr) : ReconstructM Expr := do
   mkAppOptM ``Decidable.imp_iff_not_or #[some a, some b, some decidable]
 
 /--
+What a normalised part's proof is, written out: `Iff.refl` where the walk left
+it alone, for a lemma that needs one either way.
+-/
+private def proofOf (part : Expr × Expr × Option Expr) : ReconstructM Expr :=
+  iffOrRefl part.1 part.2.2
+
+/--
 De Morgan over a junction, one argument at a time, then the congruence of the
 arguments: what a junction at negative polarity comes to.
 -/
 private partial def distributed (deMorgan congruence fn unit : Name)
-    (givens : Array Expr) (parts : Array (Expr × Expr × Expr)) (i : Nat) :
+    (givens : Array Expr) (parts : Array (Expr × Expr × Option Expr)) (i : Nat) :
     ReconstructM Expr := do
-  let some (_, _, proof) := parts[i]? | throwError "missing argument"
+  let some part := parts[i]? | throwError "missing argument"
+  let proof ← proofOf part
   if i + 1 == parts.size then return proof
   let some head := givens[i]? | throwError "missing argument"
   let tail := junction fn unit (givens.extract (i + 1) givens.size)
@@ -70,14 +78,15 @@ positive polarity that of `⟦f⟧`, at negative polarity that of `¬⟦f⟧`.
 
 `expand` picks `nnf` over `ennf`, the two differing only over equivalences.
 Returns what was given as well, since a lemma about it has to be stated at it.
+The equivalence is `none` where the walk changed nothing.
 -/
 partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
     (vars : Vars) (f : Formula) (polarity : Bool) :
-    ReconstructM (Expr × Expr × Expr) := do
+    ReconstructM (Expr × Expr × Option Expr) := do
   let given ← Reconstruct.formula sorts vars f
   let source := if polarity then given else mkApp (mkConst ``Not) given
-  let unchanged : ReconstructM (Expr × Expr × Expr) := do
-    return (source, source, ← mkAppOptM ``Iff.refl #[some source])
+  let unchanged : ReconstructM (Expr × Expr × Option Expr) := do
+    return (source, source, none)
   let sub (i : Nat) : ReconstructM Formula := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     return g
@@ -88,7 +97,7 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       -- A negative literal is `¬a`, and its complement is `a`.
       match given.not? with
       | some inner =>
-        return (source, inner, ← mkAppOptM ``Classical.not_not #[some inner])
+        return (source, inner, some (← mkAppOptM ``Classical.not_not #[some inner]))
       | none => unchanged
   | .«true» | .«false» =>
     if polarity then unchanged
@@ -98,9 +107,11 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       -- where no such constant is left under a negation.
       throwError "nnf cannot state{indentExpr source}"
     else if given.isConstOf ``True then
-      return (source, mkConst ``False, ← mkAppM ``iff_of_eq #[mkConst ``not_true_eq_false])
+      return (source, mkConst ``False,
+        some (← mkAppM ``iff_of_eq #[mkConst ``not_true_eq_false]))
     else
-      return (source, mkConst ``True, ← mkAppM ``iff_of_eq #[mkConst ``not_false_eq_true])
+      return (source, mkConst ``True,
+        some (← mkAppM ``iff_of_eq #[mkConst ``not_false_eq_true]))
   | .and | .or =>
     let isAnd := (← connectiveOf f) matches .and
     let parts ← f.subformulas.mapM (normalize expand sorts vars · polarity)
@@ -114,9 +125,11 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       let (fn, unit) := if isAnd == polarity then (``And, ``True) else (``Or, ``False)
       let result := junction fn unit results
       if polarity then
-        -- Only the arguments changed, so the proof is their congruence.
+        -- Only the arguments changed, so the proof is their congruence, and
+        -- where none did there is nothing to prove.
+        if parts.all (·.2.2.isNone) then return (source, source, none)
         let congruence := if isAnd then ``and_congr else ``or_congr
-        return (source, result, ← congrJunction congruence (parts.map (·.2.2)))
+        return (source, result, some (← congrJunction congruence (← parts.mapM proofOf)))
       else
         -- De Morgan, one argument at a time, then their congruence.
         let givens ← f.subformulas.mapM (Reconstruct.formula sorts vars)
@@ -125,21 +138,24 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
           else (``not_or, ``and_congr)
         let (givenFn, givenUnit) := if isAnd then (``And, ``True) else (``Or, ``False)
         return (source, result,
-          ← distributed deMorgan congruence givenFn givenUnit givens parts 0)
+          some (← distributed deMorgan congruence givenFn givenUnit givens parts 0))
   | .imp =>
     let left ← Reconstruct.formula sorts vars (← sub 0)
     let right ← Reconstruct.formula sorts vars (← sub 1)
-    let (_, resultL, proofL) ← normalize expand sorts vars (← sub 0) !polarity
-    let (_, resultR, proofR) ← normalize expand sorts vars (← sub 1) polarity
+    let partL ← normalize expand sorts vars (← sub 0) !polarity
+    let partR ← normalize expand sorts vars (← sub 1) polarity
+    let (_, resultL, _) := partL
+    let (_, resultR, _) := partR
+    -- An implication becomes a disjunction whatever its sides do, so the step
+    -- is taken either way, and their congruence only where one changed.
     if polarity then
       return (source, mkApp2 (mkConst ``Or) resultL resultR,
-        ← mkAppM ``Iff.trans
-          #[← impIffNotOr left right, ← mkAppM ``or_congr #[proofL, proofR]])
+        ← iffTrans? (some (← impIffNotOr left right))
+          (← congr2? ``or_congr partL.1 partR.1 partL.2.2 partR.2.2))
     else
       return (source, mkApp2 (mkConst ``And) resultL resultR,
-        ← mkAppM ``Iff.trans
-          #[← mkAppOptM ``Classical.not_imp #[some left, some right],
-            ← mkAppM ``and_congr #[proofL, proofR]])
+        ← iffTrans? (some (← mkAppOptM ``Classical.not_imp #[some left, some right]))
+          (← congr2? ``and_congr partL.1 partR.1 partL.2.2 partR.2.2))
   | .iff | .xor =>
     let isIff := (← connectiveOf f) matches .iff
     let left ← Reconstruct.formula sorts vars (← sub 0)
@@ -149,19 +165,29 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       -- polarity, and negative polarity turns `<=>` into `<+>` and back.
       let (_, resultL, proofL) ← normalize expand sorts vars (← sub 0) true
       let (_, resultR, proofR) ← normalize expand sorts vars (← sub 1) true
-      let congruence ← mkAppM ``iff_congr #[proofL, proofR]
+      let congruence ← congr2? ``iff_congr left right proofL proofR
       let equivalence := mkApp2 (mkConst ``Iff) resultL resultR
       if isIff == polarity then
-        return (source, equivalence, congruence)
+        if isIff then return (source, equivalence, congruence)
+        -- `¬⟦l <+> r⟧` is `¬¬(l ↔ r)`, whose double negation goes first.
+        return (source, equivalence,
+          ← iffTrans? (some (← mkAppOptM ``Classical.not_not
+            #[some (mkApp2 (mkConst ``Iff) left right)])) congruence)
       else
         return (source, mkApp (mkConst ``Not) equivalence,
-          ← mkAppM ``not_congr #[congruence])
+          ← congr1? ``not_congr congruence)
     else if isIff == polarity then
       -- `l <=> r`, expanded into `(l => r) & (r => l)`.
-      let (_, notL, proofNotL) ← normalize expand sorts vars (← sub 0) false
-      let (_, resultR, proofR) ← normalize expand sorts vars (← sub 1) true
-      let (_, notR, proofNotR) ← normalize expand sorts vars (← sub 1) false
-      let (_, resultL, proofL) ← normalize expand sorts vars (← sub 0) true
+      let partNotL ← normalize expand sorts vars (← sub 0) false
+      let partR ← normalize expand sorts vars (← sub 1) true
+      let partNotR ← normalize expand sorts vars (← sub 1) false
+      let partL ← normalize expand sorts vars (← sub 0) true
+      let (_, notL, _) := partNotL
+      let (_, resultR, _) := partR
+      let (_, notR, _) := partNotR
+      let (_, resultL, _) := partL
+      let (proofNotL, proofR) := (← proofOf partNotL, ← proofOf partR)
+      let (proofNotR, proofL) := (← proofOf partNotR, ← proofOf partL)
       let result := mkApp2 (mkConst ``And)
         (mkApp2 (mkConst ``Or) notL resultR) (mkApp2 (mkConst ``Or) notR resultL)
       let expanded ← mkAppM ``Iff.trans
@@ -173,27 +199,31 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
           ← mkAppM ``or_congr #[proofNotR, proofL]]
       let proof ← mkAppM ``Iff.trans #[expanded, congruence]
       if polarity then
-        return (source, result, proof)
+        return (source, result, some proof)
       else
         -- `¬⟦l <+> r⟧` is `¬¬(l ↔ r)`.
-        return (source, result,
-          ← mkAppM ``Iff.trans
+        return (source, result, some (← mkAppM ``Iff.trans
             #[← mkAppOptM ``Classical.not_not
-                #[some (mkApp2 (mkConst ``Iff) left right)], proof])
+                #[some (mkApp2 (mkConst ``Iff) left right)], proof]))
     else
       -- `l <+> r`, expanded into `(l | r) & (~l | ~r)`.
-      let (_, resultL, proofL) ← normalize expand sorts vars (← sub 0) true
-      let (_, resultR, proofR) ← normalize expand sorts vars (← sub 1) true
-      let (_, notL, proofNotL) ← normalize expand sorts vars (← sub 0) false
-      let (_, notR, proofNotR) ← normalize expand sorts vars (← sub 1) false
+      let partL ← normalize expand sorts vars (← sub 0) true
+      let partR ← normalize expand sorts vars (← sub 1) true
+      let partNotL ← normalize expand sorts vars (← sub 0) false
+      let partNotR ← normalize expand sorts vars (← sub 1) false
+      let (_, resultL, _) := partL
+      let (_, resultR, _) := partR
+      let (_, notL, _) := partNotL
+      let (_, notR, _) := partNotR
+      let (proofL, proofR) := (← proofOf partL, ← proofOf partR)
+      let (proofNotL, proofNotR) := (← proofOf partNotL, ← proofOf partNotR)
       let result := mkApp2 (mkConst ``And)
         (mkApp2 (mkConst ``Or) resultL resultR) (mkApp2 (mkConst ``Or) notL notR)
       let congruence ← mkAppM ``and_congr
         #[← mkAppM ``or_congr #[proofL, proofR],
           ← mkAppM ``or_congr #[proofNotL, proofNotR]]
-      return (source, result,
-        ← mkAppM ``Iff.trans
-          #[← mkAppOptM ``not_iff_expand #[some left, some right], congruence])
+      return (source, result, some (← mkAppM ``Iff.trans
+          #[← mkAppOptM ``not_iff_expand #[some left, some right], congruence]))
   | .not =>
     let (innerSource, result, proof) ← normalize expand sorts vars (← sub 0) !polarity
     if polarity then
@@ -202,8 +232,7 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
     else
       let inner ← Reconstruct.formula sorts vars (← sub 0)
       return (source, result,
-        ← mkAppM ``Iff.trans
-          #[← mkAppOptM ``Classical.not_not #[some inner], proof])
+        ← iffTrans? (some (← mkAppOptM ``Classical.not_not #[some inner])) proof)
   | .«forall» | .«exists» =>
     let isForall := (← connectiveOf f) matches .«forall»
     let body ← sub 0
@@ -219,7 +248,7 @@ in past it.
 -/
 partial def quantified (expand : Bool) (sorts : Array (UInt32 × String))
     (body : Formula) (polarity isForall : Bool) (rest : List (UInt32 × String))
-    (vars : Vars) : ReconstructM (Expr × Expr × Expr) := do
+    (vars : Vars) : ReconstructM (Expr × Expr × Option Expr) := do
   match rest with
   | [] => normalize expand sorts vars body polarity
   | (v, sortName) :: rest =>
@@ -227,15 +256,18 @@ partial def quantified (expand : Bool) (sorts : Array (UInt32 × String))
     withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
       let (innerSource, innerResult, innerProof) ←
         quantified expand sorts body polarity isForall rest (vars.insert v x)
-      let congruence ← mkLambdaFVars #[x] innerProof
+      let congruence ← mkLambdaFVars #[x] (← iffOrRefl innerSource innerProof)
       if polarity then
+        let congruent (lemma_ : Name) : ReconstructM (Option Expr) :=
+          if innerProof.isNone then pure none
+          else some <$> mkAppM lemma_ #[congruence]
         if isForall then
           return (← mkForallFVars #[x] innerSource, ← mkForallFVars #[x] innerResult,
-            ← mkAppM ``forall_congr' #[congruence])
+            ← congruent ``forall_congr')
         else
           return (← mkAppM ``Exists #[← mkLambdaFVars #[x] innerSource],
             ← mkAppM ``Exists #[← mkLambdaFVars #[x] innerResult],
-            ← mkAppM ``exists_congr #[congruence])
+            ← congruent ``exists_congr)
       else
         -- The body speaks of its own negation already, so what is left is to
         -- move that negation out past this binder, flipping it.
@@ -246,15 +278,15 @@ partial def quantified (expand : Bool) (sorts : Array (UInt32 × String))
         if isForall then
           return (mkApp (mkConst ``Not) (← mkForallFVars #[x] inside),
             ← mkAppM ``Exists #[← mkLambdaFVars #[x] innerResult],
-            ← mkAppM ``Iff.trans
+            some (← mkAppM ``Iff.trans
               #[← mkAppOptM ``Classical.not_forall #[some τ, some insideOf],
-                ← mkAppM ``exists_congr #[congruence]])
+                ← mkAppM ``exists_congr #[congruence]]))
         else
           return (mkApp (mkConst ``Not) (← mkAppM ``Exists #[insideOf]),
             ← mkForallFVars #[x] innerResult,
-            ← mkAppM ``Iff.trans
+            some (← mkAppM ``Iff.trans
               #[← mkAppOptM ``not_exists #[some τ, some insideOf],
-                ← mkAppM ``forall_congr' #[congruence]])
+                ← mkAppM ``forall_congr' #[congruence]]))
 
 end
 
@@ -267,8 +299,9 @@ private def normalizeStep (expand : Bool) (step : Step) : ReconstructM Expr := d
   let some premise := parent.formula?
     | throwError "normalisation should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
-  let (_, _, proof) ← normalize expand sorts {} premise true
-  let normalised ← mkAppM ``Iff.mp #[proof, premiseProof]
+  let normalised ← match ← normalize expand sorts {} premise true with
+    | (_, _, some proof) => mkAppM ``Iff.mp #[proof, premiseProof]
+    | (_, _, none) => pure premiseProof
   -- Normalising here settles what the formula becomes, but not the order
   -- vampire keeps a junction's arguments in, which is its own; so what the
   -- step claims is what this is stated as.
