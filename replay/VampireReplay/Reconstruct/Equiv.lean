@@ -98,11 +98,10 @@ partial def toNNF (e : Expr) : ReconstructM (Expr × Expr) := do
 `source → target`, where the two say the same thing up to the order and nesting
 of junctions.
 
-Vampire's parser reverses a junction's arguments, so a formula's own reading of
-itself differs from the goal's, and a rule that drops or repeats literals
-leaves the rest in place. Both come to relating two junctions over the same
-parts, which a lookup settles rather than a search: each part of one is found
-among the parts of the other by structural equality.
+A rule that drops or repeats literals leaves the rest in place, but can nest
+what is left differently, so this comes to relating two junctions over the
+same parts, which a lookup settles rather than a search: each part of one is
+found among the parts of the other by structural equality.
 
 A disjunct of the source that is absent from the target has to be refutable on
 its own, as `t ≠ t` is, which is how a removed literal is accounted for.
@@ -282,10 +281,10 @@ Congruence rather than implication, because a formula's parts sit in positions
 of either polarity -- the left of an arrow reverses -- and only an equivalence
 composes through all of them.
 
-Vampire's parser reverses a junction's arguments, so its reading of a formula
-differs from the goal's in the order of every conjunction and disjunction. The
-parts are therefore paired in order and, failing that, in reverse: two fixed
-pairings, not a search among them.
+Vampire's parser keeps a junction's arguments in the order it read them, and
+the translation writes them in the goal's order, so the parts of two junctions
+are paired in order: there is nothing to align, and were the two to disagree
+the step would fail rather than a pairing be guessed.
 -/
 partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   -- A hypothesis reaches here through elaboration, so its type can still be a

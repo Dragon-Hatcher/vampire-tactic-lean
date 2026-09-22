@@ -15,9 +15,9 @@ open Lean Meta
 /--
 `input`: a formula of the problem, which is a hypothesis of the goal.
 
-The hypothesis proves it, but not always as stated: vampire's parser reverses a
-junction's arguments, so the formula's own reading of itself can order the
-disjuncts differently. `implies` relates the two.
+The hypothesis proves it, but not always as stated: vampire reads the formula
+back with its own nesting of junctions and quantifier blocks, and states some
+comparisons the other way round. `equiv` relates the two.
 -/
 def input (step : Step) : ReconstructM Expr := do
   let some name := step.unit.name?

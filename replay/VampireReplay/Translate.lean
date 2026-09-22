@@ -291,7 +291,7 @@ an `input` step would say so: it would no longer prove what the goal states.
 partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
   -- Both sides, not just the right: vampire's parser flattens a junction
   -- however it was nested, and what is emitted has to be what it flattens to
-  -- or the reversal below lines the parts up against the wrong ones.
+  -- or replay would pair the parts up against the wrong ones.
   let rec parts (e : Expr) : Array Expr :=
     if e.isAppOfArity fn 2 then
       parts e.appFn!.appArg! ++ parts e.appArg!
