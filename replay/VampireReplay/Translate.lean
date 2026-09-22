@@ -81,6 +81,13 @@ structure State where
   /-- Every TPTP identifier handed out, to keep them distinct. -/
   taken : Std.HashSet String := {}
   varCount : Nat := 0
+  /--
+  The arithmetic type each type a term has been met at reduces to, if any.
+  Every subterm is asked, and they are at a handful of types.
+  -/
+  typeSorts : Std.HashMap Expr (Option String) := {}
+  /-- Whether each type an argument has been met at is a universe of types. -/
+  typeArguments : Std.HashMap Expr Bool := {}
 deriving Inhabited
 
 abbrev TranslateM := StateRefT State MetaM
@@ -271,6 +278,30 @@ def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
   modify fun s => { s with vars := s.vars.insert fvarId name }
   return (name, type)
 
+/-- The TPTP arithmetic type the type of `e` stands for, if any. -/
+def arithmeticSortOf (e : Expr) : TranslateM (Option String) := do
+  let τ ← inferType e
+  if let some sort := (← get).typeSorts[τ]? then
+    return sort
+  let sort := arithmeticSort (← whnf τ)
+  modify fun s => { s with typeSorts := s.typeSorts.insert τ sort }
+  return sort
+
+/--
+Whether an argument is a type, which carries no first-order content: `isSortType`,
+asked of the argument's type once rather than of every argument at it.
+-/
+def isTypeArgument (e : Expr) : TranslateM Bool := do
+  if isPropType e || e matches .sort _ then return false
+  let τ ← inferType e
+  if let some answer := (← get).typeArguments[τ]? then
+    return answer
+  let answer ← match ← whnf τ with
+    | .sort u => pure (← instantiateLevelMVars u).isNeverZero
+    | _ => pure false
+  modify fun s => { s with typeArguments := s.typeArguments.insert τ answer }
+  return answer
+
 /-- How TPTP names the cast into one of its arithmetic types. -/
 def castInto (sort : String) : String :=
   if sort == "$real" then "$to_real"
@@ -310,7 +341,7 @@ divisor -- Euclidean, which is what TPTP's `_e` forms are and what SMT-LIB's
 `div` and `mod` are.
 -/
 partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
-  let some sort := arithmeticSort (← whnf (← inferType e)) | return none
+  let some sort ← arithmeticSortOf e | return none
   if let some n := numeral? e then
     return some (.app (renderNumeral sort n) #[])
   let binary (fn : String) (a b : Expr) : TranslateM (Option Tm) := do
@@ -329,7 +360,7 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
     for (fn, name) in [(`Int.floor, "$floor"), (`Int.ceil, "$ceiling")] do
       if inner.getAppFn.isConstOf fn && inner.getAppNumArgs == 5 then
         let a := inner.appArg!
-        if arithmeticSort (← whnf (← inferType a)) == some sort then
+        if (← arithmeticSortOf a) == some sort then
           return some (.app name #[← translateTerm a])
   match_expr e with
   | HAdd.hAdd _ _ _ _ a b => binary "$sum" a b
@@ -376,7 +407,7 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
     let fn := e.getAppFn
     let args := e.getAppArgs
     -- Type arguments carry no first-order content.
-    let args ← args.filterM fun arg => return !(← isSortType arg)
+    let args ← args.filterM fun arg => return !(← isTypeArgument arg)
     let head ← match fn with
       | .fvar fvarId => symbolName fn (← fvarId.getType)
       | .const .. => symbolName fn (← inferType fn)
@@ -450,7 +481,7 @@ A comparison at one of TPTP's arithmetic types, or the atom it is otherwise:
 -/
 partial def arithmeticAtom (fn : String) (a b : Expr) (whole : Expr) :
     TranslateM Fm := do
-  if (arithmeticSort (← whnf (← inferType a))).isSome then
+  if (← arithmeticSortOf a).isSome then
     return .atom (.app fn #[← translateTerm a, ← translateTerm b])
   return .atom (← translateTerm whole)
 
