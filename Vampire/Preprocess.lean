@@ -105,12 +105,18 @@ structure Result where
   hypotheses : Array (Expr × Role)
   goal : MVarId
 
-/--
-The name given to the negated goal, so that it can be told apart from the
-axioms after `lean-auto` has monomorphized the context. `collectLctxLemmas`
-records a hypothesis as `DTr.leaf s!"lctxLem {name}"`.
--/
+/-- The name given to the negated goal in the local context. -/
 private def goalMarker : Name := `_vampireNegatedGoal
+
+/--
+What the negated goal's derivation is rooted at, so that it can be told apart
+from the axioms after `lean-auto` has monomorphized the context: whatever
+monomorphization derives from it has this leaf in its derivation tree.
+
+The lemma is built here with this leaf rather than collected by
+`collectLctxLemmas`, whose leaves are a format of `lean-auto`'s own.
+-/
+private def goalLeaf : Auto.DTr := .leaf "vampire negated goal"
 
 private partial def dtrContains (self other : Auto.DTr) : Bool :=
   if self == other then true
@@ -192,7 +198,10 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     -- `false` is what confines this to the binders and the negated goal:
     -- `true` would have `lean-auto` take the whole local context, whatever was
     -- named, and a hypothesis named in brackets would then be sent twice.
-    let lctxLemmas ← Auto.collectLctxLemmas false (goalBinders.push ngoal)
+    let binderLemmas ← Auto.collectLctxLemmas false goalBinders
+    let goalLemma : Auto.Lemma :=
+      ⟨⟨.fvar ngoal, ← instantiateMVars (← ngoal.getType), goalLeaf⟩, #[]⟩
+    let lctxLemmas := binderLemmas.push goalLemma
     -- The terms named in brackets come as `lean-auto` elaborated them, whole:
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which
@@ -202,9 +211,8 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
     let (proof, mv, _, dtrs) ← Auto.runMono none lemmas inhFacts
     absurd.assign proof
-    let goalDtr := Auto.DTr.leaf s!"lctxLem {goalMarker}"
     let fromGoal := dtrs.filterMap fun (fv, dtr) =>
-      if dtrContains dtr goalDtr then some (Expr.fvar fv) else none
+      if dtrContains dtr goalLeaf then some (Expr.fvar fv) else none
     let hypotheses ← propHypotheses mv
     return {
       hypotheses := hypotheses.map fun h =>
