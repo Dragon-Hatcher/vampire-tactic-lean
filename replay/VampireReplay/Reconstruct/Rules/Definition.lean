@@ -519,10 +519,15 @@ def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
     | throwError "equality_proxy_replacement has no clause among its premises"
   let some (proof, stated) := step.premises[i]?
     | throwError "no premise in position {i}"
+  let some parent := step.unit.parents[i]?
+    | throwError "no premise in position {i}"
   let conclusion ← step.conclusion
   if ← isDefEq (← instantiateMVars stated) conclusion then
     return proof
-  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+  -- The replacement rebuilds the clause, so its literals can come back in
+  -- another order, and a literal over the proxy is an application of what it
+  -- is bound to rather than an equation: each is placed where it went.
+  relateLiterals step parent proof stated
 
 /--
 `equality_proxy_axiom`: an axiom about the proxy, which is equality.

@@ -11,3 +11,9 @@ example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x, p x) : p a := by vamp
 
 -- Type class goals are not first-order, so they need monomorphizing first.
 example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
+
+-- Equality through a proxy predicate, whose congruence axiom says a predicate
+-- holds of equal things alike; and the replacement reorders the clause.
+example {ι : Type} (f g : ι → ι) (p : ι → Prop) (h : ∀ x, g x = f x)
+    (hp : ∀ x, p (g x)) (a : ι) : p (f a) := by
+  vampire (options := #[("equality_proxy", "RSTC")]) [h, hp]
