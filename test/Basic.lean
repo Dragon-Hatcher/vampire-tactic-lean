@@ -40,3 +40,9 @@ example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a b : ι)
 example {ι : Type} (f : ι → ι) (p : ι → ι → Prop) (a : ι)
     (h : ∀ x y z, f x ≠ f y ∨ p z x) (h1 : ∀ x, ¬ p x a) : False := by
   vampire (options := #[("subsumption_equality_resolution", "on")]) [h, h1]
+
+-- Truth values absorbed out of a formula, by core's own absorption lemmas.
+example (p q : Prop)
+    (h : (p ∨ False) ∧ (True → q) ∧ (False → p) ∧ (q ↔ True) ∧ (p ↔ False ∨ p))
+    (h2 : ¬ q ∨ (¬ p ∧ True)) : False := by
+  vampire [h, h2]

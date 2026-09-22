@@ -20,10 +20,6 @@ namespace Vampire.Reconstruct.Normalize
 
 open Lean Meta
 
-private theorem not_true_expand : ¬True ↔ False := by simp
-
-private theorem not_false_expand : ¬False ↔ True := by simp
-
 private theorem not_iff_expand {a b : Prop} : ¬(a ↔ b) ↔ ((a ∨ b) ∧ (¬a ∨ ¬b)) := by
   constructor
   · intro h
@@ -102,9 +98,9 @@ partial def normalize (expand : Bool) (sorts : Array (UInt32 × String))
       -- where no such constant is left under a negation.
       throwError "nnf cannot state{indentExpr source}"
     else if given.isConstOf ``True then
-      return (source, mkConst ``False, ← mkAppOptM ``not_true_expand #[])
+      return (source, mkConst ``False, ← mkAppM ``iff_of_eq #[mkConst ``not_true_eq_false])
     else
-      return (source, mkConst ``True, ← mkAppOptM ``not_false_expand #[])
+      return (source, mkConst ``True, ← mkAppM ``iff_of_eq #[mkConst ``not_false_eq_true])
   | .and | .or =>
     let isAnd := (← connectiveOf f) matches .and
     let parts ← f.subformulas.mapM (normalize expand sorts vars · polarity)

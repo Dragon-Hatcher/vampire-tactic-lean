@@ -25,55 +25,13 @@ open Lean Meta
 /-! ### The absorptions
 
 One lemma for each rewrite the walk can make, so that the term built states
-exactly the step vampire took rather than a normal form some tactic found. -/
-
-private theorem or_absorbs_true_left {a : Prop} : (True ∨ a) ↔ True := by simp
-
-private theorem or_absorbs_true_right {a : Prop} : (a ∨ True) ↔ True := by simp
-
-private theorem or_drops_false_left {a : Prop} : (False ∨ a) ↔ a := by simp
-
-private theorem or_drops_false_right {a : Prop} : (a ∨ False) ↔ a := by simp
-
-private theorem and_absorbs_false_left {a : Prop} : (False ∧ a) ↔ False := by simp
-
-private theorem and_absorbs_false_right {a : Prop} : (a ∧ False) ↔ False := by simp
-
-private theorem and_drops_true_left {a : Prop} : (True ∧ a) ↔ a := by simp
-
-private theorem and_drops_true_right {a : Prop} : (a ∧ True) ↔ a := by simp
-
-private theorem imp_true_right {a : Prop} : (a → True) ↔ True := by simp
-
-private theorem imp_true_left {a : Prop} : (True → a) ↔ a := by simp
-
-private theorem imp_false_left {a : Prop} : (False → a) ↔ True := by simp
-
-private theorem imp_false_right {a : Prop} : (a → False) ↔ ¬a := Iff.rfl
-
-private theorem not_false_collapses : ¬False ↔ True := by simp
-
-private theorem not_true_collapses : ¬True ↔ False := by simp
+exactly the step vampire took rather than a normal form some tactic found.
+Core states most of them already -- `true_or`, `iff_false` and the rest -- and
+those are used as they are; these are the ones it does not. -/
 
 /-! The equivalence's own table. `⊥ ↔ ⊥` and `⊤ ↔ ⊤` are stated on their own
 rather than reached through the general cases, because what vampire returns for
 them is the constant and not a negated constant. -/
-
-private theorem iff_false_false : (False ↔ False) ↔ True := by simp
-
-private theorem iff_false_true : (False ↔ True) ↔ False := by simp
-
-private theorem iff_false_left {a : Prop} : (False ↔ a) ↔ ¬a := by simp
-
-private theorem iff_true_false : (True ↔ False) ↔ False := by simp
-
-private theorem iff_true_true : (True ↔ True) ↔ True := by simp
-
-private theorem iff_true_left {a : Prop} : (True ↔ a) ↔ a := by simp
-
-private theorem iff_false_right {a : Prop} : (a ↔ False) ↔ ¬a := by simp
-
-private theorem iff_true_right {a : Prop} : (a ↔ True) ↔ a := by simp
 
 private theorem xor_false_false : ¬(False ↔ False) ↔ False := by simp
 
@@ -91,17 +49,20 @@ private theorem xor_false_right {a : Prop} : ¬(a ↔ False) ↔ a := by simp
 
 private theorem xor_true_right {a : Prop} : ¬(a ↔ True) ↔ ¬a := by simp
 
-private theorem forall_true {α : Sort u} : (∀ _ : α, True) ↔ True := by simp
-
 private theorem forall_false {α : Sort u} (x : α) : (∀ _ : α, False) ↔ False :=
   ⟨fun h => h x, fun h _ => h⟩
 
 private theorem exists_true {α : Sort u} (x : α) : (∃ _ : α, True) ↔ True :=
   ⟨fun _ => trivial, fun _ => ⟨x, trivial⟩⟩
 
-private theorem exists_false {α : Sort u} : (∃ _ : α, False) ↔ False := by simp
-
 /-! ### The walk -/
+
+/--
+A core lemma stating `lhs = rhs`, as the equivalence the walk composes: core
+states the absorptions as equations, which is what `simp` wants of them.
+-/
+private def ofCore (name : Name) (args : Array Expr) : ReconstructM Expr := do
+  mkAppM ``iff_of_eq #[← mkAppM name args]
 
 /-- `⟦e⟧ ↔ ⟦e⟧`, for a subformula the walk left alone. -/
 private def refl (e : Expr) : ReconstructM Expr := mkAppOptM ``Iff.refl #[some e]
@@ -133,17 +94,13 @@ private partial def absorbUnits (isAnd : Bool) (parts : Array Expr) :
   let compose (result : Expr) (absorption : Expr) : ReconstructM (Expr × Expr) :=
     return (result, ← mkAppM ``Iff.trans #[congruence, absorption])
   if head == absorbing then
-    compose absorbing (← mkAppOptM
-      (if isAnd then ``and_absorbs_false_left else ``or_absorbs_true_left) #[some tail])
+    compose absorbing (← ofCore (if isAnd then ``false_and else ``true_or) #[tail])
   else if tail == absorbing then
-    compose absorbing (← mkAppOptM
-      (if isAnd then ``and_absorbs_false_right else ``or_absorbs_true_right) #[some head])
+    compose absorbing (← ofCore (if isAnd then ``and_false else ``or_true) #[head])
   else if head == dropped then
-    compose tail (← mkAppOptM
-      (if isAnd then ``and_drops_true_left else ``or_drops_false_left) #[some tail])
+    compose tail (← ofCore (if isAnd then ``true_and else ``false_or) #[tail])
   else if tail == dropped then
-    compose head (← mkAppOptM
-      (if isAnd then ``and_drops_true_right else ``or_drops_false_right) #[some head])
+    compose head (← ofCore (if isAnd then ``and_true else ``or_false) #[head])
   else
     let result := mkApp2 (mkConst fn) head tail
     return (result, ← mkAppM ``Iff.trans #[congruence, ← refl result])
@@ -178,9 +135,9 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
     let compose (result absorption : Expr) : ReconstructM (Expr × Expr) :=
       return (result, ← mkAppM ``Iff.trans #[congruence, absorption])
     if inner.isConstOf ``False then
-      compose (mkConst ``True) (← mkAppOptM ``not_false_collapses #[])
+      compose (mkConst ``True) (← ofCore ``not_false_eq_true #[])
     else if inner.isConstOf ``True then
-      compose (mkConst ``False) (← mkAppOptM ``not_true_collapses #[])
+      compose (mkConst ``False) (← ofCore ``not_true_eq_false #[])
     else
       return (mkApp (mkConst ``Not) inner, congruence)
   | .and | .or =>
@@ -214,18 +171,18 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
       return (mkConst ``True,
         ← mkAppM ``Iff.trans
           #[← mkAppM ``imp_congr #[← refl left, rightProof],
-            ← mkAppOptM ``imp_true_right #[some left]])
+            ← ofCore ``implies_true #[left]])
     let (antecedent, leftProof) ← simplify sorts vars (← sub 0)
     let congruence ← mkAppM ``imp_congr #[leftProof, rightProof]
     let compose (result absorption : Expr) : ReconstructM (Expr × Expr) :=
       return (result, ← mkAppM ``Iff.trans #[congruence, absorption])
     if antecedent.isConstOf ``True then
-      compose right (← mkAppOptM ``imp_true_left #[some right])
+      compose right (← ofCore ``true_implies #[right])
     else if antecedent.isConstOf ``False then
-      compose (mkConst ``True) (← mkAppOptM ``imp_false_left #[some right])
+      compose (mkConst ``True) (← ofCore ``false_implies #[right])
     else if right.isConstOf ``False then
       compose (mkApp (mkConst ``Not) antecedent)
-        (← mkAppOptM ``imp_false_right #[some antecedent])
+        (← mkAppOptM ``imp_false #[some antecedent])
     else
       return (← mkArrow antecedent right, congruence)
   | .iff | .xor =>
@@ -247,28 +204,28 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
     let negate (e : Expr) := mkApp (mkConst ``Not) e
     match constant left, constant right with
     | some false, some false =>
-      if isIff then compose truth (← mkAppOptM ``iff_false_false #[])
+      if isIff then compose truth (← ofCore ``iff_self #[mkConst ``False])
       else compose falsity (← mkAppOptM ``xor_false_false #[])
     | some false, some true =>
-      if isIff then compose falsity (← mkAppOptM ``iff_false_true #[])
+      if isIff then compose falsity (← pure (mkConst ``false_iff_true))
       else compose truth (← mkAppOptM ``xor_false_true #[])
     | some false, none =>
-      if isIff then compose (negate right) (← mkAppOptM ``iff_false_left #[some right])
+      if isIff then compose (negate right) (← ofCore ``false_iff #[right])
       else compose right (← mkAppOptM ``xor_false_left #[some right])
     | some true, some false =>
-      if isIff then compose falsity (← mkAppOptM ``iff_true_false #[])
+      if isIff then compose falsity (← pure (mkConst ``true_iff_false))
       else compose truth (← mkAppOptM ``xor_true_false #[])
     | some true, some true =>
-      if isIff then compose truth (← mkAppOptM ``iff_true_true #[])
+      if isIff then compose truth (← ofCore ``iff_self #[mkConst ``True])
       else compose falsity (← mkAppOptM ``xor_true_true #[])
     | some true, none =>
-      if isIff then compose right (← mkAppOptM ``iff_true_left #[some right])
+      if isIff then compose right (← ofCore ``true_iff #[right])
       else compose (negate right) (← mkAppOptM ``xor_true_left #[some right])
     | none, some false =>
-      if isIff then compose (negate left) (← mkAppOptM ``iff_false_right #[some left])
+      if isIff then compose (negate left) (← ofCore ``iff_false #[left])
       else compose left (← mkAppOptM ``xor_false_right #[some left])
     | none, some true =>
-      if isIff then compose left (← mkAppOptM ``iff_true_right #[some left])
+      if isIff then compose left (← ofCore ``iff_true #[left])
       else compose (negate left) (← mkAppOptM ``xor_true_right #[some left])
     | none, none =>
       let equivalence := mkApp2 (mkConst ``Iff) left right
@@ -314,7 +271,7 @@ partial def quantified (sorts : Array (UInt32 × String)) (body : Formula)
     -- what the formula says.
     if inner.isConstOf ``True then
       if isForall then
-        compose (mkConst ``True) (← mkAppOptM ``forall_true #[some τ])
+        compose (mkConst ``True) (← ofCore ``implies_true #[τ])
       else
         compose (mkConst ``True)
           (← mkAppOptM ``exists_true #[some τ, some (← someElement τ)])
@@ -323,7 +280,7 @@ partial def quantified (sorts : Array (UInt32 × String)) (body : Formula)
         compose (mkConst ``False)
           (← mkAppOptM ``forall_false #[some τ, some (← someElement τ)])
       else
-        compose (mkConst ``False) (← mkAppOptM ``exists_false #[some τ])
+        compose (mkConst ``False) (← mkAppM ``iff_false_intro #[← mkAppOptM ``exists_false #[some τ]])
     else
       return (result, congruence)
 
