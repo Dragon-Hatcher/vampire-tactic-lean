@@ -51,8 +51,15 @@ structure Config where
   which does not follow from it. What makes the step sound is reinterpreting
   `P`, and a proof of the goal as it stands cannot do that, so a proof using
   the step cannot be replayed at all rather than merely not yet.
+
+  Global subsumption and backward subsumption demodulation are off because the
+  vampire this is built from keeps nothing of how they used their premises:
+  one stands on a propositional proof it discards, and the other, unlike its
+  forward twin, records no substitution. A step of either could only be
+  admitted.
   -/
-  forced : Array (String × String) := #[("si", "off"), ("updr", "off")]
+  forced : Array (String × String) :=
+    #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
   /-- Further vampire options, as they would be given on its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/

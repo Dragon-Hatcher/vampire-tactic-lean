@@ -246,6 +246,17 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     mkLambdaFVars xs body
 
 /--
+A rule that cannot reach a proof the tactic asked for, and says why.
+
+Unlike `unimplemented` it admits nothing: meeting one means the tactic's
+assumptions about the search no longer hold, which is worth an error rather
+than a `sorry`.
+-/
+def unreachable (step : Step) (why : String) : ReconstructM Expr :=
+  throwError "step {step.unit.number} is {step.rule.name}, which should not be \
+    reached: {why}"
+
+/--
 Stands in for a rule that has no implementation yet. The step's conclusion is
 still rebuilt and checked, so only the justification is missing.
 -/

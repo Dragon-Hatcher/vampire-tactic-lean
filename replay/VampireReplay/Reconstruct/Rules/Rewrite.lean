@@ -277,4 +277,64 @@ def superposition (step : Step) : ReconstructM Expr := do
               placeLiteral inner (← rewriteWith rw vars bridged to i h)))
     mkLambdaFVars xs body
 
+/--
+`inner_rewriting`: a clause with one of its own disequalities `l ≠ r` used to
+rewrite `l` to `r` in each of its other literals.
+
+Either the disequality holds, and it is a literal of the conclusion, or `l = r`
+and each other literal becomes what it was rewritten to. Which disequality and
+which way round come recorded; literal selection reorders the conclusion
+afterwards, so each literal is then placed where it went.
+-/
+def innerRewriting (step : Step) : ReconstructM Expr := do
+  let #[(premiseProof, premiseStated)] := step.premises
+    | throwError "inner rewriting should have one premise, got {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "inner rewriting without a premise"
+  let some clause := parent.clause?
+    | throwError "inner rewriting should be given a clause"
+  let use ← step.useAt 0
+  let some rewriting := use.literal
+    | throwError "inner rewriting did not record the disequality it rewrote with"
+  let i := rewriting.toNat
+  let leftRewritten ← recordedSideIsLeft parent use i
+  let count := clause.literals.size
+  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
+      fun xs target => do
+    let mut kept : Vars := {}
+    for (x, (v, _)) in xs.zip step.unit.varSorts do
+      kept := kept.insert v x
+    -- Rewriting substitutes nothing, but it can rewrite a variable away.
+    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let args ← parent.varSorts.mapM fun (v, sortName) => do
+      match vars[v]? with
+      | some x => pure x
+      | none => someElement (← sortType sortName)
+    let premiseAt := mkAppN premiseProof args
+    let parts ← clausePartsOf (← instantiateForall premiseStated args) count
+
+    let some equation := parts[i]?.bind (·.not?)
+      | throwError "the literal inner rewriting rewrote with is not a disequality"
+    let some (_, a, b) := equation.eq?
+      | throwError "the literal inner rewriting rewrote with is not a disequality"
+    let (l, r) := if leftRewritten then (a, b) else (b, a)
+    let body ← elimGiven parts (motive? := some target) (fun k h => do
+      if k == i then return ← placeLiteral target h
+      let holds ← withLocalDeclD `h equation fun heq => do
+        let lr ← if leftRewritten then pure heq else mkEqSymm heq
+        let some part := parts[k]? | throwError "a missing literal"
+        let abstracted ← kabstract part l
+        let rewritten ←
+          if abstracted.hasLooseBVars then
+            let motive := Expr.lam `x (← inferType l) abstracted .default
+            mkEqMP (← mkCongrArg motive lr) h
+          else pure h
+        let rewritten ← mkExpectedTypeHint rewritten
+          (← instantiateMVars (← inferType rewritten)).headBeta
+        mkLambdaFVars #[heq] (← placeLiteral target rewritten)
+      let fails ← withLocalDeclD `h (mkApp (mkConst ``Not) equation) fun hne => do
+        mkLambdaFVars #[hne] (← placeLiteral target hne)
+      mkAppM ``Classical.byCases #[holds, fails]) premiseAt
+    mkLambdaFVars xs body
+
 end Vampire.Reconstruct.Rewrite

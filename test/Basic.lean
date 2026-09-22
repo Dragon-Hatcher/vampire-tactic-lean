@@ -28,3 +28,15 @@ example {ι : Type} (p s : ι → Prop) (r q : ι → ι → Prop) (a : ι)
     (h : ∀ x y z, p x ∨ r x y ∨ q y z ∨ s z) (h1 : ∀ x, ¬ p x) (h2 : ∀ y z, ¬ q y z)
     (h3 : ∀ x y, ¬ r x y) (h4 : ∀ z, ¬ s z) : False := by
   vampire (options := #[("general_splitting", "on")]) [h, h1, h2, h3, h4]
+
+-- Inner rewriting: a clause's own disequality rewrites its other literals.
+example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a b : ι)
+    (h : f a ≠ b ∨ p (g (f a)) ∨ p (f a)) (h1 : ¬ p (g b)) (h2 : ¬ p b)
+    (h3 : f a = b) : False := by
+  vampire (options := #[("inner_rewriting", "on"), ("forward_demodulation", "off")])
+    [h, h1, h2, h3]
+
+-- Subsumption equality resolution: a disequality whose sides unify, dropped.
+example {ι : Type} (f : ι → ι) (p : ι → ι → Prop) (a : ι)
+    (h : ∀ x y z, f x ≠ f y ∨ p z x) (h1 : ∀ x, ¬ p x a) : False := by
+  vampire (options := #[("subsumption_equality_resolution", "on")]) [h, h1]

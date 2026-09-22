@@ -77,22 +77,27 @@ def ofRule (step : Step) : ReconstructM Expr :=
 
   -- Not implemented yet.
   | .genericFormulaClauseTransformation => unimplemented step
-  | .negatedConjecture => unimplemented step
+  | .negatedConjecture => unreachable step "it negates a TPTP conjecture, and \
+    the tactic states the goal as a negated conjecture already"
   | .answerLiteralInjection => unimplemented step
   | .answerLiteralInputSkolemisation => unimplemented step
   | .claimDefinition => unimplemented step
-  | .closure => unimplemented step
+  | .closure => Congruence.restated step
   | .theoryNormalization => Arithmetic.theoryStep step
   | .alascaIntegerTransformation => Arithmetic.theoryStep step
   | .skolemSymbolIntroduction => unimplemented step
   | .genericFormulaClauseTransformationLast => unimplemented step
   | .genericSimplifyingInference => unimplemented step
   | .reorderLiterals => unimplemented step
-  | .subsumptionEqualityResolution => unimplemented step
+  -- A disequality whose sides unify dropped, the unifier only renaming what
+  -- is left; the worker records it as equality resolution at that unifier.
+  | .subsumptionEqualityResolution =>
+    Resolution.equalityResolutionWithDeletion step
   | .alascaFwdDemodulation => Arithmetic.theoryStep step
   | .alascaBwdDemodulation => Arithmetic.theoryStep step
-  | .backwardSubsumptionDemodulation => unimplemented step
-  | .innerRewriting => unimplemented step
+  | .backwardSubsumptionDemodulation => unreachable step "this vampire records \
+    nothing of how it used its premises, and the tactic forces `bsd=off`"
+  | .innerRewriting => Rewrite.innerRewriting step
   | .condensation => Clause.condensation step
   | .evaluation => Arithmetic.theoryStep step
   | .alascaNormalization => Arithmetic.theoryStep step
@@ -104,14 +109,17 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .termAlgebraDistinctness => unimplemented step
   | .termAlgebraPositiveInjectivitySimplifying => unimplemented step
   | .termAlgebraNegativeInjectivitySimplifying => unimplemented step
-  | .globalSubsumption => unimplemented step
-  | .distinctEqualityRemoval => unimplemented step
+  | .globalSubsumption => unreachable step "it rests on a propositional proof \
+    this vampire does not keep, and the tactic forces `gs=off`"
+  -- A literal equating two numbers that are not equal, dropped.
+  | .distinctEqualityRemoval => Arithmetic.theoryStep step
   | .gaussianVariableEliminiation => Arithmetic.theoryStep step
   | .arithmeticSubtermGeneralization => Arithmetic.theoryStep step
   | .answerLiteralRemoval => unimplemented step
   | .answerLiteralJoinWithConstraints => unimplemented step
   | .answerLiteralJoinAsIte => unimplemented step
-  | .avatarAssertionReintroduction => unimplemented step
+  | .avatarAssertionReintroduction => unreachable step "only synthesis runs it, \
+    which the tactic does not ask for"
   | .casesSimp => unimplemented step
   | .alascaVirasQe => Arithmetic.theoryStep step
   | .boolSimp => unimplemented step
@@ -126,11 +134,13 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .sigmaProxyClausificationSimplifying => unimplemented step
   | .piProxyClausificationSimplifying => unimplemented step
   | .equalityProxyClausificationSimplifying => unimplemented step
-  | .functionDefinitionDemodulation => unimplemented step
+  | .functionDefinitionDemodulation => unreachable step "it rewrites with \
+    recursive function definitions, which the tactic does not send"
   | .genericSimplifyingInferenceLast => unimplemented step
   | .genericGeneratingInference => unimplemented step
   | .constrainedResolution => Arithmetic.theoryStep step
-  | .constrainedFactoring => unimplemented step
+  | .constrainedFactoring => unreachable step "no inference of this vampire \
+    makes it"
   | .functionDefinitionRewriting => unimplemented step
   -- Constrained superposition is superposition with the pairs the unifier
   -- could not unify left among the conclusion's literals.
