@@ -611,7 +611,7 @@ descent has it to hand already, in the shape the formula the clausification
 began at was stated in.
 -/
 private partial def descend (sorts : Array (UInt32 × String))
-    (choices : Array (Formula × UInt32)) (vars : Vars) (f : Formula)
+    (choices : Std.HashMap UInt32 UInt32) (vars : Vars) (f : Formula)
     (stated : Expr) (target : Expr) : ReconstructM Expr := do
   match ← connectiveOf f with
   | .«forall» =>
@@ -636,7 +636,7 @@ private partial def descend (sorts : Array (UInt32 × String))
   | .and =>
     -- The clause came from one conjunct, the recorded one.
     let parts ← partsOf ``And stated f.subformulas.size
-    let some (_, argument) := choices.find? fun (node, _) => node == f
+    let some argument := choices[f.index]?
       | throwError "nothing says which conjunct of{indentExpr stated}\nthis \
           clause came from"
     let some conjunct := f.subformulas[argument.toNat]?
@@ -698,7 +698,9 @@ def clausify (step : Step) : ReconstructM Expr := do
         (← carryAll (junction ``Or ``False (← genParts sorts vars clause))
           target proof)
     | none =>
-      let implication ← descend sorts step.unit.conjunctChoices vars premise
+      let implication ← descend sorts
+        (Std.HashMap.ofList (step.unit.conjunctChoices.toList.map fun (f, i) => (f.index, i)))
+        vars premise
         (← instantiateMVars premiseStated) target
       mkLambdaFVars xs (mkApp implication premiseProof)
 end Vampire.Reconstruct.Clausify
