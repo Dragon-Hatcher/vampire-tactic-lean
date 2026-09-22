@@ -379,6 +379,9 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
         return .neg (.iff (← translateFormula a) (← translateFormula b))
       return .eq (← translateTerm a) (← translateTerm b) false
     | Exists _ p =>
+      -- `∃ x, q x` can reach here as `Exists q`, with no binder to open: it is
+      -- given one, or there would be no variable to quantify over.
+      let p ← if p.isLambda then pure p else etaExpand p
       lambdaTelescope p fun xs body => do
         let mut binders := #[]
         for x in xs do
