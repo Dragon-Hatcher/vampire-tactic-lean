@@ -163,12 +163,16 @@ def isPropType (e : Expr) : Bool := e matches .sort .zero
 /--
 Whether `e` is a type whose elements are TPTP individuals. `Prop` is not one,
 and neither is a universe: an argument of type `Type` is a type argument, which
-carries no first-order content.
+carries no first-order content. Nor is a proposition, whose elements are its
+proofs: its type is a sort too, but `Prop`, and a quantifier over the proofs of
+`P` is no quantifier over a sort named after `P`.
 -/
 def isSortType (e : Expr) : MetaM Bool := do
   if isPropType e then return false
   if e matches .sort _ then return false
-  return (← whnf (← inferType e)) matches .sort _
+  match ← whnf (← inferType e) with
+  | .sort u => return (← instantiateLevelMVars u).isNeverZero
+  | _ => return false
 
 /-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
 def sortName (e : Expr) : TranslateM String := do
@@ -235,6 +239,29 @@ def symbolName (e : Expr) (type : Expr) : TranslateM (Option String) := do
       s!"tff({name}_decl, type, {name}: {signature})."
   }
   return some name
+
+/--
+Whether a quantifier over `domain` is one over TPTP individuals.
+
+A type class is a type, but what it quantifies over is instances, which
+monomorphization settles and a first-order prover has no reading of.
+-/
+def isIndividualDomain (domain : Expr) : MetaM Bool := do
+  if (← isClass? domain).isSome then return false
+  isSortType domain
+
+/--
+Rejects a quantifier over something that is not a sort of individuals: a
+proposition the body depends on the proof of, a type class, a universe.
+
+Translating the body alone would state something other than the goal, and the
+prover would then refute that instead -- which replay finds out only once it
+tries to relate the two.
+-/
+def throwNotFirstOrder (e domain : Expr) : MetaM α :=
+  throwError "cannot translate{indentExpr e}\nto TPTP: it quantifies over\
+    {indentExpr domain}\nwhich is not a type of individuals. `+mono` \
+    monomorphizes a goal like this first"
 
 /-- Hands out a fresh TPTP variable name for a bound local. -/
 def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
@@ -351,7 +378,9 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
   | .forallE name domain body binderInfo =>
     if (← isProp domain) && !body.hasLooseBVars then
       return .imp (← translateFormula domain) (← translateFormula body)
-    else if ← isSortType domain then
+    else
+      unless ← isIndividualDomain domain do
+        throwNotFirstOrder e domain
       -- One block rather than a binder at a time: vampire's flattening merges
       -- adjacent quantifiers and does not keep their order while doing it, so
       -- what is emitted is what it would have flattened them into.
@@ -360,11 +389,6 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
         match ← translateFormula (body.instantiate1 x) with
         | .all binders inner => return .all (#[binder] ++ binders) inner
         | inner => return .all #[binder] inner
-    else
-      -- A dependent or higher-order binder, e.g. an instance argument. Assume
-      -- it is inhabited and translate the body; TPTP domains are non-empty.
-      withLocalDecl name binderInfo domain fun x =>
-        translateFormula (body.instantiate1 x)
   | _ =>
     match_expr e with
     | True => return .top
@@ -394,6 +418,9 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
       lambdaTelescope p fun xs body => do
         let mut binders := #[]
         for x in xs do
+          let domain ← inferType x
+          unless ← isIndividualDomain domain do
+            throwNotFirstOrder e domain
           binders := binders.push (← bindVar x.fvarId!)
         match ← translateFormula body with
         | .ex inner rest => return .ex (binders ++ inner) rest
