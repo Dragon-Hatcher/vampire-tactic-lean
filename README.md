@@ -79,8 +79,9 @@ theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
 `G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols.
 
 `ℤ`, `ℚ` and `ℝ` are translated to Vampire's `$int`, `$rat` and `$real`; `+`,
-`-`, `*`, `/`, unary minus, `<`, `≤`, `>`, `≥` are translated too; `^` at a
-literal natural exponent is unfolded into multiplications.
+`-`, `*`, `/`, unary minus, `<`, `≤`, `>`, `≥`, `⌊x⌋` and `⌈x⌉` are translated
+too; `^` at a literal natural exponent is unfolded into multiplications. `ℕ` is
+not: a cast from it is refused, unless it is of a numeral.
 
 ```lean
 import Mathlib
@@ -200,5 +201,10 @@ built worker is made of and what each piece is under.
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
   from SMT-LIB, each with the original beside its Lean statement. Development
   only; not needed to use the tactic.
-- `scripts/run-problems.py` — elaborates the corpus and reports what failed.
-  `scripts/trace-problem.sh` does one problem with tracing on.
+- `scripts/run-problems.py` — elaborates the corpus and reports what failed;
+  `lake run problems` runs it, over the whole corpus or what its arguments
+  name. `scripts/trace-problem.sh` does one problem with tracing on.
+- `test/` — `lake test`: the tactic's own examples, which must close their goals
+  without a warning, the worker on ten TPTP problems, and the `smoke` split of
+  the corpus, the quickest problem of each family. CI runs it on every push and
+  the whole corpus weekly.
