@@ -68,6 +68,86 @@ def castTo (τ : Expr) (args : Array Expr) : ReconstructM (Option Expr) := do
   return none
 
 /--
+TPTP's roundings and integer divisions, at the type their arguments are at.
+
+The integers round to themselves and have Lean's own divisions: `Int.tdiv` and
+`Int.tmod` truncate, `Int.fdiv` and `Int.fmod` floor, and `/` and `%` are
+Euclidean. The rationals and the reals round to an integer cast back, and their
+divisions are the rounding of the quotient, the remainder being what is left:
+the Euclidean quotient is the floor of `a / b` for a positive `b` and the
+ceiling for a negative one.
+
+Stated with Mathlib's `Int.floor`, `Int.ceil` and `round` by name: the goal
+that speaks of them has Mathlib, and this library does not import it.
+-/
+private def rounding (name : String) (args : Array Expr) :
+    ReconstructM (Option Expr) := do
+  let some a := args[0]? | return none
+  let τ ← whnf (← inferType a)
+  let integral := τ.isConstOf ``Int
+  let cast (z : Expr) : ReconstructM Expr :=
+    mkAppOptM ``Int.cast #[some τ, none, some z]
+  let floor (x : Expr) : ReconstructM Expr := do cast (← mkAppM `Int.floor #[x])
+  let ceil (x : Expr) : ReconstructM Expr := do cast (← mkAppM `Int.ceil #[x])
+  let byCases (c yes no : Expr) : ReconstructM Expr := do
+    mkAppOptM ``ite #[some τ, some c, some (← mkAppOptM ``Classical.propDecidable #[some c]),
+      some yes, some no]
+  let zero ← mkAppOptM ``OfNat.ofNat #[some τ, some (mkRawNatLit 0), none]
+  -- Toward zero: the floor of what is not negative, the ceiling of the rest.
+  let truncate (x : Expr) : ReconstructM Expr := do
+    byCases (← mkAppM ``LE.le #[zero, x]) (← floor x) (← ceil x)
+  let unary (f : Expr → ReconstructM Expr) : ReconstructM (Option Expr) := do
+    let #[x] := args | return none
+    if integral then return some x
+    return some (← f x)
+  let quotient (roundQ : Expr → Expr → ReconstructM Expr) : ReconstructM (Option Expr) := do
+    let #[x, y] := args | return none
+    return some (← roundQ x y)
+  let remainder (roundQ : Expr → Expr → ReconstructM Expr) : ReconstructM (Option Expr) := do
+    let #[x, y] := args | return none
+    return some (← mkAppM ``HSub.hSub #[x, ← mkAppM ``HMul.hMul #[y, ← roundQ x y]])
+  let divided (x y : Expr) : ReconstructM Expr := do mkAppM ``HDiv.hDiv #[x, y]
+  let truncated (x y : Expr) : ReconstructM Expr := do
+    if integral then return ← mkAppM ``Int.tdiv #[x, y]
+    truncate (← divided x y)
+  let floored (x y : Expr) : ReconstructM Expr := do
+    if integral then return ← mkAppM ``Int.fdiv #[x, y]
+    floor (← divided x y)
+  let euclidean (x y : Expr) : ReconstructM Expr := do
+    if integral then return ← mkAppM ``HDiv.hDiv #[x, y]
+    let q ← divided x y
+    byCases (← mkAppM ``LT.lt #[zero, y]) (← floor q) (← ceil q)
+  match name with
+  | "$floor" => unary floor
+  | "$ceiling" => unary ceil
+  | "$truncate" => unary truncate
+  | "$round" => unary fun x => do cast (← mkAppM `round #[x])
+  | "$quotient_e" => quotient euclidean
+  | "$quotient_t" => quotient truncated
+  | "$quotient_f" => quotient floored
+  | "$remainder_e" =>
+    if integral then quotient fun x y => mkAppM ``HMod.hMod #[x, y]
+    else remainder euclidean
+  | "$remainder_t" =>
+    if integral then quotient fun x y => mkAppM ``Int.tmod #[x, y]
+    else remainder truncated
+  | "$remainder_f" =>
+    if integral then quotient fun x y => mkAppM ``Int.fmod #[x, y]
+    else remainder floored
+  -- Whether a number is an integer, or a rational: whether it is one cast.
+  | "$is_int" | "$is_rat" =>
+    let #[x] := args | return none
+    -- An integer is both, and there is no casting a rational into one.
+    if integral then return some (mkConst ``True)
+    let from_ := if name == "$is_int" then mkConst ``Int else mkConst `Rat
+    let witness ← withLocalDeclD `n from_ fun n => do
+      mkLambdaFVars #[n] (← mkEq (← mkAppOptM
+        (if name == "$is_int" then ``Int.cast else `Rat.cast)
+        #[some τ, none, some n]) x)
+    return some (← mkAppM ``Exists #[witness])
+  | _ => return none
+
+/--
 What a symbol TPTP interprets itself stands for in Lean, or `none` for one the
 goal gave a meaning to.
 
@@ -93,8 +173,10 @@ def interpreted (name : String) (args : Array Expr) :
   | "$sum" => folded ``HAdd.hAdd
   | "$difference" => binary ``HSub.hSub
   | "$product" => folded ``HMul.hMul
-  | "$quotient" | "$quotient_e" => binary ``HDiv.hDiv
-  | "$remainder_e" => binary ``HMod.hMod
+  | "$quotient" => binary ``HDiv.hDiv
+  | "$floor" | "$ceiling" | "$truncate" | "$round" | "$quotient_e"
+  | "$quotient_t" | "$quotient_f" | "$remainder_e" | "$remainder_t"
+  | "$remainder_f" | "$is_int" | "$is_rat" => rounding name args
   | "$less" => binary ``LT.lt
   | "$lesseq" => binary ``LE.le
   | "$greater" =>
