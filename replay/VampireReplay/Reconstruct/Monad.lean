@@ -146,6 +146,17 @@ structure State where
   what the next says does that wherever it is wanted.
   -/
   clausifyChain : Std.HashMap Expr Expr := {}
+  /--
+  An interpreted operation at a type, applied to its type and instance
+  arguments and waiting for its own: `@HAdd.hAdd τ τ τ inst`, by operation and
+  type. Every node of every term over numbers asks for one, and synthesising
+  the instance each time was much of what rebuilding such a term cost.
+  -/
+  heads : Std.HashMap (Name × Expr) Expr := {}
+  /-- Each numeral rebuilt, by its type and its value. -/
+  numerals : Std.HashMap (Expr × Int) Expr := {}
+  /-- The universe each sort an equality has been stated at lives in. -/
+  levels : Std.HashMap Expr Level := {}
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 

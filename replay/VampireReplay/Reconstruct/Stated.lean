@@ -47,12 +47,45 @@ private def numeralSort (name : String) : Option (String × Int × Nat) :=
     | _ => none
   | _ => none
 
-/-- The Lean numeral for a whole number at a type. -/
+/--
+`fn` at type `τ`, applied to its type and instance arguments and waiting for
+`arity` arguments of its own: `@HAdd.hAdd τ τ τ inst` for `HAdd.hAdd` at two.
+
+Found once per operation and type -- by applying `fn` to locals, which settles
+its instances, and taking them off again -- and kept in `State.heads`.
+-/
+def headAt (fn : Name) (τ : Expr) (arity : Nat) : ReconstructM Expr := do
+  if let some head := (← get).heads[(fn, τ)]? then
+    return head
+  let decls := Array.ofFn (n := arity) fun i => (Name.mkSimple s!"x{i.val}", fun _ => pure τ)
+  let head ← withLocalDeclsD decls fun xs => do
+    let applied ← mkAppM fn xs
+    let args := applied.getAppArgs
+    pure (mkAppN applied.getAppFn (args.extract 0 (args.size - arity)))
+  modify fun s => { s with heads := s.heads.insert (fn, τ) head }
+  return head
+
+/-- `lhs = rhs` at `τ`, its universe looked up once per type. -/
+def eqAt (τ lhs rhs : Expr) : ReconstructM Expr := do
+  let level ← match (← get).levels[τ]? with
+    | some level => pure level
+    | none => do
+      let level ← getLevel τ
+      modify fun s => { s with levels := s.levels.insert τ level }
+      pure level
+  return mkApp3 (mkConst ``Eq [level]) τ lhs rhs
+
+/-- The Lean numeral for a whole number at a type, built once per type and value. -/
 partial def wholeNumeral (τ : Expr) (n : Int) : ReconstructM Expr := do
-  if n < 0 then
-    mkAppOptM ``Neg.neg #[some τ, none, some (← wholeNumeral τ (-n))]
-  else
-    mkAppOptM ``OfNat.ofNat #[some τ, some (mkRawNatLit n.toNat), none]
+  if let some e := (← get).numerals[(τ, n)]? then
+    return e
+  let e ←
+    if n < 0 then do
+      pure (mkApp (← headAt ``Neg.neg τ 1) (← wholeNumeral τ (-n)))
+    else
+      mkAppOptM ``OfNat.ofNat #[some τ, some (mkRawNatLit n.toNat), none]
+  modify fun s => { s with numerals := s.numerals.insert (τ, n) e }
+  return e
 
 /-- The term at one of TPTP's arithmetic types, cast into it if need be. -/
 def castTo (τ : Expr) (args : Array Expr) : ReconstructM (Option Expr) := do
@@ -158,16 +191,19 @@ from how it is written.
 -/
 def interpreted (name : String) (args : Array Expr) :
     ReconstructM (Option Expr) := do
+  -- Built from heads kept per operation and type, `headAt`, rather than by
+  -- `mkAppM`, which would find the instance again at every node.
   let binary (fn : Name) : ReconstructM (Option Expr) := do
     let #[a, b] := args | return none
-    return some (← mkAppM fn #[a, b])
+    return some (mkApp2 (← headAt fn (← inferType a) 2) a b)
   -- Vampire adds and multiplies any number of things at once, and Lean two at
   -- a time, to the left as it writes them.
   let folded (fn : Name) : ReconstructM (Option Expr) := do
     let some first := args[0]? | return none
+    let head ← headAt fn (← inferType first) 2
     let mut out := first
     for a in args.extract 1 args.size do
-      out ← mkAppM fn #[out, a]
+      out := mkApp2 head out a
     return some out
   match name with
   | "$sum" => folded ``HAdd.hAdd
@@ -181,13 +217,13 @@ def interpreted (name : String) (args : Array Expr) :
   | "$lesseq" => binary ``LE.le
   | "$greater" =>
     let #[a, b] := args | return none
-    return some (← mkAppM ``LT.lt #[b, a])
+    return some (mkApp2 (← headAt ``LT.lt (← inferType a) 2) b a)
   | "$greatereq" =>
     let #[a, b] := args | return none
-    return some (← mkAppM ``LE.le #[b, a])
+    return some (mkApp2 (← headAt ``LE.le (← inferType a) 2) b a)
   | "$uminus" =>
     let #[a] := args | return none
-    return some (← mkAppM ``Neg.neg #[a])
+    return some (mkApp (← headAt ``Neg.neg (← inferType a) 1) a)
   -- A cast between TPTP's arithmetic types. What Lean writes with `↑`, and
   -- nothing at all where the term is already at that type: the rationals of an
   -- `$int` problem are its integers cast, and vampire says so where the goal
@@ -219,8 +255,8 @@ def interpreted (name : String) (args : Array Expr) :
         else do
           let top ← wholeNumeral τ n
           let bottom ← wholeNumeral τ (Int.ofNat d)
-          mkAppM ``HDiv.hDiv #[top, bottom]
-      return some (← mkAppM ``HMul.hMul #[numeral, a])
+          pure (mkApp2 (← headAt ``HDiv.hDiv τ 2) top bottom)
+      return some (mkApp2 (← headAt ``HMul.hMul τ 2) numeral a)
     unless args.isEmpty do return none
     let τ ←
       match cast with
@@ -230,8 +266,8 @@ def interpreted (name : String) (args : Array Expr) :
         pure τ
     if d == 1 then
       return some (← wholeNumeral τ n)
-    return some (← mkAppM ``HDiv.hDiv
-      #[← wholeNumeral τ n, ← wholeNumeral τ (Int.ofNat d)])
+    return some (mkApp2 (← headAt ``HDiv.hDiv τ 2)
+      (← wholeNumeral τ n) (← wholeNumeral τ (Int.ofNat d)))
 
 /--
 A symbol applied to arguments, as a term or a literal over it is rebuilt: what
@@ -322,7 +358,7 @@ private def literalGround (vars : Vars) (l : Literal) :
         | throwError "equality literal without a recorded argument sort"
       let #[lhs, rhs] := args
         | throwError "equality literal with {args.size} arguments"
-      mkAppOptM ``Eq #[some (← sortType sortName), some lhs, some rhs]
+      eqAt (← sortType sortName) lhs rhs
     else
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"

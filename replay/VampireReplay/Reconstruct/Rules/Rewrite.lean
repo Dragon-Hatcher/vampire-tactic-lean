@@ -109,7 +109,7 @@ private def literalAt (vars : Vars) (bindings : Std.HashMap UInt32 Term)
         | throwError "equality literal without a recorded argument sort"
       let #[lhs, rhs] := args
         | throwError "equality literal with {args.size} arguments"
-      mkAppOptM ``Eq #[some (← sortType sortName), some lhs, some rhs]
+      eqAt (← sortType sortName) lhs rhs
     else
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
