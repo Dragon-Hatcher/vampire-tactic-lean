@@ -168,8 +168,8 @@ def prove (problem : String) (cfg : Config := {})
     -- it, which is an ordinary outcome, so the file decides the result rather
     -- than the code.
     unless ← outFile.pathExists do
-      return .error (.error s!"{workerName} produced no result \
-        (exit code {exitCode})\n{diagnostics}")
+      return .error ⟨s!"{workerName} produced no result \
+        (exit code {exitCode})\n{diagnostics}"⟩
     match Proof.ofByteArray (← IO.FS.readBinFile outFile) with
     | .error e => return .error e
     | .ok proof => return .ok (proof, diagnostics)

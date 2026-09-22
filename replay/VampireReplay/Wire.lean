@@ -52,18 +52,15 @@ private structure Layout where
   proofTextLen : Nat
 deriving Inhabited
 
-inductive Error where
-  | error (msg : String)
+/-- Why a proof could not be had or read: what went wrong, in words. -/
+structure Error where
+  message : String
 deriving Repr, BEq
 
-namespace Error
+instance : ToString Error := ⟨Error.message⟩
 
-protected def toString : Error → String
-  | .error msg => msg
-
-instance : ToString Error := ⟨Error.toString⟩
-
-end Error
+/-- Fails with `message`. -/
+def Error.fail (message : String) : Except Error α := .error ⟨message⟩
 
 inductive TerminationReason where
   | refutation
@@ -95,7 +92,7 @@ private def ofIndex (variants : Array α) (i : UInt32) (what : String) :
     Except Error α :=
   match variants[i.toNat]? with
   | some v => .ok v
-  | none => .error (.error s!"unknown {what} {i}")
+  | none => Error.fail (s!"unknown {what} {i}")
 
 /--
 A decoded proof: the worker's output buffer plus the offsets into it. All
@@ -128,12 +125,12 @@ private def version : UInt32 := 22
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
   if data.size < 41 * 4 then
-    .error (.error s!"proof is {data.size} bytes, too short for a header")
+    Error.fail (s!"proof is {data.size} bytes, too short for a header")
   if readU32 data 0 != magic then
-    .error (.error "proof does not start with the expected magic bytes")
+    Error.fail ("proof does not start with the expected magic bytes")
   let v := readU32 data 4
   if v != version then
-    .error (.error s!"proof has format version {v}, expected {version}")
+    Error.fail (s!"proof has format version {v}, expected {version}")
   let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
   -- Rules are numbered by where vampire declares them, so the count notices
   -- one added or removed and the fingerprint, a hash of their names in order,
@@ -141,7 +138,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numRules := word 34
   let fingerprint := readU32 data (40 * 4)
   if numRules != InferenceRule.count || fingerprint != InferenceRule.fingerprint then
-    .error (.error s!"the vampire the worker was built from declares \
+    Error.fail (s!"the vampire the worker was built from declares \
       {numRules} inference rules (fingerprint {fingerprint}), but \
       replay/VampireReplay/InferenceRule.lean was generated for \
       {InferenceRule.count} (fingerprint {InferenceRule.fingerprint}); rerun \
@@ -207,7 +204,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
   if data.size < expected then
-    .error (.error s!"proof is {data.size} bytes, expected at least {expected}")
+    Error.fail (s!"proof is {data.size} bytes, expected at least {expected}")
   let reason ← ofIndex
     #[.refutation, .satisfiable, .refutationNotFound, .inappropriate, .unknown,
       .timeLimit, .instructionLimit, .memoryLimit, .activationLimit]
@@ -828,7 +825,7 @@ def congruences (u : Unit) : Except Error (Array Congruence) := do
       | 3 => pure (.symm a.toNat)
       | 4 => pure (.goalEquality a.toNat b.toNat)
       | 5 => pure (.goalLiterals a.toNat b.toNat args)
-      | kind => .error (.error s!"unknown congruence step kind {kind}"))
+      | kind => Error.fail (s!"unknown congruence step kind {kind}"))
   return out
 
 /-- The generalised clause this clause came out of, if clausification made it. -/
