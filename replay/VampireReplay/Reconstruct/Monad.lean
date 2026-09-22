@@ -162,6 +162,12 @@ structure State where
   numerals : Std.HashMap (Expr × Int) Expr := {}
   /-- The universe each sort an equality has been stated at lives in. -/
   levels : Std.HashMap Expr Level := {}
+  /--
+  What went wrong binding the names a step introduces, for each step whose
+  names could not be bound before replay began: reported with the first name
+  that is then missing, since a name nothing bound is otherwise all it says.
+  -/
+  bindFailures : Array (UInt32 × MessageData) := #[]
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
@@ -181,9 +187,15 @@ Raised for a name vampire introduced itself, by skolemisation or AVATAR. Such a
 name stands for nothing in the Lean goal, so the step it appears in cannot even
 be stated until those rules are implemented.
 -/
-def throwIntroduced (kind name : String) : ReconstructM α :=
+def throwIntroduced (kind name : String) : ReconstructM α := do
+  let failures := (← get).bindFailures
+  let why :=
+    if failures.isEmpty then m!""
+    else m!"\nbinding what the proof introduces failed for {failures.size} \
+      step(s):{MessageData.joinSep (failures.toList.map fun (n, e) =>
+        m!"\n  step {n}: {e}") ""}"
   throwError "vampire introduced {kind} `{name}`, which has no counterpart in \
-    the goal; reconstruction cannot proceed"
+    the goal; reconstruction cannot proceed{why}"
 
 /-- The Lean type a TPTP sort stands for, if it stands for one. -/
 def sortType? (name : String) : ReconstructM (Option Expr) := do

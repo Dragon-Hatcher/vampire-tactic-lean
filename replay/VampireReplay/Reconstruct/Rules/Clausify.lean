@@ -470,6 +470,10 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
 
 end
 
+/-- The variables a term mentions. -/
+private partial def variablesOf (t : Term) : Array UInt32 :=
+  if t.isVar then #[t.var] else t.args.flatMap variablesOf
+
 /--
 Binds every symbol a unit's clausification introduced by skolemising.
 
@@ -505,17 +509,18 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
     !bound.any (·.1 == v) && !bindings.contains v
   withVars arguments {} fun vars _ => do
     let mut vars := vars
-    -- A binding can stand on another, so keep reading them until none is left.
+    -- A binding can stand on another: its image mentions variables other
+    -- bindings give. Each is read once every variable it mentions is known.
     let mut pending := parent.bindings
-    repeat
-      let before := pending.size
-      let mut again := #[]
-      for (v, image) in pending do
-        match ← (try pure (some (← term vars image)) catch _ => pure none) with
-        | some e => vars := vars.insert v e
-        | none => again := again.push (v, image)
-      pending := again
-      if pending.isEmpty || pending.size == before then break
+    while !pending.isEmpty do
+      let (ready, waiting) := pending.partition fun (_, image) =>
+        (variablesOf image).all vars.contains
+      if ready.isEmpty then
+        throwError "the bindings of a clausification step stand on variables \
+          nothing binds: {waiting.map (·.1)}"
+      for (v, image) in ready do
+        vars := vars.insert v (← term vars image)
+      pending := waiting
     registerBlock sorts sign skolems vars replaced
 
 def registerSkolemsOf (u : Vampire.Unit) : ReconstructM PUnit := do

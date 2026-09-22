@@ -144,7 +144,7 @@ Splitting makes a definition a premise of the steps using its name, but naming
 does not: it replaces a subformula in place and states the definition as a
 separate root. And a definition's own body can mention a skolem, while what an
 existential is skolemised over can mention a named predicate, so the two are
-bound together, repeatedly, until it stops making progress.
+bound together, in rounds, until a round binds nothing.
 -/
 private partial def bindIntroduced : ReconstructM PUnit := do
   let proof := (← read).proof
@@ -188,22 +188,38 @@ private partial def bindIntroduced : ReconstructM PUnit := do
       || u.rule? == some .generalSplittingComponent || !u.skolems.isEmpty
       || !u.namings.isEmpty
       || (u.genClause?.isSome && u.parents.any fun p => !p.skolems.isEmpty)
+  -- Which names a step mentions is not said, so the order is found by
+  -- trying: a step that fails is tried again once another has bound
+  -- something, until a round binds nothing. A failed attempt is undone -- the
+  -- metavariables it assigned and anything it bound -- so that it leaves
+  -- nothing half-made behind, and what it failed with is kept.
+  let mut failures : Std.HashMap UInt32 MessageData := {}
   repeat
     let mut progressed := false
     let mut again := #[]
     for u in pending do
+      let saved ← Meta.saveState
+      let state ← get
       try
         bind u
         progressed := true
-      catch _ =>
+        failures := failures.erase u.number
+      catch e =>
+        saved.restore
+        set state
+        failures := failures.insert u.number e.toMessageData
         again := again.push u
     pending := again
     unless progressed && !pending.isEmpty do break
-  unless pending.isEmpty do
-    for u in pending do
-      let name := (u.rule?.map (·.name)).getD "unknown"
-      trace[vampire] "could not bind what step {u.number} ({name}) introduces"
-  -- Anything left over is reported when its name is first needed.
+  -- What is left may be bound while replaying -- a definition mentioning a
+  -- skolem that clausifying introduces is -- so it is not an error yet; it is
+  -- reported when a name it would have bound is first needed.
+  for u in pending do
+    let name := (u.rule?.map (·.name)).getD "unknown"
+    trace[vampire] "could not bind what step {u.number} ({name}) introduces: \
+      {failures.getD u.number m!"no reason given"}"
+  modify fun s => { s with bindFailures := pending.map fun u =>
+    (u.number, failures.getD u.number m!"no reason given") }
 
 /--
 Replays a refutation as a Lean proof of `False`.
