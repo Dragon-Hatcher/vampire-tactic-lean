@@ -125,25 +125,30 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
     let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
     Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
     instantiateMVars goal
-  let answer ←
-    try
-      if claim.isSome || !discrete then byLinarith else byOmega
-    catch omegaFailed =>
-    try
-      if !discrete then
-        throw omegaFailed
-      else if claim.isSome then
-        byOmega
-      else
-        byLinarith
-    catch linarithFailed =>
+  -- Which procedures to ask, in order. `linarith` goes first where there is
+  -- a claim, which it proves outright, or where the numbers are not integers,
+  -- which is all it is asked about then; `omega` is the second opinion only
+  -- where they are.
+  let procedures : List (String × MetaM Expr) :=
+    if !discrete then [("linarith", byLinarith)]
+    else if claim.isSome then [("linarith", byLinarith), ("omega", byOmega)]
+    else [("omega", byOmega), ("linarith", byLinarith)]
+  let rec firstAnswer (rest : List (String × MetaM Expr))
+      (failures : Array (String × Exception)) : MetaM Expr := do
+    match rest with
+    | [] =>
       let stated ← facts.mapM fun f => do
         return indentExpr (← instantiateMVars (← inferType f))
+      let said := failures.toList.map fun (name, e) =>
+        m!"\n{name} said: {e.toMessageData}"
       throwError "nothing says {(claim.map fun c =>
           m!"that{indentExpr c}\nfollows").getD m!"these cannot all hold"} \
-        of any numbers:{MessageData.joinSep stated.toList ""}\n\
-        omega said: {omegaFailed.toMessageData}\n\
-        linarith said: {linarithFailed.toMessageData}"
+        of any numbers:{MessageData.joinSep stated.toList ""}\
+        {MessageData.joinSep said ""}"
+    | (name, ask) :: rest =>
+      try ask
+      catch e => firstAnswer rest (failures.push (name, e))
+  let answer ← firstAnswer procedures #[]
   -- What a procedure assigned is checked against what it was asked, because
   -- a procedure that answers the wrong question answers it convincingly.
   let stated ← instantiateMVars (← inferType answer)
