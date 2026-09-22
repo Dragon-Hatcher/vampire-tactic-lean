@@ -181,6 +181,133 @@ when the goal changes.
 -/
 private def suggestStrategyThreshold : Nat := 100
 
+/--
+What the schedule spent on the strategies the winning one won against:
+everything between the schedule starting and the proof being found, less the
+winner's own run. Starting the worker and parsing the problem are outside
+that, and a run naming the strategy pays them too, so this is what naming it
+saves. `none` when there is no proof to have found.
+-/
+private def failedStrategiesTime (proof : Proof) : Option Nat := do
+  let foundAt ← proof.foundAtTime?
+  let spent := (← proof.setupTime?) + (← proof.strategyTime?)
+  return foundAt - min foundAt spent
+
+/-- Why the search came back empty, as the error the tactic reports. -/
+private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α := do
+  -- `unknown` also covers vampire being stopped before it could report,
+  -- which only its own output explains.
+  let hint :=
+    if query.proof.terminationReason == .unknown then
+      m!"\n{query.diagnostics}"
+    else m!""
+  -- A named strategy is the only one that runs, so it is the first thing
+  -- to doubt: the goal it was found for may not be this one any more.
+  let pinned :=
+    if cfg.strategy.isEmpty then m!""
+    else m!" This call names a strategy, and that is the only one vampire \
+      tried; removing it puts the whole schedule back."
+  throwError "vampire did not refute the goal: \
+    {query.proof.terminationReason.describe}. Try passing more hypotheses, \
+    raising the timeout, or `+mono`.{pinned}{hint}"
+
+/--
+Replays the refutation, and what that took in milliseconds.
+
+Anything vampire introduced itself -- a skolem function, an AVATAR predicate, a
+subformula it named while clausifying -- has no counterpart in the goal, so a
+step speaking of one cannot even be stated until it is bound.
+-/
+private def replayQuery (cfg : TacticConfig) (query : Query) :
+    TacticM (Reconstruct.Outcome × Nat) := do
+  let before ← IO.monoMsNow
+  let outcome ←
+    try
+      query.preprocessed.goal.withContext
+        (Reconstruct.run query.proof query.symbols Arith.contradiction
+          Arith.rearranged Arith.cancelling cfg.checkSteps)
+    catch e =>
+      throwError "vampire refuted the goal but the proof could not be \
+        replayed: {e.toMessageData}"
+  let replay := (← IO.monoMsNow) - before
+  trace[vampire.timing] "replay took {replay}ms"
+  let some outcome := outcome
+    | throwError "vampire reported a refutation but produced no proof"
+  if ← isTracingEnabledFor `vampire then
+    let (_, (seen, applied)) :=
+      (subterms (← instantiateMVars outcome.proof)).run ({}, {})
+    let most := applied.toArray.qsort (fun a b => a.2 > b.2)
+    trace[vampire] "the proof has {seen.size} subterms, most of them {most.take 8}"
+  unless outcome.unimplemented.isEmpty do
+    trace[vampire] "rules with no replay: {outcome.unimplemented}"
+    -- The proof term holds a `sorry` for each of these, so it closes the
+    -- goal only when asked to, and says so when it does.
+    unless cfg.admit do
+      throwError "vampire's proof uses {outcome.unimplemented}, which this \
+        tactic does not replay yet. `+admit` closes the goal anyway, with \
+        those steps admitted as `sorry`"
+    logWarning m!"vampire's proof was replayed except for \
+      {outcome.unimplemented}, which this tactic does not implement yet; \
+      those steps are admitted, so the proof holds a `sorry`"
+  return (outcome, replay)
+
+/--
+What each phase of the call cost, for `+stats`.
+
+What Lean does with the term afterwards -- sharing its subterms and checking
+it -- is not counted, because it happens once the tactic has returned.
+`set_option profiler true` reports that.
+-/
+private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
+    (replay : Nat) : TacticM PUnit := do
+  let ms (name : String) (took : Nat) : MessageData :=
+    m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
+  let part (name : String) (took : Nat) : MessageData :=
+    m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
+  -- Where the search went: starting the worker and handing it the problem,
+  -- then the strategies that did not find it, then the one that did.
+  let within := Id.run do
+    let (some foundAt, some setup, some winner, some failed) :=
+      (query.proof.foundAtTime?, query.proof.setupTime?,
+        query.proof.strategyTime?, failedStrategiesTime query.proof)
+      | return m!""
+    if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
+      return m!""
+    return part "starting the worker" (query.search - foundAt)
+      ++ part "parsing the problem" setup
+      ++ part "failed strategies" failed
+      ++ part "successful strategy" winner
+  logInfo m!"vampire took {query.preprocessing + query.translation +
+      query.search + replay}ms, not counting what Lean then does with the \
+    proof term:{ms "preprocessing" query.preprocessing}\
+    {ms "translation" query.translation}{ms "search" query.search}{within}\
+    {ms "replay" replay}\n\
+    the proof vampire found had {outcome.steps} steps"
+
+/--
+Offers the call with the winning strategy named, where naming it saves enough
+to be worth a line of the file: a schedule that reached the right strategy
+quickly saves nothing worth having. `+stats` says where the time went whether
+or not this does.
+-/
+private def suggestStrategy (stx : Syntax) (rest : Array Syntax) (query : Query) :
+    TacticM PUnit := do
+  let some strategy := query.proof.strategy? | return
+  let some saved := failedStrategiesTime query.proof | return
+  unless saved ≥ suggestStrategyThreshold do return
+  let rest := rest.filterMap fun s =>
+    match s.reprint with
+    | some text =>
+      let text := text.trimAscii.toString
+      if text.isEmpty then none else some text
+    | none => none
+  let call := " ".intercalate
+    (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
+  Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
+    (header := s!"vampire found the proof with one strategy of its \
+schedule; the others took about {saved}ms of the {query.search}ms search, and \
+naming it skips them next time:")
+
 @[tactic vampireStx]
 def evalVampire : Tactic := fun stx => withMainContext do
   match stx with
@@ -196,82 +323,10 @@ def evalVampire : Tactic := fun stx => withMainContext do
       replaceMainGoal []
       return
     unless query.proof.refutation?.isSome do
-      -- `unknown` also covers vampire being stopped before it could report,
-      -- which only its own output explains.
-      let hint :=
-        if query.proof.terminationReason == .unknown then
-          m!"\n{query.diagnostics}"
-        else m!""
-      -- A named strategy is the only one that runs, so it is the first thing
-      -- to doubt: the goal it was found for may not be this one any more.
-      let pinned :=
-        if cfg.strategy.isEmpty then m!""
-        else m!" This call names a strategy, and that is the only one vampire \
-          tried; removing it puts the whole schedule back."
-      throwError "vampire did not refute the goal: \
-        {query.proof.terminationReason.describe}. Try passing more hypotheses, \
-        raising the timeout, or `+mono`.{pinned}{hint}"
-    -- Replay the refutation. Anything vampire introduced itself -- a skolem
-    -- function, an AVATAR predicate, a subformula it named while clausifying --
-    -- has no counterpart in the goal, so the step cannot even be stated.
-    let before ← IO.monoMsNow
-    let outcome ←
-      try
-        query.preprocessed.goal.withContext
-          (Reconstruct.run query.proof query.symbols Arith.contradiction
-            Arith.rearranged Arith.cancelling cfg.checkSteps)
-      catch e =>
-        throwError "vampire refuted the goal but the proof could not be \
-          replayed: {e.toMessageData}"
-    let replay := (← IO.monoMsNow) - before
-    trace[vampire.timing] "replay took {replay}ms"
-    if ← isTracingEnabledFor `vampire then
-      if let some outcome := outcome then
-        let (_, (seen, applied)) :=
-          (subterms (← instantiateMVars outcome.proof)).run ({}, {})
-        let most := applied.toArray.qsort (fun a b => a.2 > b.2)
-        trace[vampire] "the proof has {seen.size} subterms, \
-          most of them {most.take 8}"
-    let some outcome := outcome
-      | throwError "vampire reported a refutation but produced no proof"
-    unless outcome.unimplemented.isEmpty do
-      trace[vampire] "rules with no replay: {outcome.unimplemented}"
-      -- The proof term holds a `sorry` for each of these, so it closes the
-      -- goal only when asked to, and says so when it does.
-      unless cfg.admit do
-        throwError "vampire's proof uses {outcome.unimplemented}, which this \
-          tactic does not replay yet. `+admit` closes the goal anyway, with \
-          those steps admitted as `sorry`"
-      logWarning m!"vampire's proof was replayed except for \
-        {outcome.unimplemented}, which this tactic does not implement yet; \
-        those steps are admitted, so the proof holds a `sorry`"
+      throwNoRefutation cfg query
+    let (outcome, replay) ← replayQuery cfg query
     if cfg.stats then
-      -- What Lean does with the term afterwards -- sharing its subterms and
-      -- checking it -- is not counted here, because it happens once the
-      -- tactic has returned. `set_option profiler true` reports that.
-      let ms (name : String) (took : Nat) : MessageData :=
-        m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
-      -- Where the search went: starting the worker and handing it the
-      -- problem, then the strategies that did not find it, then the one
-      -- that did.
-      let winner := query.proof.strategyTime?.getD 0
-      let setup := query.proof.setupTime?.getD 0
-      let foundAt := query.proof.foundAtTime?.getD 0
-      let part (name : String) (took : Nat) : MessageData :=
-        m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
-      let within :=
-        if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
-          m!""
-        else part "starting the worker" (query.search - foundAt)
-          ++ part "parsing the problem" setup
-          ++ part "failed strategies" (foundAt - setup - winner)
-          ++ part "successful strategy" winner
-      logInfo m!"vampire took {query.preprocessing + query.translation +
-          query.search + replay}ms, not counting what Lean then does with the \
-        proof term:{ms "preprocessing" query.preprocessing}\
-        {ms "translation" query.translation}{ms "search" query.search}{within}\
-        {ms "replay" replay}\n\
-        the proof vampire found had {outcome.steps} steps"
+      reportStats query outcome replay
     query.preprocessed.goal.assign outcome.proof
     mv.assign (.mvar query.copy)
     replaceMainGoal []
@@ -279,31 +334,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     -- one, and only once it is known that its proof can be replayed -- which
     -- a proof holding a `sorry` cannot be said to be.
     if cfg.strategy.isEmpty && outcome.unimplemented.isEmpty then
-      if let some strategy := query.proof.strategy? then
-        -- What the schedule spent on the strategies this one won against:
-        -- everything between the schedule starting and the proof being
-        -- found, less the winner's own run. Starting the worker and handing
-        -- it the problem are outside that, and a named run pays them too.
-        let saved := query.proof.foundAtTime?.getD 0
-          - min (query.proof.foundAtTime?.getD 0)
-              (query.proof.setupTime?.getD 0 + query.proof.strategyTime?.getD 0)
-        -- Naming a strategy is worth a line of the file only for what it
-        -- saves, and a schedule that reached the right strategy quickly
-        -- saves nothing worth having. `+stats` says where the time went
-        -- whether or not this does.
-        if saved ≥ suggestStrategyThreshold then
-          let rest := #[cfgStx.raw, hsStx.raw].filterMap fun s =>
-            match s.reprint with
-            | some text =>
-              let text := text.trimAscii.toString
-              if text.isEmpty then none else some text
-            | none => none
-          let call := " ".intercalate
-            (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
-          Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
-            (header := s!"vampire found the proof with one strategy of its \
-schedule; the others took about {saved}ms of the {query.search}ms search, and \
-naming it skips them next time:")
+      suggestStrategy stx #[cfgStx.raw, hsStx.raw] query
   | _ => throwUnsupportedSyntax
 
 end Tactic
