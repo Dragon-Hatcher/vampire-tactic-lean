@@ -208,8 +208,8 @@ def evalVampire : Tactic := fun stx => withMainContext do
         if cfg.strategy.isEmpty then m!""
         else m!" This call names a strategy, and that is the only one vampire \
           tried; removing it puts the whole schedule back."
-      throwError "vampire did not refute the goal \
-        ({repr query.proof.terminationReason}). Try passing more hypotheses, \
+      throwError "vampire did not refute the goal: \
+        {query.proof.terminationReason.describe}. Try passing more hypotheses, \
         raising the timeout, or `+mono`.{pinned}{hint}"
     -- Replay the refutation. Anything vampire introduced itself -- a skolem
     -- function, an AVATAR predicate, a subformula it named while clausifying --

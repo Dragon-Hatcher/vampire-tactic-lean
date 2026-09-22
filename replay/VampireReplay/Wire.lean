@@ -74,6 +74,18 @@ inductive TerminationReason where
   | activationLimit
 deriving Inhabited, Repr, BEq, DecidableEq
 
+/-- Why vampire stopped, as a person would say it. -/
+def TerminationReason.describe : TerminationReason → String
+  | .refutation => "it found a refutation"
+  | .satisfiable => "the problem is satisfiable, so the goal does not follow from what was sent"
+  | .refutationNotFound => "it ran out of inferences to make"
+  | .inappropriate => "no strategy it has suits the problem"
+  | .unknown => "it stopped without saying why"
+  | .timeLimit => "it ran out of time"
+  | .instructionLimit => "it ran out of steps"
+  | .memoryLimit => "it ran out of memory"
+  | .activationLimit => "it reached its limit on activations"
+
 inductive UnitInputType where
   | «axiom»
   | assumption

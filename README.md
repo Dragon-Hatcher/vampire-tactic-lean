@@ -169,7 +169,7 @@ how to tell a slow translation from a slow search from a slow replay.
 
 | message | what it means |
 | --- | --- |
-| `vampire did not refute the goal (…)` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, that is the only one tried — remove it to put the schedule back |
+| `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, that is the only one tried — remove it to put the schedule back |
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
 | `vampire's proof uses …, which this tactic does not replay yet` | Vampire used an inference rule that has no reconstruction yet. `+admit` closes the goal anyway, with a `sorry` for those steps and a warning saying so |
 | `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
