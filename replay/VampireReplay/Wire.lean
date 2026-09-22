@@ -659,8 +659,9 @@ def literals (c : Clause) : Array Literal :=
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
-/-- The number of literals. -/
-def size (c : Clause) : Nat := c.literals.size
+/-- The number of literals, read off the clause rather than counted. -/
+def size (c : Clause) : Nat :=
+  (c.proof.field c.proof.layout.units 28 c.idx.toNat 5).toNat
 
 /-- Whether this is the empty clause. -/
 def isEmpty (c : Clause) : Bool := c.size == 0
