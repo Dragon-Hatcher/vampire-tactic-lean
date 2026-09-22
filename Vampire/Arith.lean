@@ -154,7 +154,7 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
   let stated ← instantiateMVars (← inferType answer)
   unless ← isDefEq stated (claim.getD (mkConst ``False)) do
     throwError "a decision procedure was asked for{indentExpr
-      (claim.getD (mkConst ``False))}\nand gave something       proving{indentExpr stated}"
+      (claim.getD (mkConst ``False))}\nand gave something proving{indentExpr stated}"
   return answer
 
 /--

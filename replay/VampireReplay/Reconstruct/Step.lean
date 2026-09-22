@@ -122,7 +122,7 @@ def coreOf (u : Vampire.Unit) : ReconstructM Expr := do
   let mut core ← conclusionOf u
   for name in u.splits do
     unless core.isForall do
-      throwError "step {u.number} holds under `{name}` but states        {indentExpr core}"
+      throwError "step {u.number} holds under `{name}` but states{indentExpr core}"
     core := core.bindingBody!
   return core
 

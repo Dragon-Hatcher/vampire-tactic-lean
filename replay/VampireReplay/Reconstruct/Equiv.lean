@@ -325,7 +325,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
       -- An arrow: its left side is negative, which is why this is an ↔.
       return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
     unless ← isDefEq ad bd do
-      throwError         m!"equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
+      throwError m!"equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
     return ← withLocalDeclD `x ad fun x => do
       let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
       mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
