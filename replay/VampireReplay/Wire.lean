@@ -132,7 +132,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 22
+private def version : UInt32 := 23
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -185,7 +185,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let stringsLen := word 32
   let proofTextLen := word 33
   let functions := 41 * 4
-  let predicates := functions + numFunctions * 2 * 4
+  let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
   let args := terms + numTerms * 4 * 4
@@ -230,7 +230,10 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let range (what : String) (first count bound : Nat) : Except Error Unit :=
     if count == 0 || first + count ≤ bound then pure ()
     else Error.fail s!"proof has {what} {first} to {first + count}, of {bound}"
-  for i in [0:numFunctions] do index "function name" (at_ functions 2 i 0) stringsLen
+  for i in [0:numFunctions] do
+    index "function name" (at_ functions 5 i 0) stringsLen
+    optional "numerator" (at_ functions 5 i 3) stringsLen
+    optional "denominator" (at_ functions 5 i 4) stringsLen
   for i in [0:numPredicates] do index "predicate name" (at_ predicates 3 i 0) stringsLen
   for i in [0:numSorts] do index "sort name" (at_ sorts 1 i 0) stringsLen
   for i in [0:numTerms] do
@@ -387,10 +390,24 @@ def proofText (p : Proof) : String :=
 
 end Proof
 
+/--
+A number a function symbol stands for: `numerator / denominator` at one of
+TPTP's arithmetic sorts, and whether the symbol is that number itself or
+ALASCA's multiplication by it, which takes one argument.
+-/
+structure Numeral where
+  sort : String
+  multiplies : Bool
+  numerator : Int
+  denominator : Nat
+deriving Repr, Inhabited
+
 /-- A symbol's name and arity. -/
 structure Symbol where
   name : String
   arity : UInt32
+  /-- The number the symbol is, if it is one; the worker reads it off vampire. -/
+  numeral? : Option Numeral := none
   /--
   Whether polarity flipping flipped this predicate, so that every clause after
   it means the opposite by the predicate than the ones before it do.
@@ -524,10 +541,19 @@ namespace Proof
 /-- The function symbols of the problem's signature. -/
 def function? (p : Proof) (functor : UInt32) : Option Symbol :=
   if functor.toNat >= p.layout.numFunctions then none
-  else some {
-    name := p.string (p.field p.layout.functions 2 functor.toNat 0)
-    arity := p.field p.layout.functions 2 functor.toNat 1
-  }
+  else
+    let at_ (off : Nat) := p.field p.layout.functions 5 functor.toNat off
+    let numeral? : Option Numeral := do
+      let kind := (at_ 2).toNat
+      let sort ← ["$int", "$rat", "$real"][kind % 4 - 1]?
+      let numerator ← (p.string (at_ 3)).toInt?
+      let denominator ← (p.string (at_ 4)).toNat?
+      return { sort, multiplies := kind ≥ 4, numerator, denominator }
+    some { name := p.string (at_ 0), arity := at_ 1, numeral? }
+
+/-- Every function symbol of the problem's signature. -/
+def functions (p : Proof) : Array Symbol :=
+  (Array.range p.layout.numFunctions).filterMap fun i => p.function? (UInt32.ofNat i)
 
 /-- The predicate symbols of the problem's signature. -/
 def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=

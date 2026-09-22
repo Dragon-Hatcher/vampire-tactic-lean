@@ -19,7 +19,13 @@
  *             many inference rules vampire declares and word 40 a hash of their
  *             names in order (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt),
  *             which is what the Lean side checks its generated copy against
- *   functions {nameOff, arity}          -- indexed by a term's functor
+ *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
+ *                                       -- indexed by a term's functor
+ *             `numeral` says what number the symbol is, if it is one: 0 = none,
+ *             1/2/3 = an integer, rational or real numeral, and 5/6/7 the same
+ *             for ALASCA's multiplication by that numeral, which takes one
+ *             argument. The value is `numerator / denominator`, each written
+ *             out in decimal, and `NONE` where the symbol is no numeral
  *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
  *             flags: 1 = polarity flipping flipped this predicate, so that
  *             every clause after it means the opposite by the predicate than
@@ -156,6 +162,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <type_traits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -195,7 +202,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 22;
+const uint32_t VERSION = 23;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /*
@@ -648,6 +655,7 @@ struct Encoder {
       Signature::Symbol* sym = env.signature->getFunction(i);
       functions.push_back(addString(sym->name()));
       functions.push_back(sym->arity());
+      encodeNumeral(i, sym);
     }
     for (unsigned i = 0; i < env.signature->predicates(); i++) {
       Signature::Symbol* sym = env.signature->getPredicate(i);
@@ -655,6 +663,46 @@ struct Encoder {
       predicates.push_back(sym->arity());
       predicates.push_back(sym->wasFlipped() ? 1 : 0);
     }
+  }
+
+  /** A number, as `numeral`, `numeratorOff` and `denominatorOff` say it. */
+  template <class Number>
+  void pushNumber(uint32_t kind, Number const& n)
+  {
+    std::ostringstream num, den;
+    if constexpr (std::is_same<Number, IntegerConstantType>::value) {
+      num << n;
+      den << 1;
+    } else {
+      num << n.numerator();
+      den << n.denominator();
+    }
+    functions.push_back(kind);
+    functions.push_back(addString(num.str()));
+    functions.push_back(addString(den.str()));
+  }
+
+  /**
+   * What number a function symbol is, so that replay reads it rather than
+   * parsing it out of how the symbol is printed.
+   */
+  void encodeNumeral(unsigned functor, Signature::Symbol* sym)
+  {
+    if (sym->integerConstant())
+      return pushNumber(1, sym->integerValue());
+    if (sym->rationalConstant())
+      return pushNumber(2, sym->rationalValue());
+    if (sym->realConstant())
+      return pushNumber(3, sym->realValue());
+    if (auto n = env.signature->tryLinMul<IntegerConstantType>(functor))
+      return pushNumber(5, *n);
+    if (auto n = env.signature->tryLinMul<RationalConstantType>(functor))
+      return pushNumber(6, *n);
+    if (auto n = env.signature->tryLinMul<RealConstantType>(functor))
+      return pushNumber(7, *n);
+    functions.push_back(0);
+    functions.push_back(NONE);
+    functions.push_back(NONE);
   }
 
   /** Interns a sort, which for our purposes is always an atomic type. */
@@ -1208,7 +1256,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, reason);
   putWord(buf, refutation == NONE ? 0 : 1);
   putWord(buf, refutation);
-  putWord(buf, static_cast<uint32_t>(enc.functions.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.functions.size() / 5));
   putWord(buf, static_cast<uint32_t>(enc.predicates.size() / 3));
   putWord(buf, static_cast<uint32_t>(enc.sorts.size()));
   putWord(buf, static_cast<uint32_t>(enc.terms.size() / 4));

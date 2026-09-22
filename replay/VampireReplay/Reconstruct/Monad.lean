@@ -83,6 +83,11 @@ structure Context where
   no procedure that reads its facts as linear constraints can see it.
   -/
   cancelling : Expr → Expr → Expr → MetaM (Option Expr) := fun _ _ _ => pure none
+  /--
+  The number each numeral symbol stands for, by its name and arity: ALASCA's
+  multiplication by a number is printed as the number is.
+  -/
+  numerals : Std.HashMap (String × Nat) Numeral := {}
 
 structure State where
   /-- The proof term built for each step, by vampire's number for it. -/

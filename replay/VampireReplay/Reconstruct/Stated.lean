@@ -13,40 +13,6 @@ def connectiveOf (f : Formula) : ReconstructM Connective :=
 /-- The local standing for each of a step's variables. -/
 abbrev Vars := Std.HashMap UInt32 Expr
 
-/-- What a name of the form `f(x)` has inside the parentheses. -/
-private def inside (name : String) : String :=
-  ((name.dropWhile (· != '(')).drop 1).dropEnd 1 |>.toString
-
-/--
-The arithmetic type a numeral of TPTP's is at, read off how it is written: a
-whole number is an integer, `p/q` a rational and one with a point a real. What
-a cast says it is at comes first, `p/q` being how a whole real is written too.
--/
-private def numeralSort (name : String) : Option (String × Int × Nat) :=
-  let (negative, digits) :=
-    if name.startsWith "-" then (true, (name.drop 1).toString) else (false, name)
-  let signed (n : Int) : Int := if negative then -n else n
-  let whole (s : String) : Option Nat :=
-    if !s.isEmpty && s.all Char.isDigit then s.toNat? else none
-  match digits.splitOn "/" with
-  | [n, d] => do
-    let n ← whole n
-    let d ← whole d
-    guard (d != 0)
-    return ("$rat", signed n, d)
-  | [n] =>
-    match n.splitOn "." with
-    | [n] => do return ("$int", signed (← whole n), 1)
-    | [n, fraction] => do
-      -- A real as TPTP writes it: the digits after the point over that power
-      -- of ten, which is the quotient the goal itself would have written.
-      let n ← whole n
-      let f ← whole fraction
-      let scale := 10 ^ fraction.length
-      return ("$real", signed (Int.ofNat (n * scale + f)), scale)
-    | _ => none
-  | _ => none
-
 /--
 `fn` at type `τ`, applied to its type and instance arguments and waiting for
 `arity` arguments of its own: `@HAdd.hAdd τ τ τ inst` for `HAdd.hAdd` at two.
@@ -236,38 +202,21 @@ def interpreted (name : String) (args : Array Expr) :
     if (← inferType a).isConstOf ``Int then return some a
     return some (← mkAppM `Int.floor #[a])
   | _ =>
-    -- A numeral is written as it reads, and vampire names a cast of one after
-    -- the whole application: `$to_real(3/1)` is the real three. Which type a
-    -- numeral is at is the cast's to say -- `3/1` is how vampire writes a
-    -- whole real as much as a rational -- and otherwise how it is written.
-    let (name, cast) :=
-      if name.startsWith "$to_real(" then (inside name, some `Real)
-      else if name.startsWith "$to_rat(" then (inside name, some `Rat)
-      else if name.startsWith "$to_int(" then (inside name, some ``Int)
-      else (name, none)
-    let some (sort, n, d) := numeralSort name | return none
-    -- A numeral of arity one is what it multiplies: ALASCA writes a term's
-    -- coefficient as the numeral applied to it.
-    if let #[a] := args then
+    -- A numeral, whose value the worker read off vampire's signature rather
+    -- than leaving it to be parsed out of how the symbol is printed.
+    let some n := (← read).numerals[(name, args.size)]? | return none
+    let numeralAt (τ : Expr) : ReconstructM Expr := do
+      if n.denominator == 1 then return ← wholeNumeral τ n.numerator
+      return mkApp2 (← headAt ``HDiv.hDiv τ 2)
+        (← wholeNumeral τ n.numerator) (← wholeNumeral τ (Int.ofNat n.denominator))
+    -- ALASCA writes a term's coefficient as the numeral applied to it.
+    if n.multiplies then
+      let #[a] := args | return none
       let τ ← inferType a
-      let numeral ←
-        if d == 1 then wholeNumeral τ n
-        else do
-          let top ← wholeNumeral τ n
-          let bottom ← wholeNumeral τ (Int.ofNat d)
-          pure (mkApp2 (← headAt ``HDiv.hDiv τ 2) top bottom)
-      return some (mkApp2 (← headAt ``HMul.hMul τ 2) numeral a)
+      return some (mkApp2 (← headAt ``HMul.hMul τ 2) (← numeralAt τ) a)
     unless args.isEmpty do return none
-    let τ ←
-      match cast with
-      | some name => pure (mkConst name)
-      | none => do
-        let some τ ← sortType? sort | throwIntroduced "the sort" sort
-        pure τ
-    if d == 1 then
-      return some (← wholeNumeral τ n)
-    return some (mkApp2 (← headAt ``HDiv.hDiv τ 2)
-      (← wholeNumeral τ n) (← wholeNumeral τ (Int.ofNat d)))
+    let some τ ← sortType? n.sort | throwIntroduced "the sort" n.sort
+    return some (← numeralAt τ)
 
 /--
 A symbol applied to arguments, as a term or a literal over it is rebuilt: what

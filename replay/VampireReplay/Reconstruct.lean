@@ -233,7 +233,11 @@ def run (proof : Proof) (symbols : Symbols)
     | none => none
   let (outcome, _) ←
     (go.run { symbols, proof, givens, contradiction, rearranged, cancelling, checkSteps
-              flipped := proof.polarityFlipBoundary }).run {}
+              flipped := proof.polarityFlipBoundary
+              numerals := proof.functions.foldl (init := {}) fun acc sym =>
+                match sym.numeral? with
+                | some n => acc.insert (sym.name, sym.arity.toNat) n
+                | none => acc }).run {}
   return some outcome
 
 end Vampire.Reconstruct
