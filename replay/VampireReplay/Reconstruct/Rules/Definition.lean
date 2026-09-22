@@ -217,24 +217,6 @@ private def definitions (step : Step) :
   return out
 
 /--
-What a symbol applies to its arguments, for a congruence over them.
-
-For a symbol the goal gave a meaning to that is the symbol itself; for one TPTP
-interprets, it is whatever Lean writes the operation with, which is read off an
-application of it -- `$sum` of two terms is `HAdd.hAdd` at their type, and the
-type and the instance belong to the head rather than to the arguments.
--/
-private def headOf (name : String) (arity : Nat) (args : Array Expr) :
-    ReconstructM Expr := do
-  match ← interpreted name args with
-  | some applied =>
-    let applied ← instantiateMVars applied
-    let whole := applied.getAppArgs
-    if whole.size < arity then return applied
-    return mkAppN applied.getAppFn (whole.extract 0 (whole.size - arity))
-  | none => symbolExpr name
-
-/--
 `t` at the unfolded definitions, with a proof that it equals what unfolding
 makes of it.
 
@@ -251,15 +233,17 @@ private partial def unfold
     return (e, ← mkEqRefl e)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
-  let head ← headOf symbol.name t.args.size (← t.args.mapM (term vars))
+  let before ← t.args.mapM (term vars)
   let mut args := #[]
-  let mut congruence ← mkEqRefl head
-  for arg in t.args do
+  let mut equal := #[]
+  for (arg, given) in t.args.zip before do
     let (unfolded, proof) ← unfold defs vars arg
     args := args.push unfolded
-    congruence ← mkCongr congruence proof
+    equal := equal.push (if unfolded == given then none else some proof)
+  let congruence ← congrApplied symbol.name before args equal
+  let applied ← applySymbol symbol.name args
   match defs[symbol.name]? with
-  | none => return (mkAppN head args, congruence)
+  | none => return (applied, congruence)
   | some (definition, parameters, body, proof, flipped) =>
     let bound := Std.HashMap.ofList (parameters.zip args).toList
     let mut instances := #[]
@@ -275,9 +259,9 @@ private partial def unfold
       | throwError "a definition premise does not state an equation"
     -- The definition speaks of the symbol at its own arguments, so it applies
     -- once those have been unfolded.
-    unless ← isDefEq defined (mkAppN head args) do
+    unless ← isDefEq defined applied do
       throwError "the definition of {symbol.name} states{indentExpr defined}\n\
-        which is not{indentExpr (mkAppN head args)}"
+        which is not{indentExpr applied}"
     let mut bodyVars : Vars := {}
     for (v, e) in parameters.zip args do
       bodyVars := bodyVars.insert v e
@@ -319,21 +303,27 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
+        let before ← l.args.mapM (term vars)
         let mut args := #[]
-        let mut congruence ←
+        let mut equal := #[]
+        for (arg, given) in l.args.zip before do
+          let (unfolded, proof) ← unfold defs vars arg
+          args := args.push unfolded
+          equal := equal.push (if unfolded == given then none else some proof)
+        let congruence ←
           if l.isEquality then
             let some sortName := l.sort?
               | throwError "equality literal without a recorded argument sort"
-            mkEqRefl (← mkAppOptM ``Eq #[some (← sortType sortName)])
+            let mut congruence ← mkEqRefl (← mkAppOptM ``Eq #[some (← sortType sortName)])
+            for (proof?, given) in equal.zip before do
+              congruence ← match proof? with
+                | some proof => mkCongr congruence proof
+                | none => mkCongrFun congruence given
+            pure congruence
           else
             let some symbol := l.symbol?
               | throwError "literal has unknown predicate {l.predicate}"
-            mkEqRefl (← headOf symbol.name l.args.size
-              (← l.args.mapM (term vars)))
-        for arg in l.args do
-          let (unfolded, proof) ← unfold defs vars arg
-          args := args.push unfolded
-          congruence ← mkCongr congruence proof
+            congrApplied symbol.name before args equal
         let atom ←
           if ← literalPolarity l then pure congruence
           else mkCongrArg (mkConst ``Not) congruence

@@ -152,6 +152,40 @@ def interpreted (name : String) (args : Array Expr) :
     return some (← mkAppM ``HDiv.hDiv
       #[← wholeNumeral τ n, ← wholeNumeral τ (Int.ofNat d)])
 
+/--
+A symbol applied to arguments, as a term or a literal over it is rebuilt: what
+TPTP interprets itself as Lean writes it, and anything else as what the goal or
+a definition gave it.
+-/
+def applySymbol (name : String) (args : Array Expr) : ReconstructM Expr := do
+  match ← interpreted name args with
+  | some e => return e
+  | none => return mkAppN (← symbolExpr name) args
+
+/--
+`sym before = sym after`, from a proof that each argument of the one is the
+same argument of the other, `none` where they are the same term.
+
+One argument at a time, through what `applySymbol` makes of the symbol: an
+interpreted symbol is not a head applied to its arguments -- `$sum` of three
+terms is two additions, a cast to the sort a term is at already is the term,
+and `$greater` swaps its arguments -- so the congruence has to be taken where
+each argument actually stands rather than off a head.
+-/
+def congrApplied (name : String) (before after : Array Expr)
+    (equal : Array (Option Expr)) : ReconstructM Expr := do
+  let mut current := before
+  let mut proof ← mkEqRefl (← applySymbol name before)
+  for i in [0:before.size] do
+    let some (some p) := equal[i]? | continue
+    let some x := before[i]? | continue
+    let some y := after[i]? | continue
+    let motive ← withLocalDeclD `x (← inferType x) fun v => do
+      mkLambdaFVars #[v] (← applySymbol name (current.set! i v))
+    proof ← mkEqTrans proof (← mkCongrArg motive p)
+    current := current.set! i y
+  return proof
+
 /-- A term, and whether it is ground -- which is what makes it worth keeping. -/
 private partial def termGround (vars : Vars) (t : Term) :
     ReconstructM (Expr × Bool) := do
@@ -169,10 +203,7 @@ private partial def termGround (vars : Vars) (t : Term) :
     let (e, argGround) ← termGround vars arg
     args := args.push e
     ground := ground && argGround
-  let built ←
-    match ← interpreted symbol.name args with
-    | some e => shared e
-    | none => shared (mkAppN (← symbolExpr symbol.name) args)
+  let built ← shared (← applySymbol symbol.name args)
   if ground then
     modify fun s => { s with groundTerms := s.groundTerms.insert t.index built }
   return (built, ground)
@@ -214,9 +245,7 @@ private def literalGround (vars : Vars) (l : Literal) :
     else
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
-      match ← interpreted symbol.name args with
-      | some atom => pure atom
-      | none => pure (mkAppN (← symbolExpr symbol.name) args)
+      applySymbol symbol.name args
   return (← shared (if polarity then atom else mkApp (mkConst ``Not) atom), ground)
 
 /-- Rebuilds a vampire literal as a Lean proposition. -/
