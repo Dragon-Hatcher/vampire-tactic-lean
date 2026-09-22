@@ -126,46 +126,30 @@ literals and `h` denies the equality the step resolved on.
 The unifier does not make the two terms one: what it could not unify it defers
 into disequality literals of the conclusion. So the conclusion holds either
 because one of those disequalities does -- and then it is that literal -- or
-because none does, and then the pairs deferred are equal, the two terms really
-are one, and `h` denies it.
+because none does, and then the pairs deferred are equal, the two terms are one
+by congruence at those pairs, and `h` denies it.
 -/
-partial def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
+def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
     ReconstructM Expr := do
-  let some (first, count) := step.unit.constraints
-    | -- Equality resolution either unifies the two sides or defers what it
-      -- could not unify into constraints. Neither here: the step resolved an
-      -- inequality between two terms that no substitution makes one, which is
-      -- vampire's https://github.com/vprover/vampire/issues/938. The premise
-      -- gives the conclusion only of the terms that do make them equal, not of
-      -- every term, so there is nothing here to replay.
-      throwError "vampire resolved an inequality between{indentExpr inner}\n\
-        whose sides no substitution makes one, and recorded neither a unifier \
-        nor a constraint: this is vampire's unsoundness bug \
-        https://github.com/vprover/vampire/issues/938, and the step does not \
-        hold"
-  let some clause := step.unit.clause?
-    | throwError "a step with unification constraints is not a clause"
-  let mut constraints := #[]
-  for i in [first : first + count] do
-    let some l := clause.literals[i]?
-      | throwError "the step records a constraint at literal {i}, and its \
-          conclusion has {clause.literals.size}"
-    constraints := constraints.push (← Reconstruct.literal vars l)
-  let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
-    let some constraint := constraints[i]?
-      | -- Every pair the unifier deferred is equal, so the two terms it was to
-        -- unify are one.
-        let made ← byArithmetic facts inner
-        return ← mkAppOptM ``absurd #[some inner, some rest, some made, some h]
-    let some equal := constraint.not?
-      | throwError "the constraint{indentExpr constraint}\nis not a \
-          disequality"
-    let deferred ← withLocalDeclD `h equal fun x => do
-      mkLambdaFVars #[x] (← go (facts.push x) (i + 1))
-    let held ← withLocalDeclD `h constraint fun x => do
-      mkLambdaFVars #[x] (← placeLiteral rest x)
-    mkAppM ``Classical.byCases #[deferred, held]
-  go #[] 0
+  if step.unit.constraints.isNone then
+    -- Equality resolution either unifies the two sides or defers what it
+    -- could not unify into constraints. Neither here: the step resolved an
+    -- inequality between two terms that no substitution makes one, which is
+    -- vampire's https://github.com/vprover/vampire/issues/938. The premise
+    -- gives the conclusion only of the terms that do make them equal, not of
+    -- every term, so there is nothing here to replay.
+    throwError "vampire resolved an inequality between{indentExpr inner}\n\
+      whose sides no substitution makes one, and recorded neither a unifier \
+      nor a constraint: this is vampire's unsoundness bug \
+      https://github.com/vprover/vampire/issues/938, and the step does not \
+      hold"
+  let some (_, lhs, rhs) := inner.eq?
+    | throwError "the literal resolved on is not an equality:{indentExpr inner}"
+  underConstraints step vars rest fun equal => do
+    let some made ← equalUnder equal lhs rhs
+      | throwError "the sides of{indentExpr inner}\nare not one term even with \
+          every pair the unifier deferred equal"
+    mkAppOptM ``absurd #[some inner, some rest, some made, some h]
 
 /--
 `equality_resolution_with_deletion`: the premise at the binding one of its
