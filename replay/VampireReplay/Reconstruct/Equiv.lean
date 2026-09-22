@@ -468,6 +468,12 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Expr) := do
       | none =>
         let (ca, pa) ← sameWayRound a
         return (mkApp (mkConst ``Not) ca, ← mkAppM ``not_congr #[pa])
+    -- `a ≠ b` is `¬(a = b)` by definition, and stated that way the equation
+    -- inside can be turned about like any other.
+    | Ne α x y =>
+      let negated := mkApp (mkConst ``Not) (← mkAppOptM ``Eq #[some α, some x, some y])
+      return (negated, ← mkExpectedTypeHint (← mkAppOptM ``Iff.refl #[some e])
+        (mkApp2 (mkConst ``Iff) e negated))
     | And a b => congruence ``And a b
     | Or a b => congruence ``Or a b
     | Iff a b => congruence ``Iff a b

@@ -17,3 +17,8 @@ example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
 example {ι : Type} (f g : ι → ι) (p : ι → Prop) (h : ∀ x, g x = f x)
     (hp : ∀ x, p (g x)) (a : ι) : p (f a) := by
   vampire (options := #[("equality_proxy", "RSTC")]) [h, hp]
+
+-- `x ≠ a` is `¬(x = a)`, which vampire can state the other way round.
+example {ι : Type} (f : ι → ι) (a b c : ι) (h : ∀ x, f x = a) (h2 : b = f c)
+    (h3 : ∀ x, x ≠ a ∨ x ≠ b) : False := by
+  vampire [h, h2, h3]
