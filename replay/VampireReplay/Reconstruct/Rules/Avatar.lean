@@ -252,11 +252,12 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
   -- say that each of their negations holds.
   let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
     let mut known : Std.HashMap String (Expr × Expr) := {}
+    let suffix := suffixJunctions ``Or ``False parts
     for (name, i) in c.literals.zipIdx do
       let (flipped, says) ← flipName name
       let some body := parts[i]? | throwError "missing literal"
       let refuted ← withLocalDeclD `d body fun d => do
-        mkLambdaFVars #[d] (mkApp n (← injectGiven parts i d))
+        mkLambdaFVars #[d] (mkApp n (← injectGiven parts i d (suffix? := some suffix)))
       known := known.insert (flippedName name)
         (← mkAppM ``Iff.mpr #[says, refuted], flipped)
     mkLambdaFVars #[n] (← propagate states proved known c.premises 0 #[])

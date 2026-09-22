@@ -213,14 +213,19 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- As in `placeLiteral`: a literal is looked for as it stands before the
     -- other ways of stating it are built, which for a clause of a few hundred
     -- literals is the whole cost of the step.
+    let targetSuffix := suffixJunctions ``Or ``False targetParts
     let placeIn (chain candidate : Expr) : ReconstructM (Option Expr) := do
-      let parts := if chain == target then targetParts else junctionParts ``Or chain
+      let (parts, suffix) :=
+        if chain == target then (targetParts, targetSuffix)
+        else
+          let parts := junctionParts ``Or chain
+          (parts, suffixJunctions ``Or ``False parts)
       let stated ← instantiateMVars (← inferType candidate)
       if let some i := parts.findIdx? (· == stated) then
-        return some (← injectGiven parts i candidate)
+        return some (← injectGiven parts i candidate (suffix? := some suffix))
       for (part, i) in parts.zipIdx do
         if ← isDefEq part stated then
-          return some (← injectGiven parts i candidate)
+          return some (← injectGiven parts i candidate (suffix? := some suffix))
       return none
     -- Every literal the step kept is one of the conclusion's; one it dropped
     -- has to be refutable on its own, as `t ≠ t` is.

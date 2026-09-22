@@ -222,19 +222,20 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
   let target := junction ``Or ``False parts
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
+      let suffix := suffixJunctions ``Or ``False parts
       let refuted (e : Expr) : ReconstructM Expr := do
         -- The clause usually says just what the step put in it, so that is
         -- looked for first: a clause of a few hundred literals is refuted a
         -- literal at a time, once for every step of the clausification.
         if let some i := parts.findIdx? (· == e) then
           return ← withLocalDeclD `p e fun p => do
-            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
+            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
         -- What a step put in a clause is recorded before the clausifier's own
         -- normalisation has unwrapped a negation into the sign it carries.
         for (part, i) in parts.zipIdx do
           let some says ← sameUpToDoubleNegation part e | continue
           let refutation ← withLocalDeclD `p part fun p => do
-            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p))
+            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
           return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], refutation]
         throwError "the clause does not say{indentExpr e}\nwhich a step it was \
           reached from does"

@@ -215,10 +215,11 @@ def divisibility (step : Step) : ReconstructM Expr := do
     let some cancel ← (← read).cancelling x z w
       | throwError "nothing says that multiplication by a nonzero \
         {← inferType x} cancels"
+    let suffix := suffixJunctions ``Or ``False parts
     let inject (part h : Expr) : ReconstructM Expr := do
       let some i := parts.findIdx? (· == part)
         | throwError "the clause does not say{indentExpr part}"
-      injectGiven parts i h
+      injectGiven parts i h (suffix? := some suffix)
     -- Either the multiplier is zero, or one of the products fails, or both
     -- hold and the multiplier cancels.
     let byCases (p : Expr) (yes no : Expr → ReconstructM Expr) :

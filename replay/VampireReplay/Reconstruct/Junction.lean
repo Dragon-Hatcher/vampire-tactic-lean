@@ -173,12 +173,16 @@ def elimGiven (parts : Array Expr)
   let (onRight, _) ← elimGivenFrom parts suffix 1 offset handler (some motive)
   return mkApp6 (mkConst ``Or.elim) parts[0]! suffix[1]! motive h onLeft onRight
 
-/-- The `i`th part of a conjunction of the given parts, from a proof of the whole. -/
-def projectGiven (parts : Array Expr) (i : Nat) (h : Expr) :
-    ReconstructM Expr := do
+/--
+The `i`th part of a conjunction of the given parts, from a proof of the whole.
+
+@b suffix? is `suffixJunctions ``And ``True parts`, as for `injectGiven`.
+-/
+def projectGiven (parts : Array Expr) (i : Nat) (h : Expr)
+    (suffix? : Option (Array Expr) := none) : ReconstructM Expr := do
   if parts.size <= 1 then return h
   let i := min i (parts.size - 1)
-  let suffix := suffixJunctions ``And ``True parts
+  let suffix := suffix?.getD (suffixJunctions ``And ``True parts)
   let mut acc := h
   for k in [0:i] do
     acc := mkApp3 (mkConst ``And.right) parts[k]! suffix[k + 1]! acc

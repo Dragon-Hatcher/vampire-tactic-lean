@@ -185,9 +185,10 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     if stated.isAppOfArity ``And 2 then
       let rest := facts.eraseIdx! i
       let parts := junctionParts ``And stated
+      let suffix := suffixJunctions ``And ``True parts
       let mut extended := rest
       for j in [0 : parts.size] do
-        extended := extended.push (← projectGiven parts j fact)
+        extended := extended.push (← projectGiven parts j fact (suffix? := some suffix))
       return ← byArithmetic extended goal fuel
     if stated.isAppOfArity ``Or 2 then
       let rest := facts.eraseIdx! i
@@ -214,10 +215,11 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     -- what is asked for is a fact already in hand. Looking for it costs a
     -- comparison, where asking the numbers costs a decision procedure a
     -- question it answers the same way.
+    let suffix := suffixJunctions ``Or ``False parts
     for (part, i) in parts.zipIdx do
       for fact in facts do
         if ← isDefEq part (← instantiateMVars (← inferType fact)) then
-          return ← injectGiven parts i fact
+          return ← injectGiven parts i fact (suffix? := some suffix)
     -- Otherwise suppose none of them holds. That covers whichever disjunct the
     -- numbers would have given, so asking for each in turn first is asking a
     -- decision procedure, once per disjunct, what this asks it once.
@@ -225,7 +227,7 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
       let mut extended := facts
       for (part, i) in parts.zipIdx do
         let refuting ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l))
+          mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l (suffix? := some suffix)))
         extended := extended.push (← plainly refuting)
       mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
     return ofNotNot goal refuted
