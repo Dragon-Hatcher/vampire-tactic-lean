@@ -247,7 +247,8 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     if fuel > 0 then
       for (fact, i) in facts.zipIdx do
         if let some denied := (← instantiateMVars (← inferType fact)).not? then
-          unless denied.isAppOfArity ``Eq 3 do continue
+          -- Through a definition applied, as an equality proxy is.
+          unless denied.headBeta.isAppOfArity ``Eq 3 do continue
           try
             let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
             return ← mkAppOptM ``absurd
