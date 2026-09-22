@@ -192,13 +192,6 @@ private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
           return if l.2 then part else mkApp (mkConst ``Not) part
     genLit sorts vars l
 
-/-- Which of `parts` says what `e` does. -/
-private def indexOfPart (parts : Array Expr) (e : Expr) : ReconstructM Nat := do
-  for (part, i) in parts.zipIdx do
-    if ← isDefEq part e then
-      return i
-  throwError "nothing among the clause's parts says{indentExpr e}"
-
 /-- Everything replaying one clausification needs to hand. -/
 private structure Replay where
   sorts : Array (UInt32 × String)

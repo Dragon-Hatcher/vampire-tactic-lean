@@ -112,12 +112,6 @@ partial def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
           | throwError "a universal block did not come back negated"
         return mkApp (mkConst ``Not) (← mkForallFVars #[x] quantified)
 
-/-- `⟦∃ vs, body⟧`: what a premise says a block of existentials means. -/
-partial def existsProp (sorts : Array (UInt32 × String))
-    (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
-    ReconstructM Expr :=
-  blockProp true sorts bound vars body
-
 
 /--
 Binds the symbol vampire chose for an existential variable to `witness`.
@@ -161,7 +155,7 @@ partial def registerSkolems (sorts : Array (UInt32 × String))
       | (v, sortName) :: rest => do
         let τ ← sortType sortName
         let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-          mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
+          mkLambdaFVars #[x] (← blockProp true sorts rest (vars.insert v x) body)
         let (witness, _) ← epsilon τ p
         registerSkolem skolems vars v witness
         go rest (vars.insert v witness)

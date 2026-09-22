@@ -113,7 +113,7 @@ where
       let τ ← sortType sortName
       -- The predicate the witness is chosen from, as a function of `v`.
       let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-        mkLambdaFVars #[x] (← existsProp sorts rest (vars.insert v x) body)
+        mkLambdaFVars #[x] (← blockProp true sorts rest (vars.insert v x) body)
       let (witness, choice) ← epsilon τ p
       registerSkolem skolems vars v witness
       let (prop, rest') ← peel rest (vars.insert v witness) body

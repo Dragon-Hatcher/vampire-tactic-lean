@@ -220,20 +220,12 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
       proof (motive? := some (mkConst ``False))
     mkLetFVars bound contradiction (usedLetOnly := false)
   else
-    -- More than one literal left, so the premise is a case split rather than a
-    -- propagation: it holds, so one of them does, and the walk goes on from
-    -- each. The solver propagates, so no refutation measured here reaches this;
-    -- it is here because the recorded derivation does not promise it.
-    elimGiven parts (fun j h => do
-      let some name := names[j]? | throwError "missing literal"
-      let some says := parts[j]? | throwError "missing literal"
-      match known[flippedName name]? with
-      | some (negated, refuting) =>
-        contradicts (mkConst ``False) says refuting h negated
-      | none =>
-        propagate states proved (known.insert name (h, says)) premises (i + 1)
-          bound)
-      proof (motive? := some (mkConst ``False))
+    -- More than one literal left, so the premise would be a case split rather
+    -- than a propagation. The solver's derivations are propagations, each
+    -- premise leaving one literal, so a derivation that is not one is not what
+    -- the solver recorded.
+    throwError "a propositional premise leaves {unassigned.size} of its \
+      literals unassigned rather than one: the derivation is not a propagation"
 
 /--
 A proof of what a propositional clause says, from proofs of the clauses it was

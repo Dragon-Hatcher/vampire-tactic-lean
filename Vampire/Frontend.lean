@@ -155,7 +155,7 @@ abstracted over forgotten, and then nothing can instantiate it.
 -/
 def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Auto.Lemma)
   | `(vampireHintElem| *) => do
-    let hs := (← Preprocess.propHypotheses (← getMainGoal)).filter Expr.isFVar
+    let hs ← Preprocess.propHypotheses (← getMainGoal)
     hs.mapM fun h => do
       return ⟨⟨h, ← inferType h, .leaf s!"{h}"⟩, #[]⟩
   | `(vampireHintElem| $h:term) => do
