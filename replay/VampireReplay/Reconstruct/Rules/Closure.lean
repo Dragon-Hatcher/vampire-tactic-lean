@@ -15,16 +15,6 @@ namespace Vampire.Reconstruct.Closure
 
 open Lean Meta
 
-/-- `f as = f bs`, from what says each pair of arguments is equal. -/
-private def congruent (head : Expr) (args : Array Expr)
-    (equal : Array (Option Expr)) : MetaM Expr := do
-  let mut congruence ← mkEqRefl head
-  for (argument, i) in args.zipIdx do
-    congruence ← match equal[i]? with
-      | some (some proof) => mkCongr congruence proof
-      | _ => mkCongrFun congruence argument
-  return congruence
-
 /--
 A clause whose literals a congruence closure showed cannot all be false.
 
@@ -62,12 +52,13 @@ def conflict (step : Step) : ReconstructM Expr := do
           | throwError "literal {i} of step {step.unit.number} denies nothing:\
             {indentExpr part}"
         return (atom, ofNotNot atom (← refuting i))
-      -- The arguments of a literal, as the clause states them.
-      let arguments (i : Nat) : ReconstructM (Expr × Array Expr) := do
+      -- The predicate of a literal and its arguments, as the clause states
+      -- them.
+      let arguments (i : Nat) : ReconstructM (String × Array Expr) := do
         let some l := literals[i]? | throwError "no literal {i} in the clause"
         let some symbol := l.symbol?
           | throwError "literal {i} is over an unknown predicate"
-        return (← symbolExpr symbol.name, ← l.args.mapM (term vars))
+        return (symbol.name, ← l.args.mapM (term vars))
       -- What each step proves, in the order they were recorded: a step stands
       -- on the ones before it, so this is filled in as they are read.
       let proofAt (proofs : Array Expr) (i : Nat) : ReconstructM Expr := do
@@ -86,8 +77,11 @@ def conflict (step : Step) : ReconstructM Expr := do
             | throwError "a congruence is over an unknown symbol"
           unless rhs.symbol?.map (·.name) == some symbol.name do
             throwError "a congruence relates two different symbols"
-          proofs := proofs.push (← congruent (← symbolExpr symbol.name)
-            (← lhs.args.mapM (term vars)) (← proofsAt proofs args))
+          -- Through the symbol as it is rebuilt, which for one TPTP
+          -- interprets itself is no head applied to its arguments.
+          proofs := proofs.push (← congrApplied symbol.name
+            (← lhs.args.mapM (term vars)) (← rhs.args.mapM (term vars))
+            (← proofsAt proofs args))
         | .trans i j =>
           proofs := proofs.push
             (← mkEqTrans (← proofAt proofs i) (← proofAt proofs j))
@@ -108,9 +102,10 @@ def conflict (step : Step) : ReconstructM Expr := do
           let equal ← if flipped then
               equal.mapM fun p => p.mapM fun p => mkEqSymm p
             else pure equal
-          let (head, negativeArgs) ← arguments negative
+          let (name, negativeArgs) ← arguments negative
+          let (_, positiveArgs) ← arguments positive
           let (_, holds) ← denied negative
-          let alike ← congruent head negativeArgs equal
+          let alike ← congrApplied name negativeArgs positiveArgs equal
           let some part := parts[positive]?
             | throwError "no literal {positive} in the clause"
           closed := some (← mkAppOptM ``absurd

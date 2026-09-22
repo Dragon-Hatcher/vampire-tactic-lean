@@ -21,3 +21,11 @@ example (x : ℝ) (h : x ^ 0 = 1) : (1 : ℝ) = 1 := by vampire [h]
 example (x : ℤ) (h : 2 * x = 6) : x = 3 := by vampire [h]
 example (x : ℝ) (h : 2 * x = 6) : x = 3 := by vampire [h]
 example (x : ℚ) (h : 3 * x = 12) : x = 4 := by vampire [h]
+
+-- A congruence-closure conflict through `+`, which TPTP interprets itself and
+-- so has no symbol of the goal's to apply.
+example (x y : ℤ) (f : ℤ → ℤ) (p : ℤ → Prop) (h1 : x = y ∨ p x) (h3 : ¬ p x)
+    (h5 : f (x + x) ≠ f (y + y) ∨ p y) (h4 : ¬ p y) : False := by
+  vampire (options := #[("avatar_congruence_closure", "on"),
+    ("forward_demodulation", "off"), ("backward_demodulation", "off"),
+    ("superposition", "off")]) [h1, h3, h4, h5]
