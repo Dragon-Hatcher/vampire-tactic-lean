@@ -10,11 +10,12 @@ theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
 ```
 
 Vampire finds the refutation; the tactic then **replays that refutation as a
-Lean proof term**, inference by inference. Nothing is admitted: if a rule
-cannot be replayed the tactic says so rather than closing the goal. The one
-place a decision procedure stands in is arithmetic, where vampire's own rules
-record nothing of why a step holds, so `linarith` or `omega` proves that step
-from the literals it acted on.
+Lean proof term**, inference by inference. By default nothing is admitted: if
+a rule cannot be replayed, the tactic fails and names it. `+admit` closes the
+goal anyway, with those steps as `sorry` and a warning. The one place a
+decision procedure stands in is arithmetic, where vampire's own rules record
+nothing of why a step holds, so `linarith` or `omega` proves that step from the
+literals it acted on.
 
 ## Theories
 
@@ -35,7 +36,7 @@ require vampire from git
 
 Lake fetches the pinned revision of the [Vampire
 fork](https://github.com/Dragon-Hatcher/vampire-tactic-vampire) into its build
-directory and runs that CMake build itself — you do not have to clone anything.
+directory and runs that CMake build itself. You do not have to clone anything.
 The fetch is shallow and takes only the submodules the build needs, about twenty
 megabytes.
 
@@ -60,8 +61,10 @@ of the pinned one, and `VAMPIRE_WORKER` points straight at an already-built
 The tactic is `vampire`. It translates the current goal and the hypotheses you
 name into Vampire's format, searches for a refutation, and replays it.
 
-Only hypotheses named in square brackets (`vampire [h, q]`) are sent. Use `*`
-for everything in the local context: `vampire [*, other_theorem]`.
+The goal is sent, together with the hypotheses introduced from its binders.
+Hypotheses already in the local context are sent only if named in square
+brackets (`vampire [h, q]`). Use `*` for everything in the local context:
+`vampire [*, other_theorem]`.
 
 Vampire's logic is monomorphic, so a goal quantifying over a type or carrying a
 typeclass has no direct reading. `vampire +mono` runs
@@ -92,21 +95,17 @@ theorem tri (x y z : ℝ) (h : x < y) (h₂ : y < z) : x < z := by
 ```
 
 `import Vampire` brings in only the part of Mathlib the tactic itself needs, so
-a goal of your own about `ℝ` wants Mathlib imported too — without it `ℝ` is in
-scope but its order instances are not, and the goal fails to elaborate before
-the tactic is even reached. Mathlib is already a dependency of this package, so
-importing it costs nothing but the import.
+a goal about `ℝ` needs Mathlib imported too. Without it `ℝ` is in scope but its
+order instances are not, and the goal fails to elaborate before the tactic
+runs. Mathlib is already a dependency of this package.
 
 Vampire works through a portfolio: the same problem under a few hundred
-combinations of options. Only the one that succeeds is any use, so when a proof
-is found the tactic tells you which strategy found it, and you can write that
-into the call to skip the rest next time. This matters most for arithmetic,
-where the default strategies tend not to work as well.
-
-It offers that only where it is worth taking: a strategy is suggested when
-skipping the ones before it would save more than 100ms, since a line naming
-one goes stale as soon as the goal changes. `+stats` says where the search
-went whether or not one is suggested.
+combinations of options, called strategies. When naming the strategy that found
+the proof would save more than 100ms of search, the tactic suggests the call
+with `(strategy := ...)` added, which skips the strategies before it. Below
+that it suggests nothing, since a named strategy goes stale when the goal
+changes. This matters most for arithmetic, where the proof is often found late
+in the schedule. `+stats` shows where the search went either way.
 
 ```lean
 -- slower
@@ -118,9 +117,10 @@ theorem real_lin' (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
   vampire (strategy := "lrs+10_1:1_alasca=on:sp=occurrence:ss=axioms:st=3.0:to=lakbo_0") [h, h₂]
 ```
 
-The search is reproducible. Vampire counts the steps it takes rather than
-reading the clock, so the same goal gives the same proof on a slow machine and a
-fast one. `wallLimit` is the one exception — a run that hits it says so.
+The search is reproducible. Vampire's limits are measured in beats, steps it
+counts as it searches, rather than on the clock, so the same goal gives the same
+proof on a slow machine and a fast one, whatever `cores` is. `wallLimit` is the
+one exception, and a run that reaches it says so.
 
 ## Options
 
@@ -128,9 +128,13 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 
 | option | default | what it does |
 | --- | --- | --- |
-| `timeout` | 30 | seconds the prover may search, counted in steps |
-| `wallLimit` | 60 | real seconds after which to give up whatever the step count says |
-| `strategy` | — | run only this strategy, as the tactic reports it |
+| `timeout` | 30 | seconds the prover may search, measured in beats |
+| `heartbeats` | 500 | beats per millisecond of `timeout`; 0 uses the clock |
+| `wallLimit` | 60 | real-time limit in seconds, whatever the beats say; 0 for none |
+| `cores` | 4 | strategies run at once; the proof does not depend on it |
+| `schedule` | `casc` | the strategy schedule to work through |
+| `strategy` | — | run only this strategy, as the tactic suggests it |
+| `options` | — | extra vampire options, as `#[("name", "value")]` |
 | `mono` | false | monomorphise with `lean-auto` first (`+mono`) |
 | `showQuery` | false | print the TPTP problem instead of running the prover |
 | `stats` | false | report what each phase cost and how many steps the proof had (`+stats`) |
@@ -144,7 +148,7 @@ vampire took 2126ms, not counting what Lean then does with the proof term:
   preprocessing 227ms
   translation   0ms
   search        1807ms
-    starting the worker     18ms
+    worker overhead         18ms
     parsing the problem     0ms
     failed strategies       1598ms
     successful strategy     191ms
@@ -152,10 +156,11 @@ vampire took 2126ms, not counting what Lean then does with the proof term:
 the proof vampire found had 292 steps
 ```
 
-The search is broken down because most of it is usually the schedule: the
-strategies that did not find the proof are what naming the one that did
-skips, and the tactic says how much that is when it reports the strategy.
-Here, naming it took the search from 1807ms to 248ms.
+Most of the search is usually spent on the failed strategies. Naming the
+successful one skips them, and the tactic reports the saving when it suggests
+the strategy. Here, naming it took the search from 1807ms to 248ms. "Worker
+overhead" is everything outside the schedule: starting the worker, writing and
+reading files, and exiting.
 
 Sharing the term's subterms and checking it in the kernel happen after the
 tactic returns, so they are not in that total; `set_option profiler true`
@@ -163,18 +168,20 @@ reports them.
 
 ## If a goal fails
 
-`vampire +showQuery` prints the problem exactly as Vampire receives it, and
-`set_option trace.vampire true` reports the problem, the proof Vampire found,
-what Vampire said for itself, and what each step of the replay cost — which is
-how to tell a slow translation from a slow search from a slow replay.
+`vampire +showQuery` prints the problem exactly as Vampire receives it, without
+running the search. `set_option trace.vampire true` reports the problem, the
+proof Vampire found and what Vampire printed. `set_option trace.vampire.timing
+true` reports what the search, the replay and each replayed step cost. `+stats`
+gives the summary per phase, which tells a slow translation from a slow search
+from a slow replay.
 
 | message | what it means |
 | --- | --- |
-| `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, that is the only one tried — remove it to put the schedule back |
+| `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, only that one was tried; remove it to run the whole schedule |
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
 | `vampire's proof uses …, which this tactic does not replay yet` | Vampire used an inference rule that has no reconstruction yet. `+admit` closes the goal anyway, with a `sorry` for those steps and a warning saying so |
 | `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
-| `Could not find native implementation of … spawn` | `lean` was started without the libraries Lake loads. Build and run through Lake — an editor, `lake build` and `lake test` all do — or pass the `--load-dynlib` flags `scripts/trace-problem.sh` reads out of Lake's own setup |
+| `Could not find native implementation of … spawn` | `lean` was started without the libraries Lake loads. Build and run through Lake (an editor, `lake build` and `lake test` all do), or pass the `--load-dynlib` flags `scripts/trace-problem.sh` reads out of Lake's own setup |
 | `vampire failed: …` | the worker could not be run at all |
 
 ## Licence

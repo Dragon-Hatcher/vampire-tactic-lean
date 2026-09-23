@@ -119,15 +119,15 @@ What the vampire checkout is at, for a checkout being worked in.
 A pinned revision is fetched once and never changes, but `VAMPIRE_DIR` and a
 sibling checkout are somebody's working tree: the build has to notice when it
 has been edited, and lake will not re-run a target whose inputs it does not
-know. So what its git says of itself -- the revision, and what is modified on
-top of it -- is taken as the input.
+know. So the revision and `git diff HEAD` -- the content of every change to a
+tracked file on top of it -- are taken as the input. Untracked files are not.
 -/
 private def vampireState (dir : FilePath) : BaseIO String := do
   let ask (args : Array String) : IO String := do
     let out ← IO.Process.output { cmd := "git", args, cwd := dir.toString }
     if out.exitCode != 0 then error "not a checkout" else return out.stdout
   match ← (do return (← ask #["rev-parse", "HEAD"]) ++ (←
-      ask #["status", "--porcelain", "--untracked-files=no"])).toBaseIO with
+      ask #["diff", "--no-ext-diff", "HEAD"])).toBaseIO with
   | .ok state => return state
   | .error _ => return ""
 

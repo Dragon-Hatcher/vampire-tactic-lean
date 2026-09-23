@@ -6,14 +6,45 @@ import VampireReplay.Abstract
 /-!
 What proves an arithmetic step of vampire's.
 
-Kept apart from the rest of the tactic because `linarith` comes with a library
-whose keywords -- `lemma`, `says`, `to` -- the replay uses as names of its own.
-Replay is handed `contradiction` rather than importing it.
+Kept apart from the replay because the replay is precompiled and imports no
+Mathlib, while these steps are proved with Mathlib's `linarith`, `ring` and
+lemmas. Replay is handed `contradiction`, `rearranged` and `cancelling` rather
+than importing them.
 -/
 
 namespace Vampire.Arith
 
 open Lean Meta Mathlib.Tactic
+
+/--
+A lemma applied to whatever makes it true here: its leading implicit and
+instance arguments, settled by `accepts`, which is given the rest of the
+lemma's statement and unifies it with what is wanted. This finds the arguments
+by unification rather than by counting the lemma's binders.
+-/
+private def instantiated (name : Name) (accepts : Expr → MetaM Bool) :
+    MetaM (Option Expr) := do
+  let e ← mkConstWithFreshMVarLevels name
+  let type ← inferType e
+  -- The binders up to the first explicit one, which is where the lemma's own
+  -- hypotheses start.
+  let rec leading : Expr → Nat
+    | .forallE _ _ body bi => if bi.isExplicit then 0 else leading body + 1
+    | _ => 0
+  let (mvars, binders, stated) ← forallMetaBoundedTelescope type (leading type)
+  unless ← accepts stated do return none
+  -- Unifying settles what the lemma is stated of but not what it is stated
+  -- over: an instance argument is found rather than matched.
+  for (mvar, binder) in mvars.zip binders do
+    if binder == .instImplicit && !(← mvar.mvarId!.isAssigned) then
+      match ← trySynthInstance (← mvar.mvarId!.getType) with
+      | .some inst => unless ← isDefEq mvar inst do return none
+      | _ => return none
+  let stated ← instantiateMVars (mkAppN e mvars)
+  -- Nothing left unsettled. A term with a hole in it is one the kernel will
+  -- not take, and the slow way round is there to be taken instead.
+  if stated.hasExprMVar then return none
+  return some stated
 
 /--
 `a ↔ b`, where the two are one comparison with its terms moved across it.
@@ -26,24 +57,10 @@ asks twice, once for each way round the equivalence goes, and asks it to search
 for a combination when there is nothing to search for.
 -/
 def rearranged (a b : Expr) : MetaM (Option Expr) := do
-  -- A lemma stated of whatever makes it true here, found by unifying it with
-  -- what is wanted of it rather than by counting its arguments.
-  let instantiated (name : Name) (want : Expr) : MetaM (Option Expr) := do
-    let e ← mkConstWithFreshMVarLevels name
-    let (mvars, binders, stated) ← forallMetaTelescope (← inferType e)
-    unless ← isDefEq stated want do return none
-    -- Unifying settles what the lemma is stated of but not what it is stated
-    -- over: an instance argument is found rather than matched.
-    for (mvar, binder) in mvars.zip binders do
-      if binder == .instImplicit && !(← mvar.mvarId!.isAssigned) then
-        match ← trySynthInstance (← mvar.mvarId!.getType) with
-        | .some inst => unless ← isDefEq mvar inst do return none
-        | _ => return none
-    let stated ← instantiateMVars (mkAppN e mvars)
-    -- Nothing left unsettled. A term with a hole in it is one the kernel will
-    -- not take, and the slow way round is there to be taken instead.
-    if stated.hasExprMVar then return none
-    return some stated
+  -- The lemma whose statement, once its implicit arguments are settled, is
+  -- `want` itself.
+  let stating (name : Name) (want : Expr) : MetaM (Option Expr) :=
+    instantiated name (isDefEq · want)
   -- A comparison read as `0 ≤ d` or `0 < d`, with what says the two are the
   -- same. A denied comparison is a comparison the other way round, which is
   -- the shape normalisation leaves and is a lemma rather than a question.
@@ -65,13 +82,13 @@ def rearranged (a b : Expr) : MetaM (Option Expr) := do
     let named (l r : Expr) : MetaM Expr :=
       mkAppM (if nonneg then ``LE.le else ``LT.lt) #[l, r]
     let stated ← named zero difference
-    let some core ← instantiated (if nonneg then ``sub_nonneg else ``sub_pos)
+    let some core ← stating (if nonneg then ``sub_nonneg else ``sub_pos)
         (← mkAppM ``Iff #[stated, ← named lesser greater])
       | return none
     match denied with
     | none => return some (nonneg, difference, stated, core)
     | some name =>
-      let some bridge ← instantiated name
+      let some bridge ← stating name
           (← mkAppM ``Iff #[e, ← named lesser greater])
         | return none
       return some (nonneg, difference, stated,
@@ -143,9 +160,11 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
         return indentExpr (← instantiateMVars (← inferType f))
       let said := failures.toList.map fun (name, e) =>
         m!"\n{name} said: {e.toMessageData}"
-      throwError "nothing says {(claim.map fun c =>
-          m!"that{indentExpr c}\nfollows").getD m!"these cannot all hold"} \
-        of any numbers:{MessageData.joinSep stated.toList ""}\
+      let tried := " and ".intercalate (failures.toList.map (·.1))
+      let failed := match claim with
+        | some c => m!"{tried} could not prove{indentExpr c}\nfrom:"
+        | none => m!"{tried} could not derive a contradiction from:"
+      throwError "{failed}{MessageData.joinSep stated.toList ""}\
         {MessageData.joinSep said ""}"
     | (name, ask) :: rest =>
       -- A procedure that fails is rolled back before the next is asked:
@@ -170,13 +189,16 @@ instance and gets nothing.
 -/
 def cancelling (x z w : Expr) : MetaM (Option Expr) := do
   try commitIfNoEx do
-    let cancel ← mkAppOptM ``mul_left_cancel₀
-      #[none, none, none, none, some x, some z, some w]
-    -- What is left to take is the two hypotheses; anything else unsettled
-    -- means the sort was not one that cancels.
-    let stated ← instantiateMVars (← inferType cancel)
-    if stated.hasExprMVar then return none
-    return some (← instantiateMVars cancel)
+    let product ← mkEq (← mkAppM ``HMul.hMul #[x, z]) (← mkAppM ``HMul.hMul #[x, w])
+    -- What is left of the lemma once its implicit arguments are taken is
+    -- `a ≠ 0 → a * b = a * c → b = c`. Unifying the second hypothesis with
+    -- `x * z = x * w` settles `a`, `b`, `c` and the multiplication; the zero
+    -- and the cancellation instance are then synthesized, and a sort that
+    -- does not cancel has none.
+    instantiated ``mul_left_cancel₀ fun stated => do
+      let .forallE _ _ (.forallE _ hypothesis _ _) _ := stated | return false
+      if hypothesis.hasLooseBVars then return false
+      isDefEq hypothesis product
   catch _ => return none
 
 /--

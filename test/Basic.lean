@@ -18,7 +18,8 @@ example {ι : Type} (a b : ι) (h : a = b) : b = a := by vampire [h]
 #guard_msgs (drop info) in
 example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x, p x) : p a := by vampire [h]
 
--- Type class goals are not first-order, so they need monomorphizing first.
+-- A goal over `ℝ` under `+mono`. It is translated without `+mono` too; this
+-- checks that monomorphization leaves it provable.
 #guard_msgs (drop info) in
 example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
 

@@ -30,6 +30,16 @@ private def saying (name : Name) (term : Expr) : MetaM (Option (Expr × Expr)) :
   return some (← instantiateMVars rhs, says)
 
 /--
+The largest literal exponent that is written out as multiplications.
+
+The product has as many factors as the exponent and its proof as many steps,
+built by recursion that is not tail-recursive, so a large exponent would cost
+time and stack out of proportion to the goal. A power above this is left as
+it is, like one with a variable exponent.
+-/
+private def maxExpandedExponent : Nat := 32
+
+/--
 `x ^ n` at a literal natural exponent, written out as the multiplications it
 stands for, with a proof that it is the same term.
 
@@ -40,7 +50,8 @@ the goal is translated, so that what the prover is asked about and what the
 replay states are the one thing.
 
 A variable exponent is left alone, and so is `^` over anything but the
-natural numbers: `zpow` and `rpow` are not iterated multiplication.
+natural numbers: `zpow` and `rpow` are not iterated multiplication. So is an
+exponent above `maxExpandedExponent`.
 -/
 private partial def powProduct (e : Expr) : MetaM (Option (Expr × Expr)) := do
   let_expr HPow.hPow _ β _ _ _ n := e | return none
@@ -49,6 +60,7 @@ private partial def powProduct (e : Expr) : MetaM (Option (Expr × Expr)) := do
   -- around the number rather than the number itself.
   let some exponent := n.nat? <|> (← withDefault (whnf n)).rawNatLit?
     | return none
+  if exponent > maxExpandedExponent then return none
   if exponent == 0 then return ← saying ``pow_zero e
   if exponent == 1 then return ← saying ``pow_one e
   -- `x ^ k = x ^ (k - 1) * x`, and then the same again of the smaller power.
@@ -174,7 +186,6 @@ def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
   let introduced := (← mv.withContext (fvs.filterM isHypothesis)).map Expr.fvar
   let (negated, mv) ← negateGoal mv
   let axioms := (extra ++ introduced).toList.eraseDups.toArray
-  let axioms := axioms.filter (!negated.contains ·)
   return {
     hypotheses := axioms.map (·, .axiom) ++ negated.map (·, .negatedConjecture)
     goal := mv
@@ -191,17 +202,16 @@ local context goes only if named, or with `*`.
 -/
 def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
   let (goalBinders, mv) ← mv.intros
-  let [nngoal] ← mv.apply (.const ``Classical.byContradiction [])
-    | throwError "could not negate the goal"
-  let (ngoal, absurd) ← nngoal.intro goalMarker
+  let (negated, absurd) ← negateGoal mv
   absurd.withContext do
     -- `false` is what confines this to the binders and the negated goal:
     -- `true` would have `lean-auto` take the whole local context, whatever was
     -- named, and a hypothesis named in brackets would then be sent twice.
     let binderLemmas ← Auto.collectLctxLemmas false goalBinders
-    let goalLemma : Auto.Lemma :=
-      ⟨⟨.fvar ngoal, ← instantiateMVars (← ngoal.getType), goalLeaf⟩, #[]⟩
-    let lctxLemmas := binderLemmas.push goalLemma
+    let goalLemmas ← negated.mapM fun ngoal => do
+      return (⟨⟨ngoal, ← instantiateMVars (← inferType ngoal), goalLeaf⟩, #[]⟩ :
+        Auto.Lemma)
+    let lctxLemmas := binderLemmas ++ goalLemmas
     -- The terms named in brackets come as `lean-auto` elaborated them, whole:
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which

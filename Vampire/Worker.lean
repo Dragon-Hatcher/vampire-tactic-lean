@@ -6,23 +6,22 @@ namespace Vampire
 
 /-- How to run vampire. Options are passed to the worker as `name=value`. -/
 structure Config where
-  /-- Seconds vampire may spend on the problem, counted in beats. -/
+  /--
+  Time limit for the search in seconds. It is measured in beats (see
+  `heartbeats`), not on the clock.
+  -/
   timeout : Nat := 30
   /--
-  Beats a millisecond is taken to be worth, or 0 to leave vampire the clock.
+  How many beats count as one millisecond of `timeout`, or 0 to use the clock.
 
-  Vampire counts the steps it takes rather than reading the clock, so what it
-  proves depends on the problem alone and not on how fast this machine is or on
-  what else it is doing.
+  Beats are steps vampire counts as it searches, so limits do not depend on the
+  speed or load of the machine.
   -/
   heartbeats : Nat := 500
   /--
-  Seconds of real time after which to give up whatever the beats say, or 0 to
-  wait however long they take.
-
-  Beats stand in for time only as well as they are counted, so this is what a
-  strategy that spends itself somewhere nobody counted runs into. Reaching it
-  is the one outcome that is not reproducible, and it says so.
+  Real-time limit in seconds, or 0 for none. It catches work that beats do not
+  count. This is the one limit that is not reproducible; a run that reaches it
+  says so.
   -/
   wallLimit : Nat := 60
   /-- Vampire's `mode`. `portfolio` works through a schedule of strategies. -/
@@ -30,22 +29,19 @@ structure Config where
   /-- The strategy schedule `portfolio` mode follows. -/
   schedule : String := "casc"
   /--
-  How many of the schedule's strategies to run at once.
-
-  The proof is the one the earliest strategy of the schedule to succeed finds,
-  each given what it would be given running alone, so this decides only how
-  soon it comes: the same proof, whatever the number.
+  How many strategies of the schedule run at once. The proof does not depend on
+  it: the earliest successful strategy of the schedule wins, with the budget it
+  would get running alone.
   -/
   cores : Nat := 4
   /--
-  One strategy to run instead of the schedule, as the tactic reports it.
-
-  The schedule is a few hundred strategies and only the one that succeeds is
-  any use, so naming it here is the same run without the ones before it.
+  One strategy to run instead of the schedule, in the form the tactic suggests.
+  Naming the strategy that found a proof gives the same proof without running
+  the strategies before it.
   -/
   strategy : String := ""
   /--
-  Options forced on every strategy of the schedule, whatever it says.
+  Options set on every strategy of the schedule, overriding what it says.
 
   Shuffling is off. It permutes a formula's junctions, its quantifiers'
   variables and the sides of its equalities before the search, to give a
@@ -68,7 +64,7 @@ structure Config where
   -/
   forced : Array (String × String) :=
     #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
-  /-- Further vampire options, as they would be given on its command line. -/
+  /-- Extra vampire options, as `(name, value)` pairs of its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/
   worker? : Option System.FilePath := none
@@ -94,8 +90,9 @@ private def relativeWorkerPath : System.FilePath :=
 
 /--
 Where this package's own build put things, found through the `.olean` this very
-module was loaded from: `…/.lake/build/lib/lean/Vampire/Worker.olean` sits four
-directories below `…/.lake/build`.
+module was loaded from. That file is `…/.lake/build/lib/lean/Vampire/Worker.olean`,
+so its fourth parent (`Vampire`, `lean`, `lib`, then `build`) is `…/.lake/build`.
+This follows from the module name `Vampire.Worker` and Lake's `lib/lean` layout.
 
 This is what locates the worker for someone who added the library as a
 dependency. Their own file is nowhere near it -- searching upwards from the file
@@ -123,17 +120,19 @@ def findWorker (start : System.FilePath) : IO System.FilePath := do
     if ← candidate.pathExists then
       return candidate
   let start ← IO.FS.realPath start
-  let rec search (dir : System.FilePath) (fuel : Nat) : IO (Option System.FilePath) := do
-    match fuel with
-    | 0 => return none
-    | fuel + 1 =>
+  -- Upwards until the root, which has no parent. `start` is a real path, so
+  -- each parent is strictly shorter and the loop ends.
+  let search : IO (Option System.FilePath) := do
+    let mut dir := start
+    repeat
       let candidate := dir / relativeWorkerPath
       if ← candidate.pathExists then
         return some candidate
       match dir.parent with
-      | some parent => search parent fuel
+      | some parent => dir := parent
       | none => return none
-  match ← search start 64 with
+    return none
+  match ← search with
   | some path => return path
   | none =>
     throw <| IO.userError s!"could not find {workerName}: this package's build \
@@ -157,9 +156,9 @@ def prove (problem : String) (cfg : Config := {})
     let problemFile := dir / "problem.p"
     let outFile := dir / "proof.bin"
     IO.FS.writeFile problemFile problem
-    -- Run in the directory rather than naming it: vampire writes the path it
-    -- was given into the proof, and a temporary directory has a different name
-    -- every time.
+    -- The worker changes into the problem's directory itself before reading
+    -- it, because vampire writes the path it was given into the proof and a
+    -- temporary directory has a different name every time.
     let outPath := dir / "stdout"
     let errPath := dir / "stderr"
     let exitCode ← VampireReplay.spawn (← IO.FS.realPath worker).toString

@@ -10,7 +10,8 @@ namespace Vampire
 open Lean Meta Elab Tactic
 
 /--
-The distinct subterms of a proof, and how many apply each constant.
+Collects the distinct subterms of a proof and, for each constant, how many of
+those subterms apply it.
 
 What Lean spends on a replayed proof after the tactic hands it back -- sharing
 its subterms, checking it -- goes by its size, so this is what to look at when
@@ -51,15 +52,15 @@ structure TacticConfig extends Config where
   -/
   stats : Bool := false
   /--
-  Close the goal even where a step of the proof uses a rule this tactic does
-  not replay yet, admitting those steps with a `sorry` and a warning. Off, such
-  a proof is an error, so that nothing the tactic closes rests on `sorry`.
+  Close the goal even when the proof uses a rule this tactic does not replay
+  yet. Those steps are admitted as `sorry` and a warning is logged. When off,
+  such a proof is an error.
   -/
   admit : Bool := false
 deriving Inhabited
 
-/-- What running vampire on a goal produced. -/
-structure Query where
+/-- A goal written out as the TPTP problem vampire is to refute. -/
+structure Posed where
   /-- The goal preprocessing left, whose type is `False`. -/
   preprocessed : Preprocess.Result
   /-- The copy of the caller's goal that preprocessing consumed. -/
@@ -67,18 +68,22 @@ structure Query where
   /-- The TPTP problem sent to vampire. -/
   problem : String
   symbols : Symbols
-  proof : Proof
-  /-- What vampire said for itself, for when it did not find a proof. -/
-  diagnostics : String
   /-- What reducing the goal to a set of hypotheses took, in milliseconds. -/
   preprocessing : Nat
   /-- What writing those out as a TPTP problem took. -/
   translation : Nat
+
+/-- What running vampire on a goal produced. -/
+structure Query extends Posed where
+  proof : Proof
+  /-- What vampire said for itself, for when it did not find a proof. -/
+  diagnostics : String
   /-- What vampire's own search took. -/
   search : Nat
 
-def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
-    (searchFrom : System.FilePath) : MetaM Query := mv.withContext do
+/-- Preprocesses the goal and translates it, without running vampire. -/
+def pose (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma) :
+    MetaM Posed := mv.withContext do
   -- Preprocessing assigns the goal it is given, so work on a copy and leave the
   -- caller's goal for it to discharge.
   let copy := (← mkFreshExprMVar (← mv.getType)).mvarId!
@@ -88,8 +93,9 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
     else Preprocess.intros copy (hs.map (·.proof))
   -- Vampire has no exponentiation, so a literal power is written out as the
   -- multiplications it stands for -- in Lean, with a proof, so that what is
-  -- asked and what is replayed say the same thing. Monomorphization does its
-  -- own, before it runs, since what it leaves has nothing to write out.
+  -- asked and what is replayed say the same thing. Under `+mono` the lemmas
+  -- are also written out before monomorphization, by
+  -- `Preprocess.lemmaWithoutPowers`; this pass runs on both paths all the same.
   let hypotheses ← preprocessed.goal.withContext <|
     preprocessed.hypotheses.mapM fun (h, role) => do
       return (← Preprocess.withoutPowers h, role)
@@ -97,8 +103,13 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
   let (problem, symbols) ← preprocessed.goal.withContext (problemOf hypotheses)
   let translation := (← IO.monoMsNow) - started - preprocessing
   trace[vampire] "problem:\n{problem}"
+  return { preprocessed, copy, problem, symbols, preprocessing, translation }
+
+/-- Runs vampire on a posed problem. -/
+def run (cfg : TacticConfig) (posed : Posed) (searchFrom : System.FilePath) :
+    MetaM Query := do
   let before ← IO.monoMsNow
-  match ← prove problem cfg.toConfig searchFrom with
+  match ← prove posed.problem cfg.toConfig searchFrom with
   | .error e => throwError "vampire failed: {e}"
   | .ok (proof, diagnostics) =>
     let search := (← IO.monoMsNow) - before
@@ -107,8 +118,7 @@ def run (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma)
       trace[vampire] "found by {strategy}"
     trace[vampire] "proof:\n{proof.proofText}"
     trace[vampire] "vampire said:\n{diagnostics}"
-    return { preprocessed, copy, problem, symbols, proof, diagnostics,
-             preprocessing, translation, search }
+    return { posed with proof := proof, diagnostics := diagnostics, search := search }
 
 namespace Tactic
 
@@ -135,9 +145,9 @@ TPTP problem instead of running the prover. Other fields of
 `Vampire.TacticConfig` are available in the same way, e.g.
 `vampire (timeout := 60)`.
 
-Vampire works through a schedule of a few hundred strategies and only the one
-that succeeds is any use, so a proof comes with the strategy that found it and
-an offer to write that into the call, which skips the others next time.
+Vampire tries a schedule of a few hundred strategies. When naming the strategy
+that found the proof would save more than 100ms of search, the tactic suggests
+the call with `(strategy := ...)` added.
 -/
 syntax (name := vampireStx) "vampire" optConfig vampireHints : tactic
 
@@ -157,10 +167,11 @@ def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Auto.Lemma)
   | `(vampireHintElem| *) => do
     let hs ← Preprocess.propHypotheses (← getMainGoal)
     hs.mapM fun h => do
-      return ⟨⟨h, ← inferType h, .leaf s!"{h}"⟩, #[]⟩
+      let name ← h.fvarId!.getUserName
+      return ⟨⟨h, ← inferType h, .leaf s!"❰{name}❱"⟩, #[]⟩
   | `(vampireHintElem| $h:term) => do
-    -- Named `fact` rather than `lemma`, which `linarith`'s library makes a
-    -- keyword and this file now reaches for.
+    -- Named `fact` rather than `lemma`, which is a keyword once Mathlib's
+    -- tactics are imported, as they are here through `Vampire.Arith`.
     let fact ← Auto.Prep.elabLemma h (.leaf s!"❰{h}❱")
     return #[fact]
   | _ => throwUnsupportedSyntax
@@ -191,7 +202,7 @@ saves. `none` when there is no proof to have found.
 private def failedStrategiesTime (proof : Proof) : Option Nat := do
   let foundAt ← proof.foundAtTime?
   let spent := (← proof.setupTime?) + (← proof.strategyTime?)
-  return foundAt - min foundAt spent
+  return foundAt - spent
 
 /--
 `proof`, which proves `goal`, put in a lemma of its own and applied to the
@@ -211,7 +222,10 @@ with those their types mention, in the order the context has them.
 private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withContext do
   let type ← instantiateMVars (← goal.getType)
   let proof ← instantiateMVars proof
-  if type.hasMVar || proof.hasMVar then return proof
+  if type.hasMVar || proof.hasMVar then
+    trace[vampire] "the proof or its statement has metavariables, so it is \
+      returned as it is rather than as a lemma"
+    return proof
   let lctx ← getLCtx
   let mut used := Lean.collectFVars (Lean.collectFVars {} type) proof
   let mut pending := used.fvarIds
@@ -228,7 +242,9 @@ private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withCont
   -- Shared first, so that what is abstracted is the smaller term and a
   -- formula the proof uses in many places is one subterm; then each such is
   -- let-bound once, since abstracting the locals makes each use a different
-  -- term, by how many of the proof's lets it is under.
+  -- term, by how many of the proof's lets it is under. `IO.lazyPure` makes
+  -- the pure sharing pass run here, rather than be deferred or floated
+  -- elsewhere by the compiler.
   let proof ← IO.lazyPure fun _ => ShareCommon.shareCommon' proof
   let proof ← Vampire.Reconstruct.hoistClosed proof
   let value ← mkLambdaFVars locals proof
@@ -248,11 +264,13 @@ private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α 
   -- to doubt: the goal it was found for may not be this one any more.
   let pinned :=
     if cfg.strategy.isEmpty then m!""
-    else m!" This call names a strategy, and that is the only one vampire \
-      tried; removing it puts the whole schedule back."
+    else m!" Only the named strategy was tried; remove `strategy` to run the \
+      whole schedule."
+  let mono := if cfg.mono then m!"" else m!", or `+mono`"
+  let timeout := if cfg.mono then m!" or raising the timeout" else m!", raising the timeout"
   throwError "vampire did not refute the goal: \
-    {query.proof.terminationReason.describe}. Try passing more hypotheses, \
-    raising the timeout, or `+mono`.{pinned}{hint}"
+    {query.proof.terminationReason.describe}. Try passing more hypotheses\
+    {timeout}{mono}.{pinned}{hint}"
 
 /--
 Replays the refutation, and what that took in milliseconds.
@@ -280,7 +298,8 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
     let (_, (seen, applied)) :=
       (subterms (← instantiateMVars outcome.proof)).run ({}, {})
     let most := applied.toArray.qsort (fun a b => a.2 > b.2)
-    trace[vampire] "the proof has {seen.size} subterms, most of them {most.take 8}"
+    trace[vampire] "the proof has {seen.size} distinct subterms; the most \
+      applied constants, with how many of them each heads: {most.take 8}"
   unless outcome.unimplemented.isEmpty do
     trace[vampire] "rules with no replay: {outcome.unimplemented}"
     -- The proof term holds a `sorry` for each of these, so it closes the
@@ -288,10 +307,9 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
     unless cfg.admit do
       throwError "vampire's proof uses {outcome.unimplemented}, which this \
         tactic does not replay yet. `+admit` closes the goal anyway, with \
-        those steps admitted as `sorry`"
-    logWarning m!"vampire's proof was replayed except for \
-      {outcome.unimplemented}, which this tactic does not implement yet; \
-      those steps are admitted, so the proof holds a `sorry`"
+        those steps admitted as `sorry`."
+    logWarning m!"vampire's proof uses {outcome.unimplemented}, which this \
+      tactic does not replay yet; those steps are admitted as `sorry`."
   return (outcome, replay)
 
 /--
@@ -307,8 +325,9 @@ private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
     m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
   let part (name : String) (took : Nat) : MessageData :=
     m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
-  -- Where the search went: starting the worker and handing it the problem,
-  -- then the strategies that did not find it, then the one that did.
+  -- Where the search went: everything outside the schedule (starting the
+  -- worker, writing and reading files, exiting), parsing the problem, then
+  -- the strategies that did not find the proof, then the one that did.
   let within := Id.run do
     let (some foundAt, some setup, some winner, some failed) :=
       (query.proof.foundAtTime?, query.proof.setupTime?,
@@ -316,7 +335,7 @@ private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
       | return m!""
     if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
       return m!""
-    return part "starting the worker" (query.search - foundAt)
+    return part "worker overhead" (query.search - foundAt)
       ++ part "parsing the problem" setup
       ++ part "failed strategies" failed
       ++ part "successful strategy" winner
@@ -347,9 +366,8 @@ private def suggestStrategy (stx : Syntax) (rest : Array Syntax) (query : Query)
   let call := " ".intercalate
     (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
   Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
-    (header := s!"vampire found the proof with one strategy of its \
-schedule; the others took about {saved}ms of the {query.search}ms search, and \
-naming it skips them next time:")
+    (header := s!"Naming the strategy that found the proof saves about \
+      {saved}ms of the {query.search}ms search:")
 
 @[tactic vampireStx]
 def evalVampire : Tactic := fun stx => withMainContext do
@@ -359,12 +377,13 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let hs ← elabHints hsStx
     let mv ← getMainGoal
     let searchFrom := (← getFileName : System.FilePath).parent.getD "."
-    let query ← run cfg mv hs searchFrom
+    let posed ← pose cfg mv hs
     if cfg.showQuery then
-      logInfo m!"TPTP problem:\n{query.problem}"
+      logInfo m!"TPTP problem:\n{posed.problem}"
       mv.admit (synthetic := false)
       replaceMainGoal []
       return
+    let query ← run cfg posed searchFrom
     unless query.proof.refutation?.isSome do
       throwNoRefutation cfg query
     let (outcome, replay) ← replayQuery cfg query

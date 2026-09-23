@@ -25,9 +25,9 @@ example (x : ℤ) (h : x ^ 1 = 5) : x = 5 := by vampire [h]
 #guard_msgs (drop info) in
 example (x : ℝ) (h : x ^ 0 = 1) : (1 : ℝ) = 1 := by vampire [h]
 
--- Cancelling a multiplication is vampire's divisibility axiom, and no
--- procedure that reads its facts as linear constraints can see it: both
--- products are of two variables.
+-- Cancelling a multiplication is vampire's divisibility axiom, replayed
+-- through `mul_left_cancel₀`. These equations are linear, with a coefficient
+-- to divide out.
 #guard_msgs (drop info) in
 example (x : ℤ) (h : 2 * x = 6) : x = 3 := by vampire [h]
 #guard_msgs (drop info) in
