@@ -40,8 +40,8 @@ def conflict (step : Step) : ReconstructM Expr := do
       -- What says the `i`th literal fails, the whole disjunction having failed.
       let refuting (i : Nat) : ReconstructM Expr := do
         let some part := parts[i]? | throwError "no literal {i} in the clause"
-        withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l (suffix? := some suffix)))
+        pure (.lam `l part
+          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
       -- The atom of a literal that denies one, and what says the atom holds.
       let denied (i : Nat) : ReconstructM (Expr × Expr) := do
         let some part := parts[i]? | throwError "no literal {i} in the clause"

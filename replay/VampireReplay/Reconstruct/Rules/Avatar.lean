@@ -92,8 +92,8 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
       let some i := found
         | throwError "the negation of `{name}`{indentExpr flipped}\nis not \
           among{indentExpr target}"
-      let refuted ← withLocalDeclD `d flipped fun d => do
-        mkLambdaFVars #[d] (mkApp h (← injectPart ``Or target i d))
+      let refuted ← pure (.lam `d flipped
+        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default)
       let body ← namedFormula name
       proof := mkApp proof
         (← mkAppM ``Iff.mp
@@ -256,8 +256,8 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
     for (name, i) in c.literals.zipIdx do
       let (flipped, says) ← flipName name
       let some body := parts[i]? | throwError "missing literal"
-      let refuted ← withLocalDeclD `d body fun d => do
-        mkLambdaFVars #[d] (mkApp n (← injectGiven parts i d (suffix? := some suffix)))
+      let refuted ← pure (.lam `d body
+        (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
       known := known.insert (flippedName name)
         (← mkAppM ``Iff.mpr #[says, refuted], flipped)
     mkLambdaFVars #[n] (← propagate states proved known c.premises 0 #[])
@@ -338,9 +338,9 @@ def splitClause (step : Step) : ReconstructM Expr := do
       continue
     definitions := definitions.insert name (parent, uses, position)
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
-    let refuted (i : Nat) (of : Expr) : ReconstructM Expr :=
-      withLocalDeclD `d of fun d => do
-        mkLambdaFVars #[d] (mkApp h (← injectPart ``Or target i d))
+    let refuted (i : Nat) (of : Expr) : ReconstructM Expr := do
+      pure (.lam `d of
+        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default)
     -- What the clause held under: the disjunct for each of those names is its
     -- negation, so failing means the name holds and the clause can be used.
     let mut proof := clauseProof
@@ -423,8 +423,8 @@ def splitClause (step : Step) : ReconstructM Expr := do
       let placed := if name.startsWith "~" then none
         else step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
-        let negation ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp against (← injectPart ``Or disjunction j l))
+        let negation ← pure (.lam `l part
+          (mkApp against (← injectPart ``Or disjunction j (.bvar 0))) .default)
         negations := negations.push (part, negation)
         if let some placed := placed then
           if let some (some (k, false)) := placed[j]? then

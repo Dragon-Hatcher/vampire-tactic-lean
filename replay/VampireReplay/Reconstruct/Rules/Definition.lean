@@ -534,8 +534,8 @@ def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) body) fun h => do
       -- What says each literal fails, the whole clause having failed.
       let failing ← parts.mapIdxM fun i part => do
-        withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp h (← injectPart ``Or body i l))
+        pure (.lam `l part
+          (mkApp h (← injectPart ``Or body i (.bvar 0))) .default)
       -- A goal of `False` over the equalities denied, and the failing of
       -- everything else; the equalities are substituted away and what is left
       -- contradicts itself.

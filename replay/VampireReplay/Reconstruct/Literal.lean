@@ -225,8 +225,8 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
       let mut extended := facts
       for (part, i) in parts.zipIdx do
-        let refuting ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l] (mkApp h (← injectGiven parts i l (suffix? := some suffix)))
+        let refuting ← pure (.lam `l part
+          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
         extended := extended.push (← plainly refuting)
       mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
     return ofNotNot goal refuted
