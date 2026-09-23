@@ -38,24 +38,25 @@ the literals it stands against, each with where it is in the component.
 private def componentOf (u : Vampire.Unit) : ReconstructM Component := do
   let some clause := u.clause?
     | throwError "a general splitting component is not a clause"
-  let mut name := none
-  let mut arguments := #[]
+  let some nameAt := u.splittingName?
+    | throwError "general splitting component {u.number} does not record its name"
+  let some named := clause.literals[nameAt]?
+    | throwError "general splitting component {u.number} has no literal {nameAt}"
+  let some symbol := named.symbol?
+    | throwError "a literal with an unknown predicate"
+  unless named.polarity do
+    throwError "the name of general splitting component {u.number} is negated"
+  let arguments ← named.args.mapM fun arg => do
+    unless arg.isVar do
+      throwError "the name `{symbol.name}` is applied to {arg}, not a variable"
+    return arg.var
   let mut rest := #[]
   let mut restAt := #[]
   for (l, i) in clause.literals.zipIdx do
-    let some symbol := l.symbol?
-      | throwError "a literal with an unknown predicate"
-    if name.isNone && !(← isGoalSymbol symbol.name) && l.polarity then
-      name := some (symbol.name, i)
-      arguments ← l.args.mapM fun arg => do
-        unless arg.isVar do
-          throwError "the name `{symbol.name}` is applied to {arg}, not a variable"
-        return arg.var
-    else
+    unless i == nameAt do
       rest := rest.push l
       restAt := restAt.push i
-  let some (introduced, nameAt) := name
-    | throwError "a general splitting component introduces no name"
+  let introduced := symbol.name
   return { name := introduced, nameAt, arguments, rest, restAt }
 
 /-- The variables of `u` that are not among `arguments`, with their sorts. -/

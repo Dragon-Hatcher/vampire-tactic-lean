@@ -66,7 +66,8 @@
  *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
  *              genState, firstChoice, numChoices, firstCongruence,
  *              numCongruences, numBoundSorts, firstConstraint,
- *              numConstraints, firstPlacement, numPlacements}
+ *              numConstraints, firstPlacement, numPlacements,
+ *              splittingName}
  *             `firstConstraint` and `numConstraints` say which of a clause's
  *             literals are the disequalities an abstracting unifier left
  *             behind: what it could not unify it defers into literals the
@@ -77,6 +78,11 @@
  *             literals they are.
  *             `genState` is the generalised clause a clause came out of, and
  *             the choices are the conjuncts its clausification went into.
+ *             `splittingName` is, for a general splitting component, which
+ *             of its literals is the name the splitting introduced, and
+ *             `NONE` for anything else: the name is a fresh predicate like
+ *             any other vampire introduces, so nothing in the clause tells it
+ *             apart from them.
  *             `satPremise` is the propositional clause a step derived by SAT
  *             solving stands on, and `NONE` for anything else.
  *             `name` is the string offset of the name the input gave this
@@ -240,7 +246,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 24;
+const uint32_t VERSION = 25;
+/** Words per unit record. */
+const uint32_t UNIT_WIDTH = 31;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /**
@@ -1016,8 +1024,8 @@ struct Encoder {
     if (seen != unitSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(units.size() / 30);
-    units.resize(units.size() + 30, 0);
+    uint32_t idx = static_cast<uint32_t>(units.size() / UNIT_WIDTH);
+    units.resize(units.size() + UNIT_WIDTH, 0);
     unitSeen.emplace(u, idx);
 
     uint32_t flags = 0;
@@ -1092,18 +1100,18 @@ struct Encoder {
       Parse::TPTP::findAxiomName(u, axiomName, axiomPath) ? addString(axiomName)
                                                           : NONE;
 
-    units[30 * idx + 0] = u->number();
-    units[30 * idx + 1] = static_cast<uint32_t>(inference.rule());
-    units[30 * idx + 2] = static_cast<uint32_t>(u->inputType());
-    units[30 * idx + 3] = flags;
-    units[30 * idx + 4] = payload;
-    units[30 * idx + 5] = numLits;
-    units[30 * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
-    units[30 * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
-    units[30 * idx + 9] = numVarSorts;
-    units[30 * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
-    units[30 * idx + 11] = numSkolems;
-    units[30 * idx + 12] = nameOff;
+    units[UNIT_WIDTH * idx + 0] = u->number();
+    units[UNIT_WIDTH * idx + 1] = static_cast<uint32_t>(inference.rule());
+    units[UNIT_WIDTH * idx + 2] = static_cast<uint32_t>(u->inputType());
+    units[UNIT_WIDTH * idx + 3] = flags;
+    units[UNIT_WIDTH * idx + 4] = payload;
+    units[UNIT_WIDTH * idx + 5] = numLits;
+    units[UNIT_WIDTH * idx + 6] = parentIdxs.empty() ? NONE : firstParent;
+    units[UNIT_WIDTH * idx + 7] = static_cast<uint32_t>(parentIdxs.size());
+    units[UNIT_WIDTH * idx + 9] = numVarSorts;
+    units[UNIT_WIDTH * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
+    units[UNIT_WIDTH * idx + 11] = numSkolems;
+    units[UNIT_WIDTH * idx + 12] = nameOff;
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -1215,19 +1223,19 @@ struct Encoder {
         numBoundSorts++;
       }
     }
-    units[30 * idx + 8] =
+    units[UNIT_WIDTH * idx + 8] =
       numVarSorts == 0 && numBoundSorts == 0 ? NONE : firstVarSort;
-    units[30 * idx + 25] = numBoundSorts;
+    units[UNIT_WIDTH * idx + 25] = numBoundSorts;
     auto [firstConstraint, numConstraints] =
       InferenceStore::instance()->constraints(u);
-    units[30 * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
-    units[30 * idx + 27] = numConstraints;
+    units[UNIT_WIDTH * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
+    units[UNIT_WIDTH * idx + 27] = numConstraints;
 
-    units[30 * idx + 13] = numUses == 0 ? NONE : firstUse;
-    units[30 * idx + 14] = numUses;
-    units[30 * idx + 15] = numSplits == 0 ? NONE : firstSplit;
-    units[30 * idx + 16] = numSplits;
-    units[30 * idx + 17] =
+    units[UNIT_WIDTH * idx + 13] = numUses == 0 ? NONE : firstUse;
+    units[UNIT_WIDTH * idx + 14] = numUses;
+    units[UNIT_WIDTH * idx + 15] = numSplits == 0 ? NONE : firstSplit;
+    units[UNIT_WIDTH * idx + 16] = numSplits;
+    units[UNIT_WIDTH * idx + 17] =
       inference.satPremise() ? encodeSatClause(inference.satPremise()) : NONE;
 
     uint32_t firstNaming = static_cast<uint32_t>(namings.size() / 4);
@@ -1245,9 +1253,9 @@ struct Encoder {
         numNamings++;
       }
     }
-    units[30 * idx + 18] = numNamings == 0 ? NONE : firstNaming;
-    units[30 * idx + 19] = numNamings;
-    units[30 * idx + 20] =
+    units[UNIT_WIDTH * idx + 18] = numNamings == 0 ? NONE : firstNaming;
+    units[UNIT_WIDTH * idx + 19] = numNamings;
+    units[UNIT_WIDTH * idx + 20] =
       encodeGenClauseState(InferenceStore::instance()->genClauseOfClause(u));
 
     uint32_t firstPlacement = static_cast<uint32_t>(placements.size() / 4);
@@ -1351,8 +1359,16 @@ struct Encoder {
         }
       }
     }
-    units[30 * idx + 28] = numPlacements == 0 ? NONE : firstPlacement;
-    units[30 * idx + 29] = numPlacements;
+    units[UNIT_WIDTH * idx + 28] = numPlacements == 0 ? NONE : firstPlacement;
+    units[UNIT_WIDTH * idx + 29] = numPlacements;
+    units[UNIT_WIDTH * idx + 30] = NONE;
+    if (u->isClause() && inference.rule() == InferenceRule::GENERAL_SPLITTING_COMPONENT) {
+      Clause* cl = static_cast<Clause*>(u);
+      if (Literal* name = InferenceStore::instance()->splittingNameLiteral(u))
+        for (unsigned j = 0; j < cl->length(); j++)
+          if ((*cl)[j] == name)
+            units[UNIT_WIDTH * idx + 30] = j;
+    }
 
     uint32_t firstCongruence = static_cast<uint32_t>(congruences.size() / 5);
     uint32_t numCongruences = 0;
@@ -1377,8 +1393,8 @@ struct Encoder {
           numCongruences++;
         }
     }
-    units[30 * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
-    units[30 * idx + 24] = numCongruences;
+    units[UNIT_WIDTH * idx + 23] = numCongruences == 0 ? NONE : firstCongruence;
+    units[UNIT_WIDTH * idx + 24] = numCongruences;
 
     uint32_t firstChoice = static_cast<uint32_t>(choices.size() / 2);
     uint32_t numChoices = 0;
@@ -1390,8 +1406,8 @@ struct Encoder {
         numChoices++;
       }
     }
-    units[30 * idx + 21] = numChoices == 0 ? NONE : firstChoice;
-    units[30 * idx + 22] = numChoices;
+    units[UNIT_WIDTH * idx + 21] = numChoices == 0 ? NONE : firstChoice;
+    units[UNIT_WIDTH * idx + 22] = numChoices;
     return idx;
   }
 };
@@ -1436,7 +1452,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.subs.size()));
   putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / 30));
+  putWord(buf, static_cast<uint32_t>(enc.units.size() / UNIT_WIDTH));
   putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.parents.size()));
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));

@@ -15,7 +15,7 @@ def none32 : UInt32 := 0xFFFFFFFF
 private def headerWords : Nat := 43
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 30
+private def unitWidth : Nat := 31
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -146,7 +146,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 24
+private def version : UInt32 := 25
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -391,6 +391,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numUnits] do
     let u (off : Nat) := at_ units unitWidth i off
     let parent (k : Nat) : Nat := at_ parents 1 (u 6 + k) 0
+    optional "splitting name literal" (u 30) (clauseSize i)
     -- A placement's entries are the unit's own literals, except in a split
     -- clause: those are of the components' literals, into the clause split,
     -- which is the step's first premise.
@@ -1099,6 +1100,14 @@ def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
 def genClause? (u : Unit) : Option GenClause :=
   let idx := u.field 20
   if idx == none32 then none else some ⟨u.proof, idx⟩
+
+/--
+Which of a general splitting component's literals is the name the splitting
+introduced, and `none` for anything else.
+-/
+def splittingName? (u : Unit) : Option Nat :=
+  let i := u.field 30
+  if i == none32 then none else some i.toNat
 
 /--
 The propositional clause a step derived by SAT solving stands on, and `none`
