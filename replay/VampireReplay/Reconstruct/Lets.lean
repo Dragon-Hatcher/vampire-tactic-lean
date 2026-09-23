@@ -13,6 +13,14 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
+What `bindLets` keeps while it abstracts: which subterms mention a bound local,
+for every walk it makes, and what one walk made of each subterm at each depth.
+-/
+private structure Abstracting where
+  mentions : Std.HashMap Expr Bool := {}
+  done : Std.HashMap (Expr × Nat) Expr := {}
+
+/--
 Whether a term mentions any of `bound`, kept for every subterm asked about.
 
 A step's proof embeds the formulas it reasons about, and those are shared from
@@ -20,9 +28,9 @@ one step's proof to the next, but mention none of the locals being bound -- so
 asked once per subterm, across every value, most of the proof is walked once.
 -/
 private partial def mentionsBound (bound : Std.HashSet FVarId) (e : Expr) :
-    StateM (Std.HashMap Expr Bool) Bool := do
+    StateM Abstracting Bool := do
   if !e.hasFVar then return false
-  if let some known := (← get)[e]? then return known
+  if let some known := (← get).mentions[e]? then return known
   let answer ← match e with
     | .fvar id => pure (bound.contains id)
     | .app f a => do pure ((← mentionsBound bound f) || (← mentionsBound bound a))
@@ -33,31 +41,41 @@ private partial def mentionsBound (bound : Std.HashSet FVarId) (e : Expr) :
         || (← mentionsBound bound b))
     | .mdata _ b | .proj _ _ b => mentionsBound bound b
     | _ => pure false
-  modify (·.insert e answer)
+  modify fun s => { s with mentions := s.mentions.insert e answer }
   return answer
 
 /--
 `e` with the `j`th of `bound` replaced by the variable it is under `offset`
 binders more than the `n` of the chain: `bvar (n - 1 - j + offset)`. Only what
 mentions one of them is descended into.
+
+What it makes of a subterm is kept by the subterm and its depth, as
+`abstractHoisted` keeps it: the formulas a proof reasons about are shared
+within it, and each would otherwise be rebuilt wherever it recurs. That depends
+on `n` too, so `done` is only good for one `n`, and a caller starts it afresh
+for each.
 -/
 private partial def abstractBound (index : Std.HashMap FVarId Nat) (bound : Std.HashSet FVarId)
-    (n : Nat) (e : Expr) (offset : Nat) : StateM (Std.HashMap Expr Bool) Expr := do
+    (n : Nat) (e : Expr) (offset : Nat) : StateM Abstracting Expr := do
   unless ← mentionsBound bound e do return e
+  if let some done := (← get).done[(e, offset)]? then return done
   let go := abstractBound index bound n
-  match e with
-  | .fvar id =>
-    match index[id]? with
-    | some j => return .bvar (n - 1 - j + offset)
-    | none => return e
-  | .app f a => return e.updateApp! (← go f offset) (← go a offset)
-  | .lam _ t b _ => return e.updateLambdaE! (← go t offset) (← go b (offset + 1))
-  | .forallE _ t b _ => return e.updateForallE! (← go t offset) (← go b (offset + 1))
-  | .letE name t v b nondep =>
-    return .letE name (← go t offset) (← go v offset) (← go b (offset + 1)) nondep
-  | .mdata _ b => return e.updateMData! (← go b offset)
-  | .proj _ _ b => return e.updateProj! (← go b offset)
-  | _ => return e
+  let result ← match e with
+    | .fvar id =>
+      match index[id]? with
+      | some j => pure (.bvar (n - 1 - j + offset))
+      | none => pure e
+    | .app f a => do pure (e.updateApp! (← go f offset) (← go a offset))
+    | .lam _ t b _ => do pure (e.updateLambdaE! (← go t offset) (← go b (offset + 1)))
+    | .forallE _ t b _ => do
+      pure (e.updateForallE! (← go t offset) (← go b (offset + 1)))
+    | .letE name t v b nondep => do
+      pure (.letE name (← go t offset) (← go v offset) (← go b (offset + 1)) nondep)
+    | .mdata _ b => do pure (e.updateMData! (← go b offset))
+    | .proj _ _ b => do pure (e.updateProj! (← go b offset))
+    | _ => pure e
+  modify fun s => { s with done := s.done.insert (e, offset) result }
+  return result
 
 /--
 `let x₀ := v₀; …; let xₙ := vₙ; body`, over let-bound locals `bound`, each of
@@ -75,10 +93,12 @@ def bindLets (bound : Array Expr) (body : Expr) : ReconstructM Expr := do
   let ids := bound.map (·.fvarId!)
   let set := Std.HashSet.ofArray ids
   let index := Std.HashMap.ofList ids.toList.zipIdx
-  let mut cache : Std.HashMap Expr Bool := {}
-  let (abstracted, cache') := (abstractBound index set bound.size
-    (← instantiateMVars body) 0).run cache
-  cache := cache'
+  -- Which subterms mention a bound local does not depend on how many of them
+  -- a walk abstracts, so that is kept across every walk; what a walk made of
+  -- a subterm does, so that is started afresh for each.
+  let (abstracted, s) := (abstractBound index set bound.size
+    (← instantiateMVars body) 0).run {}
+  let mut mentions := s.mentions
   let mut out := abstracted
   for k in [0 : bound.size] do
     let i := bound.size - 1 - k
@@ -86,9 +106,12 @@ def bindLets (bound : Array Expr) (body : Expr) : ReconstructM Expr := do
     let some value := decl.value? | throwError "a let-bound local has no value"
     -- The `i`th local is under the binders of the ones before it, which are
     -- the only ones it mentions.
-    let (value, c₁) := (abstractBound index set i (← instantiateMVars value) 0).run cache
-    let (type, c₂) := (abstractBound index set i (← instantiateMVars decl.type) 0).run c₁
-    cache := c₂
+    let value ← instantiateMVars value
+    let type ← instantiateMVars decl.type
+    let ((value, type), s) := (do
+      pure (← abstractBound index set i value 0, ← abstractBound index set i type 0)).run
+        ({ mentions } : Abstracting)
+    mentions := s.mentions
     out := .letE decl.userName type value out (nondep := false)
   return out
 

@@ -62,7 +62,7 @@ structure Context where
   lives in a library whose keywords this one cannot afford to have.
   -/
   contradiction : Array Expr → Option Expr → MetaM Expr := fun _ _ =>
-    throwError "no way to prove an arithmetic step was given to replay"
+    throwError "replay was not given a way to prove arithmetic steps"
   /--
   `a ↔ b` where the two are one comparison with its terms moved across it,
   which is the shape normalising a literal leaves, and none where they are not.
@@ -183,9 +183,14 @@ def rollingBack (x : ReconstructM α) : ReconstructM α := do
   try x catch e => saved.restore; throw e
 
 /--
-Raised for a name vampire introduced itself, by skolemisation or AVATAR. Such a
-name stands for nothing in the Lean goal, so the step it appears in cannot even
-be stated until those rules are implemented.
+Raised for a name that stands for nothing: neither the goal nor anything the
+proof introduced binds it.
+
+The names vampire introduces itself -- skolems, AVATAR's components, the
+symbols of its definitions -- are bound before any step is replayed, so meeting
+one unbound means that binding it failed, or that no rule binds that kind of
+name yet. What went wrong binding is reported with it, since the missing name
+is otherwise all the message says.
 -/
 def throwIntroduced (kind name : String) : ReconstructM α := do
   let failures := (← get).bindFailures
@@ -194,8 +199,8 @@ def throwIntroduced (kind name : String) : ReconstructM α := do
     else m!"\nbinding what the proof introduces failed for {failures.size} \
       step(s):{MessageData.joinSep (failures.toList.map fun (n, e) =>
         m!"\n  step {n}: {e}") ""}"
-  throwError "vampire introduced {kind} `{name}`, which has no counterpart in \
-    the goal; reconstruction cannot proceed{why}"
+  throwError "{kind} `{name}` has no Lean counterpart: it is not from the goal, \
+    and replay did not bind it{why}"
 
 /-- The Lean type a TPTP sort stands for, if it stands for one. -/
 def sortType? (name : String) : ReconstructM (Option Expr) := do
@@ -208,9 +213,16 @@ def sortType? (name : String) : ReconstructM (Option Expr) := do
   if name == "$real" then return mkConst `Real
   return none
 
+/--
+Raised for a sort that stands for no Lean type: the goal did not give it one,
+and it is not one of TPTP's arithmetic types.
+-/
+def throwUnknownSort (name : String) : ReconstructM α :=
+  throwError "the sort `{name}` has no Lean counterpart in the goal"
+
 /-- The Lean type a TPTP sort stands for. -/
 def sortType (name : String) : ReconstructM Expr := do
-  let some τ ← sortType? name | throwIntroduced "the sort" name
+  let some τ ← sortType? name | throwUnknownSort name
   return τ
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
@@ -234,12 +246,18 @@ def isGoalSymbol (name : String) : ReconstructM Bool := do
   return ((← read).symbols.symbols[name]?).isSome
 
 /--
+A name splitting introduced, taken apart: whether it is the negation of another
+and the name it negates, `~n` being `(true, n)` and `n` being `(false, n)`.
+-/
+def splitName (name : String) : Bool × String :=
+  if name.startsWith "~" then (true, (name.drop 1).toString) else (false, name)
+
+/--
 What a name splitting introduced stands for, `~n` for the negation of what `n`
 does.
 -/
 def namedFormula (name : String) : ReconstructM Expr := do
-  let negated := name.startsWith "~"
-  let key := if negated then (name.drop 1).toString else name
+  let (negated, key) := splitName name
   let some body := (← get).named[key]?
     | throwIntroduced "the named subformula" name
   return if negated then mkApp (mkConst ``Not) body else body
@@ -269,7 +287,9 @@ def asNegation (e : Expr) : Option Expr :=
 
 /-- The name of the negation of what `name` names. -/
 def flippedName (name : String) : String :=
-  if name.startsWith "~" then (name.drop 1).toString else "~" ++ name
+  match splitName name with
+  | (true, positive) => positive
+  | (false, positive) => "~" ++ positive
 
 /--
 `⟦~n⟧`, and that it says what `¬⟦n⟧` does.

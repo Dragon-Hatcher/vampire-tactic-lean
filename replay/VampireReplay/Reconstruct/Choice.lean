@@ -30,8 +30,9 @@ def nonempty (τ : Expr) : ReconstructM Expr := do
       match ← given τ with
       | some element => mkAppOptM ``Nonempty.intro #[some τ, some element]
       | none =>
-        throwError "nothing says{indentExpr τ}\nis inhabited: there is no \
-          `Nonempty` instance for it and the goal holds nothing of it"
+        throwError "cannot show{indentExpr τ}\nis inhabited: it has no \
+          `Nonempty` instance and no variable or hypothesis of the goal has \
+          this type"
   modify fun s => { s with nonempty := s.nonempty.insert τ inst }
   return inst
 
@@ -66,9 +67,10 @@ the one the name was defined with.
 def witnessAgainst (against : Expr) : ReconstructM (Expr × Expr) := do
   let stated ← instantiateMVars (← inferType against)
   let some inner := asNegation stated
-    | throwError "not a refutation of anything:{indentExpr stated}"
+    | throwError "expected a negated universal formula, got{indentExpr stated}"
   let .forallE n τ body bi := inner
-    | throwError "not a quantified formula:{indentExpr inner}"
+    | throwError "expected the negation of a universal formula, but what is \
+        negated is{indentExpr inner}"
   let predicate := Expr.lam n τ body bi
   let existence ← mkAppM ``Iff.mp
     #[← mkAppOptM ``Classical.not_forall #[some τ, some predicate], against]
@@ -93,7 +95,7 @@ A witness is chosen from this, so it has to come from the premise: a conclusion
 states the block in terms of the skolem that choosing the witness is what
 introduces.
 -/
-partial def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
+def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
     (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
     ReconstructM Expr := do
   match bound with
@@ -109,7 +111,7 @@ partial def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
         -- A universal block is skolemised through its failing, so the negation
         -- stays outermost and the quantifier goes inside it.
         let some quantified := inner.not?
-          | throwError "a universal block did not come back negated"
+          | throwError "expected the negation of a formula, got{indentExpr inner}"
         return mkApp (mkConst ``Not) (← mkForallFVars #[x] quantified)
 
 
@@ -129,7 +131,7 @@ def registerSkolem (skolems : Std.HashMap UInt32 Term) (vars : Vars) (v : UInt32
     unless arg.isVar do
       throwError "skolem {symbol.name} was applied to {arg}, not a variable"
     let some x := vars[arg.var]?
-      | throwError "variable X{arg.var} has no recorded sort"
+      | throwError "variable X{arg.var} is not bound here"
     return x
   let definition ← mkLambdaFVars args witness
   modify fun s => { s with introduced := s.introduced.insert symbol.name definition }

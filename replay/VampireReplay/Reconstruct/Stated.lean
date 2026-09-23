@@ -215,7 +215,7 @@ def interpreted (name : String) (args : Array Expr) :
       let τ ← inferType a
       return some (mkApp2 (← headAt ``HMul.hMul τ 2) (← numeralAt τ) a)
     unless args.isEmpty do return none
-    let some τ ← sortType? n.sort | throwIntroduced "the sort" n.sort
+    let some τ ← sortType? n.sort | throwUnknownSort n.sort
     return some (← numeralAt τ)
 
 /--
@@ -257,7 +257,7 @@ private partial def termGround (vars : Vars) (t : Term) :
     ReconstructM (Expr × Bool) := do
   if t.isVar then
     let some x := vars[t.var]?
-      | throwError "variable X{t.var} has no recorded sort"
+      | throwError "variable X{t.var} is not bound here"
     return (x, false)
   if let some e := (← get).groundTerms[t.index]? then
     return (e, true)

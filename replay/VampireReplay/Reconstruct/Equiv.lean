@@ -75,7 +75,10 @@ partial def toNNF (e : Expr) : ReconstructM (Expr × Option Expr) := do
       return (mkApp2 (mkConst fn) l r,
         ← congr2? lemma e.appFn!.appArg! e.appArg! pl pr)
   if e.not?.isSome then
-    -- Anything but an atom under a negation was taken apart above.
+    -- `nnfStep` pushes a negation into a negation, a junction and a
+    -- quantifier; what is left under one here is an atom, or an implication
+    -- or an equivalence between propositions, which it does not push into and
+    -- which are compared as they stand, their insides included.
     return (e, none)
   if e.isAppOfArity ``Exists 2 then
     match e.appArg! with
@@ -119,7 +122,8 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
   | .forallE _ sd sb _, .forallE _ td tb _ =>
     -- Only a genuine quantifier: `¬a` is an arrow too, but not a `forallE`.
     unless ← isDefEq sd td do
-      throwError "implies: cannot relate{indentExpr source}\nto{indentExpr target}"
+      throwError "cannot show that{indentExpr source}\nimplies{indentExpr target}\n\
+        their binders have different types"
     withLocalDeclD `x sd fun x => do
       let rest ← implies (sb.instantiate1 x) (tb.instantiate1 x)
       withLocalDeclD `h source fun h => do
@@ -148,20 +152,13 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       if let some i := index[d]? then
         return ← withLocalDeclD `l d fun l => do
           mkLambdaFVars #[l] (← injectPart ``Or target i l)
-      if let some (α, a, b) := d.eq? then
-        let flipped ← mkAppOptM ``Eq #[some α, some b, some a]
+      if let some (α, a, b, negated) := equalityLiteral? d then
+        let equation ← mkAppOptM ``Eq #[some α, some b, some a]
+        let flipped := if negated then mkApp (mkConst ``Not) equation else equation
         if let some i := index[flipped]? then
           return ← withLocalDeclD `l d fun l => do
-            mkLambdaFVars #[l] (← injectPart ``Or target i (← mkAppM ``Eq.symm #[l]))
+            mkLambdaFVars #[l] (← injectPart ``Or target i (← symmLiteral α a b negated l))
       if let some inner := d.not? then
-        if let some (α, a, b) := inner.eq? then
-          let flipped ← mkAppOptM ``Eq #[some α, some b, some a]
-          let negated := mkApp (mkConst ``Not) flipped
-          if let some i := index[negated]? then
-            return ← withLocalDeclD `l d fun l => do
-              let contrapositive ← withLocalDeclD `e flipped fun e => do
-                mkLambdaFVars #[e] (mkApp l (← mkAppM ``Eq.symm #[e]))
-              mkLambdaFVars #[l] (← injectPart ``Or target i contrapositive)
         -- Absent, so it has to be refutable: `t ≠ t` is what removal leaves.
         if let some (_, a, b) := inner.eq? then
           if ← isDefEq a b then
@@ -180,12 +177,13 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       if d.isConstOf ``False then
         return ← withLocalDeclD `l d fun l => do
           mkLambdaFVars #[l] (← mkAppOptM ``False.elim #[some target, some l])
-      throwError "implies: the disjunct{indentExpr d}\nis neither among\
-        {indentExpr target}\nnor refutable"
+      throwError "the disjunct{indentExpr d}\nis neither among\
+        {indentExpr target}\nnor refutable on its own"
     let branches ← (junctionParts ``Or source).mapM branchFor
     withLocalDeclD `h source fun h => do
       mkLambdaFVars #[h] (← elimParts source 0 (fun i hi => do
-        let some branch := branches[i]? | throwError "missing disjunct"
+        let some branch := branches[i]?
+          | throwError "the disjunction{indentExpr source}\nhas no disjunct {i}"
         return mkApp branch hi) h)
 
 /--
@@ -344,7 +342,8 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
       -- An arrow: its left side is negative, which is why this is an ↔.
       return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
     unless ← isDefEq ad bd do
-      throwError m!"equiv/forall: cannot relate{indentExpr a}\nto{indentExpr b}"
+      throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
+        their binders have different types"
     return ← withLocalDeclD `x ad fun x => do
       let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
       mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
@@ -356,7 +355,8 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
           let inner ← equivNormal (abody.instantiate1 x) (bbody.instantiate1 x)
           mkAppM ``exists_congr #[← mkLambdaFVars #[x] inner]
       | _, _ =>
-        throwError "equiv/exists: cannot relate{indentExpr a}\nto{indentExpr b}"
+        throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
+          the body of one of the existentials is not a `fun`"
     for fn in [``And, ``Or] do
       if a.isAppOfArity fn 2 || b.isAppOfArity fn 2 then
         let ap := junctionParts fn a
@@ -372,8 +372,8 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
               return ← mkAppM ``Iff.trans
                 #[aSays, ← mkAppM ``Iff.trans
                   #[core, ← mkAppM ``Iff.symm #[bSays]]]
-          throwError "junctions have {ap.size} and {bp.size} parts:\
-            {indentExpr a}\nand{indentExpr b}"
+          throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
+            one has {ap.size} parts and the other {bp.size}"
         -- Part by part, in order. The translation emits a junction in the
         -- order vampire keeps it, so there is nothing to align: were the two
         -- to disagree, an `input` step would say so rather than a guess being

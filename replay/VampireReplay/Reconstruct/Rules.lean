@@ -161,18 +161,20 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .thaBooleanArrayExtensionality => Arithmetic.theoryStep step
 
   -- Ruled out: these cannot reach a proof the tactic asked for, and say why.
-  | .negatedConjecture => unreachable step "it negates a TPTP conjecture, and \
-    the tactic states the goal as a negated conjecture already"
-  | .backwardSubsumptionDemodulation => unreachable step "this vampire records \
-    nothing of how it used its premises, and the tactic forces `bsd=off`"
-  | .globalSubsumption => unreachable step "it rests on a propositional proof \
-    this vampire does not keep, and the tactic forces `gs=off`"
-  | .avatarAssertionReintroduction => unreachable step "only synthesis runs it, \
-    which the tactic does not ask for"
-  | .functionDefinitionDemodulation => unreachable step "it rewrites with \
-    recursive function definitions, which the tactic does not send"
-  | .constrainedFactoring => unreachable step "no inference of this vampire \
-    makes it"
+  | .negatedConjecture => unreachable step "the tactic sends the goal already \
+    negated, never as a conjecture to negate"
+  | .backwardSubsumptionDemodulation => unreachable step "the bundled Vampire \
+    does not record how this rule used its premises, and the tactic turns it \
+    off with `bsd=off`"
+  | .globalSubsumption => unreachable step "the bundled Vampire does not keep \
+    the propositional proof this rule relies on, and the tactic turns it off \
+    with `gs=off`"
+  | .avatarAssertionReintroduction => unreachable step "only program synthesis \
+    uses this rule, and the tactic does not run synthesis"
+  | .functionDefinitionDemodulation => unreachable step "this rule rewrites \
+    with recursive function definitions, and the tactic does not send any"
+  | .constrainedFactoring => unreachable step "no inference in the bundled \
+    Vampire produces this rule"
 
   -- Not implemented yet: admitted only under `+admit`.
   | .genericFormulaClauseTransformation => unimplemented step

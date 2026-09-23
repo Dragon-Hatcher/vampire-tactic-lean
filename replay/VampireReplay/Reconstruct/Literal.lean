@@ -6,6 +6,32 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
+An equality literal taken apart: the sort it is at, its two sides, and whether
+it is denied. `none` for any other literal.
+-/
+def equalityLiteral? (e : Expr) : Option (Expr × Expr × Expr × Bool) :=
+  let (inner, negated) := match e.not? with
+    | some inner => (inner, true)
+    | none => (e, false)
+  if inner.isAppOfArity ``Eq 3 then
+    match inner.getAppArgs with
+    | #[τ, lhs, rhs] => some (τ, lhs, rhs, negated)
+    | _ => none
+  else none
+
+/--
+A proof of an equality literal the other way round, from `h`, a proof of it as
+`equalityLiteral?` took it apart: `Eq.symm` of an equation, `Ne.symm` of a
+denied one.
+
+Written out rather than found: this is asked of every literal of every clause
+an inference carries, and what it is asked of says it already.
+-/
+def symmLiteral (τ lhs rhs : Expr) (negated : Bool) (h : Expr) : ReconstructM Expr := do
+  let symm := if negated then ``Ne.symm else ``Eq.symm
+  return mkApp4 (mkConst symm [← getLevel τ]) τ lhs rhs h
+
+/--
 A proof of the same literal with an equality's arguments the other way round,
 if it is an equality at all.
 
@@ -14,17 +40,9 @@ both orientations, so a literal carried into a conclusion or resolved against
 can come back the other way round.
 -/
 def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
-  let stated ← instantiateMVars (← inferType h)
-  -- Written out rather than found: this is asked of every literal of every
-  -- clause an inference carries, and what it is asked of says it already.
-  if stated.isAppOfArity ``Eq 3 then
-    let #[τ, lhs, rhs] := stated.getAppArgs | return none
-    return some (mkApp4 (mkConst ``Eq.symm [← getLevel τ]) τ lhs rhs h)
-  if let some inner := stated.not? then
-    if inner.isAppOfArity ``Eq 3 then
-      let #[τ, lhs, rhs] := inner.getAppArgs | return none
-      return some (mkApp4 (mkConst ``Ne.symm [← getLevel τ]) τ lhs rhs h)
-  return none
+  let some (τ, lhs, rhs, negated) := equalityLiteral? (← instantiateMVars (← inferType h))
+    | return none
+  return some (← symmLiteral τ lhs rhs negated h)
 
 /--
 The same literal with a double negation taken off, or put on.
@@ -102,26 +120,36 @@ def closeComplementary (target h₁ h₂ : Expr) : ReconstructM Expr := do
     #[some (← inferType positive), some target, some positive, some negative]
 
 /--
-A proof of `target` from one of its literals, found by lookup.
+Which of `parts`, from the `start`th on, a literal stating `stated` is.
+
+The literal is usually the very one the conclusion was built from, so it is
+looked for as it stands before what the parts mean is asked about: a clause of
+a few hundred literals is placed a literal at a time, and unifying with each of
+its parts costs more than the inferences do.
+-/
+def findPart? (parts : Array Expr) (stated : Expr) (start : Nat := 0) :
+    ReconstructM (Option Nat) := do
+  for k in [start : parts.size] do
+    if parts[k]! == stated then return some k
+  for k in [start : parts.size] do
+    if ← isDefEq parts[k]! stated then return some k
+  return none
+
+/--
+A proof of `target` from one of its literals, found by lookup, or `none` where
+the literal is not among them in any of the ways it can be stated.
 
 A simplifying or generating inference carries every literal it did not act on
 into the conclusion unchanged, so where the literal lands is not searched for.
 -/
-def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
+def placeLiteral? (target : Expr) (h : Expr) : ReconstructM (Option Expr) := do
   let parts := junctionParts ``Or target
-  -- The literal is usually the very one the conclusion was built from, so it
-  -- is looked for as it stands before anything is made of it: a clause of a
-  -- few hundred literals is placed a literal at a time, and building the ways
-  -- a literal can be stated differently for each of them costs more than the
-  -- inferences do.
+  -- The literal is looked for as it stands before the other ways of stating it
+  -- are built, for the same reason `findPart?` compares before it unifies.
   let place (candidate : Expr) : ReconstructM (Option Expr) := do
-    let stated ← instantiateMVars (← inferType candidate)
-    if let some i := parts.findIdx? (· == stated) then
-      return some (← injectPart ``Or target i candidate)
-    for (part, i) in parts.zipIdx do
-      if ← isDefEq part stated then
-        return some (← injectPart ``Or target i candidate)
-    return none
+    let some i ← findPart? parts (← instantiateMVars (← inferType candidate))
+      | return none
+    return some (← injectPart ``Or target i candidate)
   if let some placed ← place h then
     return placed
   if let some flipped ← flipEquality h then
@@ -130,8 +158,14 @@ def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
   for candidate in ← doubleNegations h do
     if let some placed ← place candidate then
       return placed
-  throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
-    \nis not among{indentExpr target}"
+  return none
+
+/-- `placeLiteral?`, for a caller that cannot go on without the literal placed. -/
+def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
+  let some placed ← placeLiteral? target h
+    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
+        \nis not among{indentExpr target}"
+  return placed
 
 /--
 `a` from `¬¬a`, with both written out.
@@ -225,8 +259,8 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
       let mut extended := facts
       for (part, i) in parts.zipIdx do
-        let refuting ← pure (.lam `l part
-          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
+        let refuting := Expr.lam `l part
+          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
         extended := extended.push (← plainly refuting)
       mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
     return ofNotNot goal refuted

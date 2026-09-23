@@ -141,15 +141,21 @@ def Step.underVars (step : Step) (k : Vars → Expr → ReconstructM Expr) :
     mkLambdaFVars xs (← k vars target)
 
 /--
-How a step used the premise in position `i` among its parents.
+The premise in position `i` among a step's parents, and how many times the
+step took that same premise before there.
 
 A premise can be used twice -- an inference can take a clause as both of its
-premises -- so a use is found by position rather than by which premise it is,
-counting the uses of that premise in the order they were recorded.
+premises -- so what the worker recorded of a use is found by position rather
+than by which premise it is: the uses of a premise are recorded in the order
+the step took them, and this says which of them is the one in position `i`.
 -/
-def Step.useAt? (step : Step) (i : Nat) : Option PremiseUse := do
+def Step.occurrence? (step : Step) (i : Nat) : Option (Vampire.Unit × Nat) := do
   let parent ← step.unit.parents[i]?
-  let earlier := (step.unit.parents.extract 0 i).countP (·.number == parent.number)
+  return (parent, (step.unit.parents.extract 0 i).countP (·.number == parent.number))
+
+/-- How a step used the premise in position `i` among its parents. -/
+def Step.useAt? (step : Step) (i : Nat) : Option PremiseUse := do
+  let (parent, earlier) ← step.occurrence? i
   let uses := step.unit.premiseUses.filter (·.premise == parent.number)
   uses[earlier]?
 
@@ -165,8 +171,7 @@ Where the literals of the premise in position `i` went in the conclusion, as
 the worker recorded it under the use `useAt i` reads: `none` where nothing was.
 -/
 def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
-  let parent ← step.unit.parents[i]?
-  let earlier := (step.unit.parents.extract 0 i).countP (·.number == parent.number)
+  let (_, earlier) ← step.occurrence? i
   step.unit.placement? i earlier
 
 /-- The conclusion's literals, `target` being what it says, to place into. -/
@@ -181,15 +186,15 @@ The use records the side as the premise states it, and vampire shares its
 terms, so it is one of the equation's two arguments by index: which side the
 inference used is read off rather than found by unifying either side with it.
 -/
-def recordedSideIsLeft (parent : Vampire.Unit) (use : PremiseUse) (literal : Nat) :
+def recordedSideIsLeft (parent : Vampire.Unit) (use : PremiseUse) (index : Nat) :
     ReconstructM Bool := do
   let some side := use.term
     | throwError "step {parent.number} was used without recording which side of \
         its equation"
   let some clause := parent.clause?
     | throwError "the equation used from step {parent.number} is not a clause"
-  let some l := clause.literals[literal]?
-    | throwError "step {parent.number} has no literal {literal}"
+  let some l := clause.literals[index]?
+    | throwError "step {parent.number} has no literal {index}"
   let #[lhs, rhs] := l.args
     | throwError "the literal used from step {parent.number} is not an equation"
   if lhs == side then return true
@@ -204,9 +209,14 @@ them.
 The literals are taken as vampire has them rather than found by taking the
 clause apart: a literal naming a subformula stands for a whole formula, and the
 disjuncts of what it rebuilds to are not literals of the clause.
+
+@b position? is where `parent` is among the step's parents, which says which
+of the worker's records of where its literals went are this use's: a step can
+take one premise twice. Without it, the premise's first position is taken.
 -/
 def relateLiterals (step : Step) (parent : Vampire.Unit)
-    (premiseProof premiseStated : Expr) : ReconstructM Expr := do
+    (premiseProof premiseStated : Expr) (position? : Option Nat := none) :
+    ReconstructM Expr := do
   let some source := parent.clause?
     | -- These rules run over formulas too, before clausification, and there a
       -- formula's shape is what it says.
@@ -222,24 +232,15 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- The premise's literals are read as the premise means them: polarity
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
-    let targetParts ← conclusion.literals.mapM (Reconstruct.literal vars)
-    -- As in `placeLiteral`: a literal is looked for as it stands before the
-    -- other ways of stating it are built, which for a clause of a few hundred
-    -- literals is the whole cost of the step.
-    let targetSuffix := suffixJunctions ``Or ``False targetParts
-    let placeIn (chain candidate : Expr) : ReconstructM (Option Expr) := do
-      let (parts, suffix) :=
-        if chain == target then (targetParts, targetSuffix)
-        else
-          let parts := junctionParts ``Or chain
-          (parts, suffixJunctions ``Or ``False parts)
-      let stated ← instantiateMVars (← inferType candidate)
-      if let some i := parts.findIdx? (· == stated) then
-        return some (← injectGiven parts i candidate (suffix? := some suffix))
-      for (part, i) in parts.zipIdx do
-        if ← isDefEq part stated then
-          return some (← injectGiven parts i candidate (suffix? := some suffix))
-      return none
+    -- The conclusion's literals, by the count of them: a literal can itself be
+    -- a disjunction, which taking the clause apart by its shape would split.
+    let into := step.into target
+    -- A proof of the conclusion from its `start`th literal on, from one of
+    -- those literals.
+    let placeIn (start : Nat) (candidate : Expr) : ReconstructM (Option Expr) := do
+      let some k ← findPart? into.parts (← instantiateMVars (← inferType candidate)) start
+        | return none
+      return into.inject start k candidate
     -- Every literal the step kept is one of the conclusion's; one it dropped
     -- has to be refutable on its own, as `t ≠ t` is.
     let stating (candidate : Expr) : ReconstructM Expr := do
@@ -250,11 +251,10 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       (sourceParts.extract (i + 1) sourceParts.size).contains part
     -- Where the worker recorded each literal went, which is where it goes;
     -- one it did not is looked for.
-    let placed := (step.unit.parents.findIdx? (·.number == parent.number)).bind
-      step.placedAt
-    let into := step.into target
+    let position? := position? <|> step.unit.parents.findIdx? (·.number == parent.number)
+    let placed := position?.bind step.placedAt
     let inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j h t => do
-      if recurs[i]! then return none
+      if recurs[i]?.getD true then return none
       if let some placed := placed then
         if let some (some (k, flipped)) := placed[i]? then
           unless k == j do return none
@@ -263,10 +263,11 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
         if ← isDefEq (← stating candidate) t then
           return some candidate
       return none
-    let accountedFor (h rest : Expr) : ReconstructM (Option Expr) := do
+    -- `rest` is what is left of the conclusion from its `start`th literal on.
+    let accountedFor (h rest : Expr) (start : Nat) : ReconstructM (Option Expr) := do
       let stated ← stating h
       for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
-        if let some placed ← placeIn rest candidate then
+        if let some placed ← placeIn start candidate then
           return some placed
       if let some inner := asNegation stated then
         if let some (_, lhs, rhs) := inner.eq? then
@@ -282,14 +283,16 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       fun i j h rest => do
         if let some placed := placed then
           if let some done ← placeAt into placed i j h then return some done
-        accountedFor h rest
+        accountedFor h rest j
     if let some carried ←
-        carrying (junction ``Or ``False sourceParts) target 0 0 inStep whole then
+        carrying (junction ``Or ``False sourceParts) target 0 0 inStep whole
+          (sourceLeft := some sourceParts.size)
+          (targetLeft := some conclusion.literals.size) then
       return mkApp carried (mkAppN premiseProof args)
     let body ← elimGiven sourceParts (fun i h => do
       if let some placed := placed then
         if let some done ← placeAt into placed i 0 h then return done
-      match ← accountedFor h target with
+      match ← accountedFor h target 0 with
       | some placed => return placed
       | none =>
         throwError "the literal{indentExpr (← stating h)}\nis neither among\
@@ -309,8 +312,9 @@ def unreachable (step : Step) (why : String) : ReconstructM Expr :=
     reached: {why}"
 
 /--
-Stands in for a rule that has no implementation yet. The step's conclusion is
-still rebuilt and checked, so only the justification is missing.
+Stands in for a rule that has no implementation yet: a `sorry` of the step's
+conclusion, which is still rebuilt, so later steps can use it. Nothing about
+the step itself is checked.
 -/
 def unimplemented (step : Step) : ReconstructM Expr := do
   modify fun s => { s with unimplemented := s.unimplemented.insert step.rule.name }

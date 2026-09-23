@@ -5,11 +5,14 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
-The `i`th part of a junction, from a proof of the whole.
+The `i`th part of a conjunction, from a proof of the whole.
 
 Indices count parts left to right, whatever the nesting: flattening merges a
 nested junction into a wider one, leaving the parts in place but not the shape,
 so neither side can be taken to associate one way.
+
+@b fn is what the chain is taken apart by, and has to be ``And``: the proof is
+built of `And.left` and `And.right` whatever it is.
 -/
 partial def projectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
@@ -23,7 +26,12 @@ partial def projectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
   else
     projectPart fn right (i - n) (mkApp3 (mkConst ``And.right) left right h)
 
-/-- A proof of a whole disjunction from a proof of its `i`th part. -/
+/--
+A proof of a whole disjunction from a proof of its `i`th part.
+
+@b fn is what the chain is taken apart by, and has to be ``Or``: the proof is
+built of `Or.inl` and `Or.inr` whatever it is.
+-/
 partial def injectPart (fn : Name) (chain : Expr) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   if !chain.isAppOfArity fn 2 then
@@ -105,7 +113,8 @@ def suffixJunctions (fn unit : Name) (parts : Array Expr) : Array Expr := Id.run
   return rev.reverse
 
 /--
-A proof of `junction ``Or ``False parts` from a proof of its `i`th part.
+A proof of `junction ``Or ``False parts` from a proof of its `i`th part, which
+has to be one of them.
 
 @b suffix? is `suffixJunctions ``Or ``False parts`, for a caller injecting into
 the same parts again and again: building it is the length of the junction, and
@@ -114,7 +123,8 @@ doing that at every injection is its square.
 def injectGiven (parts : Array Expr) (i : Nat) (h : Expr)
     (suffix? : Option (Array Expr) := none) : ReconstructM Expr := do
   if parts.size <= 1 then return h
-  let i := min i (parts.size - 1)
+  unless i < parts.size do
+    throwError "a disjunction of {parts.size} parts has no part {i}"
   let suffix := suffix?.getD (suffixJunctions ``Or ``False parts)
   let mut acc :=
     if i + 1 == parts.size then h
@@ -148,14 +158,6 @@ private partial def elimGivenFrom (parts suffix : Array Expr) (k offset : Nat)
     (mkApp6 (mkConst ``Or.elim) parts[k]! suffix[k + 1]! motive (.bvar 0)
       onLeft onRight) .default, motive)
 
-/-- `elimFunction`, for a disjunction whose parts are given rather than found. -/
-def elimGivenFunction (parts : Array Expr) (offset : Nat)
-    (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :
-    ReconstructM (Expr × Expr) := do
-  if parts.isEmpty then throwError "a junction with no arguments"
-  elimGivenFrom parts (suffixJunctions ``Or ``False parts) 0 offset handler
-    motive?
-
 /--
 Eliminates a disjunction of the given parts, sending the `i`th to `handler i`.
 
@@ -174,14 +176,16 @@ def elimGiven (parts : Array Expr)
   return mkApp6 (mkConst ``Or.elim) parts[0]! suffix[1]! motive h onLeft onRight
 
 /--
-The `i`th part of a conjunction of the given parts, from a proof of the whole.
+The `i`th part of a conjunction of the given parts, from a proof of the whole;
+it has to be one of them.
 
 @b suffix? is `suffixJunctions ``And ``True parts`, as for `injectGiven`.
 -/
 def projectGiven (parts : Array Expr) (i : Nat) (h : Expr)
     (suffix? : Option (Array Expr) := none) : ReconstructM Expr := do
   if parts.size <= 1 then return h
-  let i := min i (parts.size - 1)
+  unless i < parts.size do
+    throwError "a conjunction of {parts.size} parts has no part {i}"
   let suffix := suffix?.getD (suffixJunctions ``And ``True parts)
   let mut acc := h
   for k in [0:i] do
