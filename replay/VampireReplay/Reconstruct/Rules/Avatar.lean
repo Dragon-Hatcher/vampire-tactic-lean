@@ -399,7 +399,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- Which clause literal each component literal is, as the worker recorded
     -- it under the component's renaming: that literal is refuted by that
     -- negation, with nothing to look for.
-    let mut negationAt : Std.HashMap Nat (Expr × Expr) := {}
+    let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool) := {}
     for (name, i) in disjuncts.zipIdx do
       if (parent.splits.contains (flippedName name)) then
         continue
@@ -456,23 +456,27 @@ def splitClause (step : Step) : ReconstructM Expr := do
           (mkApp against (← injectPart ``Or disjunction j (.bvar 0))) .default
         negations := negations.push (part, negation)
         if let some placed := placed then
-          if let some (some (k, false)) := placed[j]? then
-            negationAt := negationAt.insert k (part, negation)
+          if let some (some (k, flipped)) := placed[j]? then
+            negationAt := negationAt.insert k (part, negation, flipped)
     -- The clause at all of those witnesses at once has every literal refuted.
     let arguments' ← argsFor parent arguments
     let instance_ := mkAppN proof arguments'
     let instantiated ← instantiateForall stated arguments'
     let contradiction ← elimParts instantiated 0 (fun i hl => do
-      if let some (part, negation) := negationAt[i]? then
-        let literal ← instantiateMVars (← inferType hl)
-        if ← isDefEq part literal then
-          return ← mkAppOptM ``absurd
-            #[some literal, some (mkConst ``False), some hl, some negation]
+      if let some (part, negation, flipped) := negationAt[i]? then
+        -- The worker recorded the component's literal as the clause's, turned
+        -- round where it said so.
+        if let some hl ← (if flipped then flipEquality hl else pure (some hl)) then
+          let literal ← instantiateMVars (← inferType hl)
+          if ← isDefEq part literal then
+            return ← mkAppOptM ``absurd
+              #[some literal, some (mkConst ``False), some hl, some negation]
       -- A named component and the clause's own literal over it can meet with a
       -- double negation between them: which of a name and its negation carries
       -- one is up to which of the two splitting introduced, and polarity
-      -- flipping can add another.
-      for candidate in #[hl] ++ (← doubleNegations hl) do
+      -- flipping can add another. And vampire shares an equation whichever way
+      -- round it is written, so the component can state it the other way.
+      for candidate in #[hl] ++ (← doubleNegations hl) ++ (← flipEquality hl).toArray do
         let literal ← instantiateMVars (← inferType candidate)
         for (part, negation) in negations do
           if ← isDefEq part literal then

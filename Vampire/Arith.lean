@@ -202,6 +202,79 @@ def cancelling (x z w : Expr) : MetaM (Option Expr) := do
   catch _ => return none
 
 /--
+`e` with every subtraction written as adding the negation, and the proof that
+the two are equal, or `none` where there is no subtraction in it.
+
+Vampire's normalisation writes `a - b` as `a + -b`, inside the arguments of an
+uninterpreted symbol as anywhere else, and a decision procedure takes such an
+application whole: `f (x - y)` and `f (x + -y)` are two things it knows nothing
+relating. Written the one way, they are the one thing.
+-/
+private def subtractionsAsNegations (e : Expr) : MetaM (Option Simp.Result) := do
+  unless (e.find? (·.isAppOfArity ``HSub.hSub 6)).isSome do return none
+  let thms ← ({} : SimpTheorems).addConst ``sub_eq_add_neg
+  let ctx ← Simp.mkContext (simpTheorems := #[thms])
+    (congrTheorems := ← getSimpCongrTheorems)
+  let (r, _) ← simp e ctx
+  if r.expr == e then return none
+  return some r
+
+/--
+`a = b` for two numbers `ring` can show equal, or `none`.
+-/
+private def equalNumbers (a b : Expr) : MetaM (Option Expr) := do
+  let τ ← inferType a
+  unless (← isDefEq τ (← inferType b)) do return none
+  unless (τ.isConstOf ``Int || τ.isConstOf ``Rat || τ.isConstOf `Real) do return none
+  let goal ← mkFreshExprMVar (← mkEq a b)
+  try
+    commitIfNoEx (AtomM.run .reducible (Mathlib.Tactic.Ring.proveEq goal.mvarId!))
+    return some (← instantiateMVars goal)
+  catch _ => return none
+
+/--
+`s = t` where the two are one symbol applied to arguments that are each the
+same, equal as numbers, or equal in the same way themselves.
+-/
+private partial def congruent (s t : Expr) : MetaM (Option Expr) := do
+  if s == t then return some (← mkEqRefl s)
+  if let some h ← equalNumbers s t then return some h
+  unless s.getAppFn == t.getAppFn && s.getAppNumArgs == t.getAppNumArgs
+      && s.getAppNumArgs > 0 && !s.getAppFn.isLambda do return none
+  let mut proof ← mkEqRefl s.getAppFn
+  for (a, b) in s.getAppArgs.zip t.getAppArgs do
+    if a == b then
+      proof ← mkCongrFun proof a
+    else
+      let some h ← congruent a b | return none
+      proof ← mkCongr proof h
+  return some proof
+
+/--
+`s = t` for two of the terms a decision procedure takes whole that are one
+symbol applied to arguments equal as numbers, by congruence -- looking through
+further such applications on the way down.
+
+Vampire evaluates and normalises arithmetic inside the arguments of an
+uninterpreted symbol as anywhere else, so a step can relate `f (2 + 3)` to
+`f 5`, or `g (h (x + - -y))` to `g (h (x + y))`, which a procedure taking each
+application whole knows nothing relating. Each pair so related is told it, as
+a fact.
+-/
+private def congruences (facts : Array Expr) (claim : Option Expr) :
+    MetaM (Array Expr) := do
+  let types ← facts.mapM fun f => do instantiateMVars (← inferType f)
+  let atoms ← VampireReplay.Abstract.opaqueTerms (types ++ claim.toArray)
+  let mut out := #[]
+  for i in [0 : atoms.size] do
+    for j in [i + 1 : atoms.size] do
+      let s := atoms[i]!
+      let t := atoms[j]!
+      unless s.getAppFn == t.getAppFn && s.getAppNumArgs == t.getAppNumArgs do continue
+      if let some h ← congruent s t then out := out.push h
+  return out
+
+/--
 `False` from facts that cannot all hold of any numbers, or `claim` from facts
 that make it hold.
 
@@ -209,7 +282,20 @@ The terms the procedure cannot read are put aside by
 `VampireReplay.Abstract.abstracting`, which is precompiled; what is handed to
 it here is the asking.
 -/
-def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr :=
-  VampireReplay.Abstract.abstracting askAbout facts claim
+def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  let facts ← facts.mapM fun fact => do
+    let stated ← instantiateMVars (← inferType fact)
+    match ← subtractionsAsNegations stated with
+    | some r => r.mkEqMP fact
+    | none => pure fact
+  let facts := facts ++ (← congruences facts claim)
+  match claim with
+  | none => VampireReplay.Abstract.abstracting askAbout facts none
+  | some c =>
+    match ← subtractionsAsNegations (← instantiateMVars c) with
+    | none => VampireReplay.Abstract.abstracting askAbout facts claim
+    | some r =>
+      let proof ← VampireReplay.Abstract.abstracting askAbout facts (some r.expr)
+      mkEqMPR (← r.getProof) proof
 
 end Vampire.Arith

@@ -86,6 +86,18 @@ private partial def atomsOf (e : Expr) (acc : Array Expr)
     return (acc.push e, seen)
 
 /--
+The terms a decision procedure can only take whole, among what `types` state:
+what `abstracting` puts aside.
+-/
+def opaqueTerms (types : Array Expr) : MetaM (Array Expr) := do
+  let mut atoms := #[]
+  let mut seen : Std.HashSet Expr := {}
+  for type in types do
+    let (atoms', seen') ← atomsOf type atoms seen
+    atoms := atoms'; seen := seen'
+  return atoms
+
+/--
 Runs `ask` on `facts` and `claim` with every term it can only take whole put
 aside.
 
@@ -136,11 +148,30 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
     atoms := atoms'
   if atoms.isEmpty then
     return ← ask facts claim
+  -- Two atoms can be one term reached two ways: a numeral's or an operator's
+  -- instance written through one structure in what vampire's step rebuilt and
+  -- through another in what normalisation made of it. The procedure has to be
+  -- told they are one, or it knows nothing relating them; so each stands for
+  -- the first it is equal to once instances are unfolded, which is how two
+  -- instance paths to one operator are told apart from two operators.
+  let mut distinct := #[]
+  let mut position : Std.HashMap Expr Nat := {}
+  for atom in atoms do
+    let τ ← inferType atom
+    let mut same := none
+    for (other, j) in distinct.zipIdx do
+      if ← withTransparency .instances (isDefEq (← inferType other) τ <&&> isDefEq other atom) then
+        same := some j
+        break
+    match same with
+    | some j => position := position.insert atom j
+    | none =>
+      position := position.insert atom distinct.size
+      distinct := distinct.push atom
+  atoms := distinct
   let mut decls := #[]
   for (atom, i) in atoms.zipIdx do
     decls := decls.push (Name.mkSimple s!"a{i}", fun _ => inferType atom)
-  let position : Std.HashMap Expr Nat :=
-    atoms.zipIdx.foldl (init := {}) fun acc (atom, i) => acc.insert atom i
   withLocalDeclsD decls fun locals => do
     let standingFor (e : Expr) : Expr :=
       e.replace fun s => (position[s]?).map fun i => locals[i]!

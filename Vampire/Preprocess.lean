@@ -196,7 +196,7 @@ def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
   let local_ (e : Expr) := e.replaceFVars placeholders functions
   -- A proof stated with the function in place of what it is bound to: the two
   -- are the same once it is unfolded, which the kernel does.
-  let hinted (proof type : Expr) := mkApp2 (mkConst ``id [levelZero]) type proof
+  let hinted (proof type : Expr) := mkApp2 (mkConst ``id [.zero]) type proof
   let mut out := #[]
   for (h, type', role) in stated do
     out := out.push (match type' with
