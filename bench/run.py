@@ -36,6 +36,9 @@ HERE = Path(__file__).resolve().parent
 # The vampire tactic is run from here: a checkout built at the revision measured, so
 # that building another in the meantime does not change what a sweep measures.
 REPO = Path(os.environ.get("VAMPIRE_PROJECT", HERE.parent))
+# And the tactic as it was before, where a sweep compares the two: the
+# `vampire-before` configuration runs from here.
+BEFORE = os.environ.get("VAMPIRE_BEFORE")
 SMT_PROJECT = Path(os.environ.get("LEAN_SMT_PROJECT",
                                   Path.home() / "Programming/random/lean-smt-test"))
 DATA = Path(os.environ.get("BENCH_DATA", Path.home() / "Programming/bench-data"))
@@ -135,6 +138,10 @@ def run_config(config: str, d: Path, meta: dict, stmt: str, timeout: int,
         return lean_run(REPO, "BenchRun", vampire_imports, stmt,
                         f"vampire (timeout := {timeout}) (wallLimit := {timeout}) +stats [*]",
                         lean_limit)
+    if config == "vampire-before":
+        return lean_run(Path(BEFORE), "BenchRun", vampire_imports, stmt,
+                        f"vampire (timeout := {timeout}) (wallLimit := {timeout}) [*]",
+                        lean_limit)
     if config == "vampire+strategy":
         return lean_run(REPO, "BenchRun", vampire_imports, stmt,
                         f'vampire (timeout := {timeout}) (wallLimit := {timeout}) '
@@ -160,7 +167,8 @@ def run_config(config: str, d: Path, meta: dict, stmt: str, timeout: int,
     raise ValueError(config)
 
 
-CONFIGS = ["vampire", "vampire+strategy", "lean-smt", "vampire-bin", "cvc5-bin"]
+CONFIGS = ["vampire", "vampire+strategy", "lean-smt", "vampire-bin", "cvc5-bin"] \
+    + (["vampire-before"] if BEFORE else [])
 
 
 def main() -> None:

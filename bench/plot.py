@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 STYLE = {
     "vampire": ("vampire tactic", "#c0392b", "-"),
+    "vampire-before": ("vampire tactic, before", "#c0392b", ":"),
     "vampire+strategy": ("vampire tactic, strategy named", "#e67e22", "--"),
     "lean-smt": ("lean-smt tactic", "#2471a3", "-"),
     "vampire-bin": ("vampire binary", "#7f8c8d", ":"),
