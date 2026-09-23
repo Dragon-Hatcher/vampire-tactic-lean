@@ -8,7 +8,7 @@
 -- `let` is inlined, because neither this tactic nor a first-order prover has one.
 --
 -- Arithmetic is over ℤ.
-import Mathlib
+import Mathlib.Algebra.Order.Archimedean.Real.Basic
 import Vampire
 set_option maxHeartbeats 0
 set_option maxRecDepth 1000000

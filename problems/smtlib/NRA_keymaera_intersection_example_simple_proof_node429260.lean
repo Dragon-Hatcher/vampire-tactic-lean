@@ -10,7 +10,7 @@
 -- Arithmetic is over ℝ.  This is *nonlinear* real arithmetic, the one fragment
 -- that needs ℝ rather than ℚ: `x * x = 2` is satisfiable over the reals and
 -- not over the rationals.
-import Mathlib
+import Mathlib.Algebra.Order.Archimedean.Real.Basic
 import Vampire
 set_option maxHeartbeats 0
 set_option maxRecDepth 1000000

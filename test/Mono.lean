@@ -1,4 +1,4 @@
-import Mathlib
+import Mathlib.Algebra.Order.Archimedean.Real.Basic
 import Vampire
 
 -- Every example has to close its goal and say nothing but what `info` says:

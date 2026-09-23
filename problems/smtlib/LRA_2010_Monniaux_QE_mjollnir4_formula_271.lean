@@ -11,7 +11,7 @@
 -- elementarily equivalent for it -- both are dense ordered divisible abelian
 -- groups and that theory is complete -- so `unsat` transfers from the `Real`
 -- the problem is written over to the ℚ it is stated over here.
-import Mathlib
+import Mathlib.Algebra.Order.Archimedean.Real.Basic
 import Vampire
 set_option maxHeartbeats 0
 set_option maxRecDepth 1000000
