@@ -100,7 +100,7 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
       let (flipped, says) ← flipName name
       let mut found := none
       for (part, i) in parts.zipIdx do
-        if ← isDefEq part flipped then
+        if ← sameFormula part flipped then
           found := some i
           break
       let some i := found

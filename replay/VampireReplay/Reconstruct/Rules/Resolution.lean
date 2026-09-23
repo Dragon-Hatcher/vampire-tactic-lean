@@ -178,7 +178,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
           | throwError "the literal resolved on is not a negation:{indentExpr stated}"
         let some (_, lhs, rhs) := inner.eq?
           | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-        if ← isDefEq lhs rhs then
+        if ← sameFormula lhs rhs then
           mkAppOptM ``absurd
             #[some inner, some rest, some (← mkEqRefl lhs), some h]
         else

@@ -272,7 +272,7 @@ def superposition (step : Step) : ReconstructM Expr := do
             let («from», to, heq) ←
               orientedEquation sideParent sideUse hSide (← inferType hSide)
             let source ← rw.target.toExpr
-            if ← isDefEq source «from» then
+            if ← sameFormula source «from» then
               return ← placeLiteral inner (← rewriteWith rw vars heq to i h)
             -- An abstracting unifier did not make the rewritten term and the
             -- equation's side one: what it could not unify it left as
