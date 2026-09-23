@@ -28,11 +28,13 @@ STYLE = {
 }
 
 
-def load(path: Path) -> dict:
+def load(path: Path, exclude: set[str]) -> dict:
     times = defaultdict(lambda: defaultdict(list))
     problems = defaultdict(set)
     for line in path.read_text().splitlines():
         r = json.loads(line)
+        if r["problem"] in exclude:
+            continue
         problems[r["suite"]].add(r["problem"])
         if r["status"] == "solved":
             times[r["suite"]][r["config"]].append(r["time"])
@@ -60,8 +62,10 @@ def main() -> None:
     ap.add_argument("results", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--title", default="")
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="problems left out: ones Lean cannot elaborate the statement of")
     args = ap.parse_args()
-    times, problems = load(args.results)
+    times, problems = load(args.results, set(args.exclude))
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     both = defaultdict(list)
     for suite in times:
