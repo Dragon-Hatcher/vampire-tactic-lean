@@ -135,7 +135,14 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     let #[(proof, stated)] := step.premises
       | throwError "{step.rule.name} on a formula should have one premise, got \
         {step.premises.size}"
-    return ← restate proof stated (← step.conclusion)
+    let conclusion ← step.conclusion
+    -- The rewriting can reach inside an uninterpreted symbol's arguments,
+    -- where the leaves are not literals of the formula: `f (x - y)` for
+    -- `f (x + -y)`. Then what relates the two is the numbers, not the shape.
+    return ← try restate proof stated conclusion
+      catch e =>
+        try rollingBack ((← read).contradiction #[proof] (some conclusion))
+        catch _ => throw e
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let targetParts := junctionParts ``Or target

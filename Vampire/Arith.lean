@@ -275,6 +275,50 @@ private def congruences (facts : Array Expr) (claim : Option Expr) :
   return out
 
 /--
+The facts and the claim with each local a fact equates to something without it
+replaced by that something, and what turns a proof of the claim so rewritten
+into one of the claim.
+
+A step of vampire's can use `x = 0` inside `x * y`, which a procedure reading
+`x * y` as a nonlinear term it can only take whole knows nothing about: what
+the step did was substitute, so that is what is done here.
+-/
+private def substituted (facts : Array Expr) (claim : Option Expr) :
+    MetaM (Array Expr × Option Expr × (Expr → MetaM Expr)) := do
+  let mut facts := facts
+  let mut claim := claim
+  let mut back : Expr → MetaM Expr := pure
+  let mut i := 0
+  while i < facts.size do
+    let fact := facts[i]!
+    let stated ← instantiateMVars (← inferType fact)
+    let some (_, lhs, rhs) := stated.eq? | i := i + 1; continue
+    let some (x, t, h) ←
+        (if lhs.isFVar && !rhs.containsFVar lhs.fvarId! then pure (some (lhs, rhs, fact))
+         else if rhs.isFVar && !lhs.containsFVar rhs.fvarId! then
+           return some (rhs, lhs, ← mkEqSymm fact)
+         else pure none)
+      | i := i + 1; continue
+    let rewrite (e : Expr) : MetaM (Option (Expr × Expr)) := do
+      unless e.containsFVar x.fvarId! do return none
+      let motive := Expr.lam `y (← inferType x) (e.abstract #[x]) .default
+      return some (e.instantiate1 t, ← mkCongrArg motive h)
+    let mut next := #[]
+    for (other, j) in facts.zipIdx do
+      if j == i then next := next.push other; continue
+      match ← rewrite (← instantiateMVars (← inferType other)) with
+      | some (_, eq) => next := next.push (← mkEqMP eq other)
+      | none => next := next.push other
+    facts := next
+    if let some c := claim then
+      if let some (c', eq) ← rewrite c then
+        claim := some c'
+        let outer := back
+        back := fun proof => do outer (← mkEqMPR eq proof)
+    i := i + 1
+  return (facts, claim, back)
+
+/--
 `False` from facts that cannot all hold of any numbers, or `claim` from facts
 that make it hold.
 
@@ -288,14 +332,31 @@ def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
     match ← subtractionsAsNegations stated with
     | some r => r.mkEqMP fact
     | none => pure fact
+  let (facts, claim, back) ← substituted facts claim
   let facts := facts ++ (← congruences facts claim)
-  match claim with
+  back <| ← match claim with
   | none => VampireReplay.Abstract.abstracting askAbout facts none
-  | some c =>
+  | some c => do
+    let c' ← match ← subtractionsAsNegations (← instantiateMVars c) with
+      | some r => pure r.expr
+      | none => pure c
+    if let some fact ← stating facts c' then
+      if c' == c then return fact
+      let some r ← subtractionsAsNegations (← instantiateMVars c) | return fact
+      return ← mkEqMPR (← r.getProof) fact
     match ← subtractionsAsNegations (← instantiateMVars c) with
     | none => VampireReplay.Abstract.abstracting askAbout facts claim
     | some r =>
       let proof ← VampireReplay.Abstract.abstracting askAbout facts (some r.expr)
       mkEqMPR (← r.getProof) proof
+where
+  /-- A fact that states the claim, once both are written the one way: then
+  there is nothing to ask, and over a sort that is not numbers no procedure
+  could be asked. -/
+  stating (facts : Array Expr) (claim : Expr) : MetaM (Option Expr) := do
+    for fact in facts do
+      if ← withTransparency .instances (isDefEq (← inferType fact) claim) then
+        return some fact
+    return none
 
 end Vampire.Arith
