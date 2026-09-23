@@ -148,47 +148,70 @@ private partial def satOrder (c : SatClause) :
   modify fun (seen, order) => (seen, order.push c)
 
 /--
-`motive`, from a literal of a clause and a proof that what it says fails.
+`¬says`, for a literal of a clause, from what is known of its name's flip: a
+proof `negated` of `refuting`.
 
 Which of the two carries the negation is read off what the two names stand for
 -- a name and its negation are two names, and either may carry it. Asking a
 conversion check instead meant comparing two components, which are whole
 first-order formulas, once for every literal of every premise use.
 -/
-private def contradicts (motive says refuting h negated : Expr) :
-    ReconstructM Expr := do
-  let (positive, positiveSays, negation) ←
-    if refuting == mkApp (mkConst ``Not) says then
-      pure (h, says, negated)
-    else if says == mkApp (mkConst ``Not) refuting then
-      pure (negated, refuting, h)
-    else
-      throwError "neither of{indentExpr says}\nand{indentExpr refuting}\n\
-        is the negation of the other"
-  return mkApp4 (mkConst ``absurd [.zero]) positiveSays motive positive
-    negation
+private def refutationOf (says refuting negated : Expr) : ReconstructM Expr := do
+  if refuting == mkApp (mkConst ``Not) says then
+    return negated
+  if says == mkApp (mkConst ``Not) refuting then
+    return mkApp2 (mkConst ``not_not_intro) refuting negated
+  throwError "neither of{indentExpr says}\nand{indentExpr refuting}\n\
+    is the negation of the other"
+
+/--
+`¬part` for the `j`th literal of a premise, which the propagation has made false.
+-/
+private def falseAt (parts : Array Expr) (names : Array String)
+    (known : Std.HashMap String (Expr × Expr)) (j : Nat) : ReconstructM Expr := do
+  let some name := names[j]? | throwError "missing literal"
+  let some says := parts[j]? | throwError "missing literal"
+  let some (negated, refuting) := known[flippedName name]?
+    | throwError "literal {j} of a propositional premise is not false"
+  refutationOf says refuting negated
+
+/--
+`¬(parts[j] ∨ … )`, the premise's literals from the `j`th on all being false.
+-/
+private def allFalseFrom (parts suffix : Array Expr) (names : Array String)
+    (known : Std.HashMap String (Expr × Expr)) (j : Nat) : ReconstructM Expr := do
+  let last := parts.size - 1
+  let mut acc ← falseAt parts names known last
+  for d in [0 : last - j] do
+    let i := last - 1 - d
+    acc := mkApp4 (mkConst ``not_or_intro) parts[i]! suffix[i + 1]!
+      (← falseAt parts names known i) acc
+  return acc
 
 /--
 The one literal of a premise its others leave, from what says each of those is
-false.
+false: the literals before it resolved away from the front, and those after it
+from the back, all of them at once.
 
 Self-contained: it says nothing about the rest of the propagation, which is what
-keeps the propagation linear. Carrying the rest of the chain inside the
-elimination instead binds the hypothesis of each case into everything the walk
-went on to build, and that costs the square of the chain's length, which for
-a propagation through hundreds of premises is most of the replay.
+keeps the propagation linear. It is also the whole of the replay's share of a
+large propositional refutation, so it is written with the fewest terms: a
+resolution per literal, where taking the clause apart by cases wrote out a
+motive, a hypothesis and an `absurd` for each of them.
 -/
 private def implied (parts : Array Expr) (names : Array String) (u : Nat)
     (known : Std.HashMap String (Expr × Expr)) (proof : Expr) :
     ReconstructM Expr := do
-  let some says := parts[u]? | throwError "missing literal"
-  elimGiven parts (fun j h => do
-    if j == u then return h
-    let some name := names[j]? | throwError "missing literal"
-    let some other := parts[j]? | throwError "missing literal"
-    let some (negated, refuting) := known[flippedName name]?
-      | throwError "literal {j} of a propositional premise is not false"
-    contradicts says other refuting h negated) proof (motive? := some says)
+  unless u < parts.size do throwError "missing literal"
+  let suffix := suffixJunctions ``Or ``False parts
+  let mut h := proof
+  for j in [0 : u] do
+    h := mkApp4 (mkConst ``Or.resolve_left) parts[j]! suffix[j + 1]! h
+      (← falseAt parts names known j)
+  if u + 1 == parts.size then
+    return h
+  return mkApp4 (mkConst ``Or.resolve_right) parts[u]! suffix[u + 1]! h
+    (← allFalseFrom parts suffix names known (u + 1))
 
 /--
 `False`, by unit propagation through the clauses a derived clause was derived
@@ -224,13 +247,10 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
         (bound.push p)
   else if unassigned.isEmpty then
     -- Nothing left to hold: the premise is the contradiction.
-    let contradiction ← elimGiven parts (fun j h => do
-      let some name := names[j]? | throwError "missing literal"
-      let some says := parts[j]? | throwError "missing literal"
-      let some (negated, refuting) := known[flippedName name]?
-        | throwError "literal {j} of a propositional premise is not false"
-      contradicts (mkConst ``False) says refuting h negated)
-      proof (motive? := some (mkConst ``False))
+    if parts.isEmpty then
+      return ← bindLets bound proof
+    let suffix := suffixJunctions ``Or ``False parts
+    let contradiction := mkApp (← allFalseFrom parts suffix names known 0) proof
     bindLets bound contradiction
   else
     -- More than one literal left, so the premise would be a case split rather

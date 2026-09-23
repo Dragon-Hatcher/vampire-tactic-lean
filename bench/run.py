@@ -32,7 +32,9 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parent
+# The vampire tactic is run from here: a checkout built at the revision measured, so
+# that building another in the meantime does not change what a sweep measures.
+REPO = Path(os.environ.get("VAMPIRE_PROJECT", HERE.parent))
 SMT_PROJECT = Path(os.environ.get("LEAN_SMT_PROJECT",
                                   Path.home() / "Programming/random/lean-smt-test"))
 DATA = Path(os.environ.get("BENCH_DATA", Path.home() / "Programming/bench-data"))
@@ -82,10 +84,13 @@ def lean_run(project: Path, name: str, imports: str, stmt: str, tactic: str,
         path.unlink(missing_ok=True)
     wall = time.monotonic() - t0
     marks = {k: int(v) for k, v in re.findall(r"^BENCH (start|solved|end) (\d+)$", out, re.M)}
-    errors = [l for l in out.splitlines() if ": error:" in l or l.startswith("error:")]
-    if errors or not {"start", "solved", "end"} <= marks.keys():
-        return {"status": "failed", "wall": wall,
-                "error": ("\n".join(errors) or out[-2000:])[:3000]}
+    lines = out.splitlines()
+    first = next((i for i, l in enumerate(lines) if ": error:" in l or l.startswith("error:")),
+                 None)
+    if first is not None or not {"start", "solved", "end"} <= marks.keys():
+        # A message runs on over the lines after its own, up to the next message.
+        error = "\n".join(lines[first:first + 40]) if first is not None else out[-2000:]
+        return {"status": "failed", "wall": wall, "error": error[:4000]}
     strategy = re.search(r'the strategy that found it is "([^"]*)"', out)
     return {"status": "solved", "wall": wall,
             "time": (marks["end"] - marks["start"]) / 1e9,
@@ -133,8 +138,10 @@ def run_config(config: str, d: Path, meta: dict, stmt: str, timeout: int,
                    "--cores", "4", "-t", str(timeout), "--include", meta["include"],
                    str(d / "problem.p")]
         else:
+            # `casc`, as the tactic runs: the `smtcomp` schedule refuses every
+            # quantifier-free problem outright, telling the user to run Z3.
             cmd = [str(VAMPIRE_BIN), "--input_syntax", "smtlib2", "--mode", "portfolio",
-                   "--schedule", "smtcomp", "--cores", "4", "-t", str(timeout),
+                   "--schedule", "casc", "--cores", "4", "-t", str(timeout),
                    str(d / "problem.smt2")]
         return bin_run(cmd, VAMPIRE_OK, timeout + 20)
     if config == "cvc5-bin":
@@ -177,6 +184,9 @@ def main() -> None:
         for config in order:
             if (d.name, config) in done:
                 continue
+            # Between runs, never during one, the machine can be handed over.
+            while (DATA / "PAUSE").exists():
+                time.sleep(5)
             if config == "vampire+strategy" and not strategy:
                 res = {"status": "no-strategy"}
             else:
