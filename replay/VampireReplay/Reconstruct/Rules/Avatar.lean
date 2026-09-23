@@ -476,9 +476,18 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- negation, with nothing to look for.
     let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool) := {}
     for (name, i) in disjuncts.zipIdx do
-      if (parent.splits.contains (flippedName name)) then
-        continue
       let key := positiveName name
+      -- A name the clause held under is in the split clause flipped, and is no
+      -- component of it -- unless it is one: a component that is the
+      -- complement of an assumption is named by the assumption's flip. Which
+      -- an occurrence is, the step's premises say: each component occurrence
+      -- has a renaming recorded against its definition, so one with none left
+      -- is the assumption.
+      if parent.splits.contains (flippedName name) then
+        let componentsLeft : Bool := match definitions[key]? with
+          | some (_, uses, _) => decide (met.getD key 0 < uses.size)
+          | none => false
+        unless componentsLeft do continue
       let some (definition, uses, position) := definitions[key]?
         | throwError "no definition was recorded for `{name}`"
       let seen := met.getD key 0
@@ -559,7 +568,8 @@ def splitClause (step : Step) : ReconstructM Expr := do
               #[some literal, some (mkConst ``False), some candidate,
                 some negation]
       throwError "nothing refutes{indentExpr (← instantiateMVars (← inferType hl))}\
-        \nof the clause {parent}, whose components are {disjuncts}") instance_
+        \nof the clause {parent}, whose components are {disjuncts}; their \
+        literals are{MessageData.joinSep (negations.toList.map (indentExpr ·.1)) ""}") instance_
     mkAppM ``Iff.mp
       #[← mkAppOptM ``Classical.not_not #[some target],
         ← mkLambdaFVars #[h] contradiction]
