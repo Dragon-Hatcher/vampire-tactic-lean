@@ -128,7 +128,7 @@ one of the equation's own arguments; the recorded substitution is what states
 that side in the premise's own variables.
 -/
 private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
-    (vars : Vars) (proof stated : Expr) : ReconstructM (Expr × Expr × Expr) := do
+    (proof stated : Expr) : ReconstructM (Expr × Expr × Expr) := do
   let some (_, lhs, rhs) := (← instantiateMVars stated).eq?
     | throwError "the equation is not one:{indentExpr stated}"
   if ← recordedSideIsLeft parent use ((use.literal.map (·.toNat)).getD 0) then
@@ -232,7 +232,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let (_, to, heq) ← orientedEquation sideParent sideUse vars sideAt sideType
+    let (_, to, heq) ← orientedEquation sideParent sideUse sideAt sideType
     -- The rewrite happens inside the clause, so it is made where it stands.
     let «from» ← rw.target.toExpr
     let τ ← inferType «from»
@@ -276,7 +276,7 @@ def superposition (step : Step) : ReconstructM Expr := do
           (placed := step.placedAt 1) (into := into.from at_)
           (fun _ hSide inner _ => do
             let («from», to, heq) ←
-              orientedEquation sideParent sideUse vars hSide (← inferType hSide)
+              orientedEquation sideParent sideUse hSide (← inferType hSide)
             let source ← rw.target.toExpr
             if ← isDefEq source «from» then
               return ← placeLiteral inner (← rewriteWith rw vars heq to i h)
@@ -329,7 +329,8 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
       | throwError "the literal inner rewriting rewrote with is not a disequality"
     let some (_, a, b) := equation.eq?
       | throwError "the literal inner rewriting rewrote with is not a disequality"
-    let (l, r) := if leftRewritten then (a, b) else (b, a)
+    -- The side rewritten away; the equation turned to rewrite it is `lr`.
+    let l := if leftRewritten then a else b
     let body ← elimGiven parts (motive? := some target) (fun k h => do
       if k == i then return ← placeLiteral target h
       let holds ← withLocalDeclD `h equation fun heq => do
