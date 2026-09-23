@@ -193,6 +193,47 @@ private def failedStrategiesTime (proof : Proof) : Option Nat := do
   let spent := (← proof.setupTime?) + (← proof.strategyTime?)
   return foundAt - min foundAt spent
 
+/--
+`proof`, which proves `goal`, put in a lemma of its own and applied to the
+locals it speaks of.
+
+A replayed refutation can be hundreds of thousands of terms, and what the
+elaborator does with a theorem's value once the tactic has returned -- sharing
+its subterms, walking it for the constants it uses, instantiating what is
+left -- takes as long again as checking it. A lemma is checked when it is
+added, and the theorem is left a constant applied to a few locals.
+
+The closure is taken here rather than by `mkAuxTheorem`, whose general one
+rebuilds the whole term to account for metavariables and let-bound locals a
+replayed proof does not have: the locals the proof and its statement mention,
+with those their types mention, in the order the context has them.
+-/
+private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withContext do
+  let type ← instantiateMVars (← goal.getType)
+  let proof ← instantiateMVars proof
+  if type.hasMVar || proof.hasMVar then return proof
+  let lctx ← getLCtx
+  let mut used := Lean.collectFVars (Lean.collectFVars {} type) proof
+  let mut pending := used.fvarIds
+  while !pending.isEmpty do
+    let before := used.fvarSet
+    for id in pending do
+      if let some decl := lctx.find? id then
+        used := Lean.collectFVars used decl.type
+        if let some v := decl.value? then used := Lean.collectFVars used v
+    pending := used.fvarIds.filter (!before.contains ·)
+  let locals := lctx.foldl (init := #[]) fun acc decl =>
+    if used.fvarSet.contains decl.fvarId then acc.push decl.toExpr else acc
+  let type ← mkForallFVars locals type
+  -- Shared as the elaborator shares a theorem's value before the kernel sees
+  -- it, the kernel's caches being by pointer; and shared first, so that what
+  -- is abstracted is the smaller term.
+  let proof ← IO.lazyPure fun _ => ShareCommon.shareCommon' proof
+  let value ← mkLambdaFVars locals proof
+  let levels := (collectLevelParams (collectLevelParams {} type) value).params.toList
+  let name ← mkAuxLemma levels type value
+  return mkAppN (mkConst name (levels.map mkLevelParam)) locals
+
 /-- Why the search came back empty, as the error the tactic reports. -/
 private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α := do
   -- `unknown` also covers vampire being stopped before it could report,
@@ -327,7 +368,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let (outcome, replay) ← replayQuery cfg query
     if cfg.stats then
       reportStats query outcome replay
-    query.preprocessed.goal.assign outcome.proof
+    query.preprocessed.goal.assign (← asLemma query.preprocessed.goal outcome.proof)
     mv.assign (.mvar query.copy)
     replaceMainGoal []
     -- The strategy is worth reporting only if the call does not already name
