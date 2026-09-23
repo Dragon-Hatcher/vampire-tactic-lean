@@ -143,7 +143,13 @@ private partial def hoist (e : Expr) : StateRefT Hoisted MetaM Expr := do
     | .proj s i b => do pure (.proj s i (← hoist b))
     | _ => pure e
   let result ← if e.hasLooseBVars then pure rebuilt else do
-    let type ← hoist (← inferType e)
+    let type ← inferType e
+    -- A proof is left where it stands, the formulas in it bound: a proof is
+    -- used where it is built, and one bound for every node of a closed proof
+    -- tree -- a normalisation's congruences over a large axiom are thousands
+    -- -- is a let and a type for each, and nothing shared by it.
+    if ← isProp type then pure rebuilt else
+    let type ← hoist type
     let id ← mkFreshFVarId
     modify fun s => { s with locals := s.locals.push id, types := s.types.push type,
                              values := s.values.push rebuilt }
