@@ -225,18 +225,41 @@ walk over a formula mostly leaves what it walks alone, and writing
 `Iff.refl` there, and `Iff.trans` around it, is most of the term it builds.
 -/
 
+/-- The two sides of the equivalence a proof states. -/
+def iffSides (proof : Expr) : ReconstructM (Expr × Expr) := do
+  let stated ← instantiateMVars (← inferType proof)
+  let some sides := stated.iff? | throwError "expected an equivalence, got{indentExpr stated}"
+  return sides
+
+/-
+The congruences below are written out rather than elaborated: `mkAppM` would
+find their implicit arguments by unifying the formulas, and assigning one is a
+walk over it -- once at every level of a formula, for every step that
+normalises one, which on a problem with large axioms was most of the replay.
+-/
+
 /-- `a ↔ a` where nothing changed, and the equivalence itself otherwise. -/
 def iffOrRefl (a : Expr) (proof? : Option Expr) : ReconstructM Expr :=
-  match proof? with
-  | some proof => pure proof
-  | none => mkAppOptM ``Iff.refl #[some a]
+  return proof?.getD (mkApp (mkConst ``Iff.refl) a)
 
 /-- One equivalence and then the other, either of which may be no change. -/
-def iffTrans? (first second : Option Expr) : ReconstructM (Option Expr) :=
+def iffTrans? (first second : Option Expr) : ReconstructM (Option Expr) := do
   match first, second with
   | none, q => pure q
   | p, none => pure p
-  | some p, some q => some <$> mkAppM ``Iff.trans #[p, q]
+  | some p, some q =>
+    let (a, b) ← iffSides p
+    let (_, c) ← iffSides q
+    return some (mkApp5 (mkConst ``Iff.trans) a b c p q)
+
+/--
+A two-part congruence lemma, `and_congr`, `or_congr`, `iff_congr` or
+`imp_congr`, applied to what relates `a` to `a'` and `b` to `b'`, with its
+implicit arguments in the order that lemma takes them.
+-/
+def congr2 (lemma_ : Name) (a a' b b' pa pb : Expr) : Expr :=
+  if lemma_ == ``imp_congr then mkApp6 (mkConst lemma_) a b a' b' pa pb
+  else mkApp6 (mkConst lemma_) a a' b b' pa pb
 
 /--
 A congruence lemma over two parts -- `and_congr`, `imp_congr` and the like --
@@ -245,14 +268,35 @@ applied where either part changed, and no change where neither did.
 def congr2? (lemma_ : Name) (a b : Expr) (pa pb : Option Expr) :
     ReconstructM (Option Expr) := do
   if pa.isNone && pb.isNone then return none
-  some <$> mkAppM lemma_ #[← iffOrRefl a pa, ← iffOrRefl b pb]
+  let side (e : Expr) (p? : Option Expr) : ReconstructM (Expr × Expr) := do
+    match p? with
+    | some p => return ((← iffSides p).2, p)
+    | none => return (e, mkApp (mkConst ``Iff.refl) e)
+  let (a', pa) ← side a pa
+  let (b', pb) ← side b pb
+  return some (congr2 lemma_ a a' b b' pa pb)
 
 /--
 A congruence lemma over one part -- `not_congr`, `forall_congr'`,
 `exists_congr` -- applied where it changed.
 -/
 def congr1? (lemma_ : Name) (proof? : Option Expr) : ReconstructM (Option Expr) :=
-  proof?.mapM fun proof => mkAppM lemma_ #[proof]
+  proof?.mapM fun proof => do
+    if lemma_ == ``not_congr then
+      let (a, b) ← iffSides proof
+      return mkApp3 (mkConst ``not_congr) a b proof
+    mkAppM lemma_ #[proof]
+
+/--
+`forall_congr'` or `exists_congr` over the local `x`, from what relates the
+two bodies at it.
+-/
+def quantifierCongr (lemma_ : Name) (x inner : Expr) : ReconstructM Expr := do
+  let α ← inferType x
+  let u ← getLevel α
+  let (p, q) ← iffSides inner
+  return mkApp4 (mkConst lemma_ [u]) α (← mkLambdaFVars #[x] p) (← mkLambdaFVars #[x] q)
+    (← mkLambdaFVars #[x] inner)
 
 /--
 The congruence of a junction's arguments, folded the way `junction` folds them.
@@ -261,10 +305,19 @@ The congruence of a junction's arguments, folded the way `junction` folds them.
 argument and that of the rest, so folding them right-nested matches how the
 junction itself was built.
 -/
-partial def congrJunction (congruence : Name) (proofs : Array Expr) (i : Nat := 0) :
-    ReconstructM Expr := do
-  let some proof := proofs[i]? | throwError "a junction with no arguments"
-  if i + 1 == proofs.size then return proof
-  mkAppM congruence #[proof, ← congrJunction congruence proofs (i + 1)]
+def congrJunction (congruence : Name) (proofs : Array Expr) : ReconstructM Expr := do
+  let some last := proofs.back? | throwError "a junction with no arguments"
+  let fn := if congruence == ``and_congr then ``And else ``Or
+  let (a₀, b₀) ← iffSides last
+  let mut a := a₀
+  let mut b := b₀
+  let mut acc := last
+  for k in [0 : proofs.size - 1] do
+    let p := proofs[proofs.size - 2 - k]!
+    let (ai, bi) ← iffSides p
+    acc := congr2 congruence ai bi a b p acc
+    a := mkApp2 (mkConst fn) ai a
+    b := mkApp2 (mkConst fn) bi b
+  return acc
 
 end Vampire.Reconstruct

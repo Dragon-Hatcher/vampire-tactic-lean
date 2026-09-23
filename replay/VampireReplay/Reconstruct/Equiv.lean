@@ -88,7 +88,7 @@ partial def toNNF (e : Expr) : ReconstructM (Expr × Option Expr) := do
         let some proof := proof? | return (e, none)
         let normalLam := Expr.lam n d (normal.abstract #[x]) bi
         return (← mkAppM ``Exists #[normalLam],
-          some (← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof]))
+          some (← quantifierCongr ``exists_congr x proof))
     | _ => return (e, none)
   match e with
   | .forallE _ d body _ =>
@@ -97,7 +97,7 @@ partial def toNNF (e : Expr) : ReconstructM (Expr × Option Expr) := do
         let (normal, proof?) ← toNNF (body.instantiate1 x)
         let some proof := proof? | return (e, none)
         return (← mkForallFVars #[x] normal,
-          some (← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof]))
+          some (← quantifierCongr ``forall_congr' x proof))
     return (e, none)
   | _ => return (e, none)
 
@@ -276,6 +276,20 @@ private def unrelated (a b : Expr) (why : MessageData) : ReconstructM Expr := do
     throwError "{why}"
   arithmeticIff a b
 
+/-- `a ↔ c` from `a ↔ b` and `b ↔ c`, written out: `mkAppM` would unify the
+formulas to find them, and assigning a whole formula is a walk over it, at
+every level of the formulas being related. -/
+private def iffTrans (a b c ab bc : Expr) : Expr :=
+  mkApp5 (mkConst ``Iff.trans) a b c ab bc
+
+/-- `b ↔ a` from `a ↔ b`, written out. -/
+private def iffSymm (a b ab : Expr) : Expr :=
+  mkApp3 (mkConst ``Iff.symm) a b ab
+
+/-- `¬¬a ↔ a`. -/
+private def notNotIff (a : Expr) : Expr :=
+  mkApp (mkConst ``Classical.not_not) a
+
 /--
 `a ↔ b`, where the two say the same thing up to the shape vampire keeps them in.
 
@@ -294,7 +308,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   let a ← instantiateMVars a
   let b ← instantiateMVars b
   if ← sameFormula a b then
-    return ← mkAppOptM ``Iff.refl #[some a]
+    return mkApp (mkConst ``Iff.refl) a
   -- An equality can be stated either way round.
   if let (some (α, x, y), some (_, x', y')) := (a.eq?, b.eq?) then
     if (← sameFormula x y') && (← sameFormula y x') then
@@ -303,16 +317,15 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   -- other carries none.
   if let some ia := a.not? then
     if let some iia := ia.not? then
-      return ← mkAppM ``Iff.trans
-        #[← mkAppOptM ``Classical.not_not #[some iia], ← equivNormal iia b]
+      return iffTrans a iia b (notNotIff iia) (← equivNormal iia b)
   if let some ib := b.not? then
     if let some iib := ib.not? then
-      return ← mkAppM ``Iff.trans
-        #[← equivNormal a iib, ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some iib]]]
+      return iffTrans a iib b (← equivNormal a iib) (iffSymm b iib (notNotIff iib))
   if let (some ia, some ib) := (a.not?, b.not?) then
-    return ← mkAppM ``not_congr #[← equivNormal ia ib]
+    return mkApp3 (mkConst ``not_congr) ia ib (← equivNormal ia ib)
   if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
-    return ← mkAppM ``iff_congr #[← equivNormal a₁ b₁, ← equivNormal a₂ b₂]
+    return mkApp6 (mkConst ``iff_congr) a₁ b₁ a₂ b₂ (← equivNormal a₁ b₁)
+      (← equivNormal a₂ b₂)
   -- Rectification drops a quantifier over a variable its body never mentions,
   -- so one side can carry a binder the other does not. Whether it can be
   -- dropped is settled by its own body and nothing else: were this to wait
@@ -326,34 +339,39 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
           let dropped ← mkAppOptM ``forall_const
             #[some body, some d, some (← nonempty d)]
           let related ← if x == a then equivNormal body y else equivNormal y body
-          return ← if x == a then mkAppM ``Iff.trans #[dropped, related]
-            else mkAppM ``Iff.trans #[related, ← mkAppM ``Iff.symm #[dropped]]
+          return if x == a then iffTrans x body y dropped related
+            else iffTrans y body x related (iffSymm x body dropped)
     if x.isAppOfArity ``Exists 2 then
       if let .lam _ d body _ := x.appArg! then
         unless body.hasLooseBVars do
           let dropped ← mkAppOptM ``exists_const
             #[some body, some d, some (← nonempty d)]
           let related ← if x == a then equivNormal body y else equivNormal y body
-          return ← if x == a then mkAppM ``Iff.trans #[dropped, related]
-            else mkAppM ``Iff.trans #[related, ← mkAppM ``Iff.symm #[dropped]]
+          return if x == a then iffTrans x body y dropped related
+            else iffTrans y body x related (iffSymm x body dropped)
   match a, b with
   | .forallE _ ad ab _, .forallE _ bd bb _ =>
     if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
       -- An arrow: its left side is negative, which is why this is an ↔.
-      return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
+      return mkApp6 (mkConst ``imp_congr) ad ab bd bb (← equivNormal ad bd)
+        (← equivNormal ab bb)
     unless ← sameFormula ad bd do
       throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
         their binders have different types"
+    let u ← getLevel ad
     return ← withLocalDeclD `x ad fun x => do
       let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
-      mkAppM ``forall_congr' #[← mkLambdaFVars #[x] inner]
+      return mkApp4 (mkConst ``forall_congr' [u]) ad (.lam `x ad ab .default)
+        (.lam `x bd bb .default) (← mkLambdaFVars #[x] inner)
   | _, _ =>
     if a.isAppOfArity ``Exists 2 && b.isAppOfArity ``Exists 2 then
       match a.appArg!, b.appArg! with
       | .lam _ ad abody _, .lam _ _ bbody _ =>
+        let u ← getLevel ad
         return ← withLocalDeclD `x ad fun x => do
           let inner ← equivNormal (abody.instantiate1 x) (bbody.instantiate1 x)
-          mkAppM ``exists_congr #[← mkLambdaFVars #[x] inner]
+          return mkApp4 (mkConst ``exists_congr [u]) ad a.appArg! b.appArg!
+            (← mkLambdaFVars #[x] inner)
       | _, _ =>
         throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
           the body of one of the existentials is not a `fun`"
@@ -362,8 +380,33 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         let ap := junctionParts fn a
         let bp := junctionParts fn b
         unless ap.size == bp.size do
-          -- One side has a truth value the other has absorbed.
           let unit := if fn == ``And then ``True else ``False
+          -- One side has a junction of the same kind under a double negation,
+          -- which the other has taken off and flattened into its own.
+          let stripped (parts : Array Expr) : Array Expr := parts.map fun p =>
+            match p.not? >>= Expr.not? with
+            | some inner => if inner.isAppOfArity fn 2 then inner else p
+            | none => p
+          let doubled (parts : Array Expr) : Bool := parts.any fun p =>
+            match p.not? >>= Expr.not? with
+            | some inner => inner.isAppOfArity fn 2
+            | none => false
+          let congruence := if fn == ``And then ``and_congr else ``or_congr
+          let unwrap (e : Expr) (parts : Array Expr) : ReconstructM (Option (Expr × Expr)) := do
+            unless rightNested fn e parts && doubled parts do return none
+            let proofs ← parts.mapM fun p => do
+              match p.not? >>= Expr.not? with
+              | some inner =>
+                if inner.isAppOfArity fn 2 then
+                  return mkApp (mkConst ``Classical.not_not) inner
+                return mkApp (mkConst ``Iff.refl) p
+              | none => return mkApp (mkConst ``Iff.refl) p
+            return some (junction fn unit (stripped parts), ← congrJunction congruence proofs)
+          if let some (a', says) ← unwrap a ap then
+            return iffTrans a a' b says (← equivNormal a' b)
+          if let some (b', says) ← unwrap b bp then
+            return iffTrans a b' b (← equivNormal a b') (iffSymm b b' says)
+          -- One side has a truth value the other has absorbed.
           if rightNested fn a ap && rightNested fn b bp then
             let (aKept, aSays) ← withoutUnits fn unit ap
             let (bKept, bSays) ← withoutUnits fn unit bp
@@ -450,7 +493,7 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr)
       let (inner, proof?) ← sameWayRound (body.instantiate1 x)
       let some proof := proof? | return (e, none)
       return (← mkForallFVars #[x] inner,
-        some (← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] proof]))
+        some (← quantifierCongr ``forall_congr' x proof))
   | .mdata _ inner => sameWayRound inner
   | _ =>
     match_expr e with
@@ -501,7 +544,7 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr)
           let (inner, proof?) ← sameWayRound (body.instantiate1 x)
           let some proof := proof? | return (e, none)
           return (← mkAppM ``Exists #[← mkLambdaFVars #[x] inner],
-            some (← mkAppM ``exists_congr #[← mkLambdaFVars #[x] proof]))
+            some (← quantifierCongr ``exists_congr x proof))
       | _ => return (e, none)
     | _ => return (e, none)
 

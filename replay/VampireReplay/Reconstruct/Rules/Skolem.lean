@@ -68,7 +68,7 @@ partial def walk (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt3
       let mut congr := congr
       -- One `forall_congr'` per binder, innermost first.
       for x in locals.reverse do
-        congr ← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] congr]
+        congr ← quantifierCongr ``forall_congr' x congr
         prop ← mkForallFVars #[x] prop
       return (prop, congr)
   | .«exists» =>
@@ -100,7 +100,9 @@ where
     let mut prop := lastProp
     let mut proof := lastProof
     for (p, pf) in parts.pop.reverse do
-      proof ← mkAppM lemma #[pf, proof]
+      let (before, _) ← iffSides pf
+      let (restBefore, _) ← iffSides proof
+      proof := congr2 lemma before p restBefore prop pf proof
       prop := mkApp2 (mkConst fn) p prop
     return (prop, proof)
 
