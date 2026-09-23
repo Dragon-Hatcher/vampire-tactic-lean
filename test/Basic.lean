@@ -96,3 +96,10 @@ example {ι : Type} [Inhabited ι] (p : ι → Prop) (f : ι → ι) (a b : ι)
 example {ι : Type} [Inhabited ι] (p : Prop) (a b : ι) (f : ι → ι)
     (h : f (@ite _ p (Classical.propDecidable _) a b) ≠ f a) (hp : p) : False := by
   vampire [*]
+
+-- A quantifier over propositions, which TPTP has no sort for: taken at `True`
+-- and at `False`.
+#guard_msgs (drop info) in
+example {ι : Type} [Inhabited ι] (f : ι → ι) (a : ι)
+    (h : ∀ x, ∀ v : Prop, (v → f x = a) ∧ (¬v → f x = x)) (h2 : f a ≠ a) : False := by
+  vampire [*]

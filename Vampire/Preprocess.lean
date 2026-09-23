@@ -206,6 +206,36 @@ def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
     out := out.push (hinted (local_ l.proof) (local_ l.says), .axiom)
   return (goal, out)
 
+/--
+A proof of what `h` says with each universally quantified proposition among its
+leading binders taken at `True` and at `False`, the two instances conjoined, or
+`none` where it quantifies over no proposition.
+
+TPTP's first-order individuals are not propositions, so a hypothesis
+quantifying over one cannot be sent as it stands; the two instances follow
+from it, and every proposition is one of the two, so nothing is lost.
+-/
+private partial def propInstances (h : Expr) : MetaM (Option Expr) := do
+  let type ← whnfR (← instantiateMVars (← inferType h))
+  let .forallE n d _ bi := type | return none
+  if d.isProp then
+    let atTrue := mkApp h (mkConst ``True)
+    let atFalse := mkApp h (mkConst ``False)
+    let t ← (← propInstances atTrue).getDM (pure atTrue)
+    let f ← (← propInstances atFalse).getDM (pure atFalse)
+    return some (← mkAppM ``And.intro #[t, f])
+  -- A hypothesis it depends on, not a variable: nothing under it is a binder
+  -- of the formula's own.
+  if ← isProp d then return none
+  withLocalDecl n bi d fun x => do
+    let some inner ← propInstances (mkApp h x) | return none
+    return some (← mkLambdaFVars #[x] inner)
+
+/-- Hypotheses with their universally quantified propositions instantiated. -/
+def instantiateProps (hypotheses : Array (Expr × Role)) : MetaM (Array (Expr × Role)) :=
+  hypotheses.mapM fun (h, role) => do
+    return ((← propInstances h).getD h, role)
+
 /-- The hypotheses to refute, with their roles, and the goal they came from. -/
 structure Result where
   hypotheses : Array (Expr × Role)

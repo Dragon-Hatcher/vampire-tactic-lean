@@ -102,6 +102,8 @@ def pose (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma) :
   -- Vampire reads no `if-then-else` over terms, so each is lifted out into a
   -- function defined by its two cases.
   let (goal, hypotheses) ← Preprocess.liftIte preprocessed.goal hypotheses
+  -- Nor quantifies over a proposition.
+  let hypotheses ← goal.withContext (Preprocess.instantiateProps hypotheses)
   let preprocessed := { preprocessed with goal, hypotheses }
   let preprocessing := (← IO.monoMsNow) - started
   let (problem, symbols) ← preprocessed.goal.withContext (problemOf hypotheses)
