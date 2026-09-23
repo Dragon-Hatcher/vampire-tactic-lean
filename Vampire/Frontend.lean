@@ -339,12 +339,15 @@ private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
       ++ part "parsing the problem" setup
       ++ part "failed strategies" failed
       ++ part "successful strategy" winner
+  let found := match query.proof.strategy? with
+    | some strategy => m!"; the strategy that found it is \"{strategy}\""
+    | none => m!""
   logInfo m!"vampire took {query.preprocessing + query.translation +
       query.search + replay}ms, not counting what Lean then does with the \
     proof term:{ms "preprocessing" query.preprocessing}\
     {ms "translation" query.translation}{ms "search" query.search}{within}\
     {ms "replay" replay}\n\
-    the proof vampire found had {outcome.steps} steps"
+    the proof vampire found had {outcome.steps} steps{found}"
 
 /--
 Offers the call with the winning strategy named, where naming it saves enough
