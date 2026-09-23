@@ -101,6 +101,8 @@ structure State where
   introduced : Std.HashMap String Expr := {}
   /-- Formulas an `avatar_definition` step named, kept under the positive name. -/
   named : Std.HashMap String Expr := {}
+  /-- The lemmas replay has added, by what they state. -/
+  lemmas : Std.HashMap Expr Name := {}
   /-- The proposition rebuilt for each step, by vampire's number for it. -/
   conclusions : Std.HashMap UInt32 Expr := {}
   /-- The one term standing for each shape a rebuilt term has taken. -/
@@ -313,11 +315,14 @@ def flipName (name : String) : ReconstructM (Expr × Expr) := do
   let flipped := flippedName name
   let body ← namedFormula name
   let flippedBody ← namedFormula flipped
+  -- Written out rather than elaborated: a propositional refutation asks this
+  -- for every literal of every clause it derives.
   if flippedBody == mkApp (mkConst ``Not) body then
-    return (flippedBody, ← mkAppOptM ``Iff.refl #[some flippedBody])
+    return (flippedBody, mkApp (mkConst ``Iff.refl) flippedBody)
   if body == mkApp (mkConst ``Not) flippedBody then
-    return (flippedBody,
-      ← mkAppM ``Iff.symm #[← mkAppOptM ``Classical.not_not #[some flippedBody]])
+    let notNot := mkApp (mkConst ``Not) body
+    return (flippedBody, mkApp3 (mkConst ``Iff.symm) notNot flippedBody
+      (mkApp (mkConst ``Classical.not_not) flippedBody))
   throwError "`{name}` and `{flipped}` are not each other's negation"
 
 /--

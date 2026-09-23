@@ -292,9 +292,12 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
       let refuted : Expr := .lam `d body
         (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
       known := known.insert (flippedName name)
-        (← mkAppM ``Iff.mpr #[says, refuted], flipped)
+        (mkApp4 (mkConst ``Iff.mpr) flipped (mkApp (mkConst ``Not) body) says refuted,
+          flipped)
     mkLambdaFVars #[n] (← propagate states proved known c.premises 0 #[])
-  mkAppM ``Iff.mp #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
+  let notNot := mkApp (mkConst ``Not) (mkApp (mkConst ``Not) target)
+  return mkApp4 (mkConst ``Iff.mp) notNot target (mkApp (mkConst ``Classical.not_not) target)
+    contradiction
 
 /--
 A proof of what a derived propositional clause says, as a lemma of its own:
@@ -351,7 +354,16 @@ private def derivedAsLemma (proved : Std.HashMap UInt32 Expr)
           ← mkLambdaFVars (atoms ++ hyps) proof)
     finally
       modify fun s => { s with named := saved }
-  let name ← mkAuxLemma [] type value
+  -- Added directly, and looked up by what it states before that: a lemma of
+  -- replay's own is closed, propositional and safe, so the checks and the
+  -- environment-wide cache `mkAuxLemma` goes through are for nothing here.
+  let name ← match (← get).lemmas[type]? with
+    | some name => pure name
+    | none => do
+      let name ← mkAuxDeclName `_satClause
+      addDecl (.thmDecl { name, levelParams := [], type, value })
+      modify fun s => { s with lemmas := s.lemmas.insert type name }
+      pure name
   let mut args := bodies
   for p in premises do
     let some h := proved[p.index]? | throwError "a propositional clause used before it was proved"
