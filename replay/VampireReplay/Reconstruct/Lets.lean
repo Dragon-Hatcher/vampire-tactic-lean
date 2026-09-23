@@ -89,25 +89,37 @@ formulas a step's proof reasons about are shared with the next step's, and each
 was walked again. Here which subterms mention a bound local is worked out once
 for the whole term, and only those are rebuilt.
 -/
-def bindLets (bound : Array Expr) (body : Expr) : ReconstructM Expr := do
+def bindLets (bound : Array Expr) (body : Expr) (share : Bool := false) :
+    ReconstructM Expr := do
   let ids := bound.map (·.fvarId!)
   let set := Std.HashSet.ofArray ids
   let index := Std.HashMap.ofList ids.toList.zipIdx
   -- Which subterms mention a bound local does not depend on how many of them
   -- a walk abstracts, so that is kept across every walk; what a walk made of
   -- a subterm does, so that is started afresh for each.
-  let (abstracted, s) := (abstractBound index set bound.size
-    (← instantiateMVars body) 0).run {}
+  -- Everything to be walked, shared together first where `share` says -- for
+  -- the refutation's own steps, not the small bindings of a propagation,
+  -- where sharing costs more than it saves. The steps instantiate
+  -- the formulas they stand on, each instance a copy of its own, and the walks
+  -- below keep what they find by a term's shape, so a copy they meet is
+  -- compared in full against the one they kept. Shared, a copy is the one kept.
+  let mut unshared := #[← instantiateMVars body]
+  for id in ids do
+    let decl ← id.getDecl
+    let some value := decl.value? | throwError "a let-bound local has no value"
+    unshared := unshared.push (← instantiateMVars value) |>.push (← instantiateMVars decl.type)
+  let terms ← if share then IO.lazyPure fun _ => ShareCommon.shareCommon' unshared
+    else pure unshared
+  let (abstracted, s) := (abstractBound index set bound.size terms[0]! 0).run {}
   let mut mentions := s.mentions
   let mut out := abstracted
   for k in [0 : bound.size] do
     let i := bound.size - 1 - k
     let decl ← ids[i]!.getDecl
-    let some value := decl.value? | throwError "a let-bound local has no value"
     -- The `i`th local is under the binders of the ones before it, which are
     -- the only ones it mentions.
-    let value ← instantiateMVars value
-    let type ← instantiateMVars decl.type
+    let value := terms[1 + 2 * i]!
+    let type := terms[2 + 2 * i]!
     let ((value, type), s) := (do
       pure (← abstractBound index set i value 0, ← abstractBound index set i type 0)).run
         ({ mentions } : Abstracting)

@@ -26,6 +26,7 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -66,6 +67,21 @@ def benchEnd : IO Unit := do IO.println s!"BENCH end {{← IO.monoNanosNow}}"
 FOOTER = "\n#eval benchEnd\n"
 
 
+def run_group(cmd: list[str], cwd, limit: float) -> tuple[str, bool]:
+    """Output of `cmd`, and whether it ran past `limit` seconds and was killed --
+    with everything it started: `lake` runs `lean` as a child, and killing only
+    `lake` leaves `lean` running on, taking the machine from the runs after it."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=limit)
+        return out, False
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        return out or "", True
+
+
 def lean_run(project: Path, name: str, imports: str, stmt: str, tactic: str,
              hard_limit: float) -> dict:
     path = project / f"{name}.lean"
@@ -73,15 +89,11 @@ def lean_run(project: Path, name: str, imports: str, stmt: str, tactic: str,
                     + stmt.replace("TACTIC", f"timed {tactic}") + FOOTER)
     t0 = time.monotonic()
     try:
-        r = subprocess.run(["lake", "lean", path.name], cwd=project, capture_output=True,
-                           text=True, timeout=hard_limit)
-        out = r.stdout + r.stderr
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) \
-            else (e.stdout or "")
-        return {"status": "killed", "wall": time.monotonic() - t0, "out": out[-2000:]}
+        out, timed_out = run_group(["lake", "lean", path.name], project, hard_limit)
     finally:
         path.unlink(missing_ok=True)
+    if timed_out:
+        return {"status": "killed", "wall": time.monotonic() - t0, "out": out[-2000:]}
     wall = time.monotonic() - t0
     marks = {k: int(v) for k, v in re.findall(r"^BENCH (start|solved|end) (\d+)$", out, re.M)}
     lines = out.splitlines()
@@ -101,10 +113,8 @@ def lean_run(project: Path, name: str, imports: str, stmt: str, tactic: str,
 
 def bin_run(cmd: list[str], solved: re.Pattern, hard_limit: float) -> dict:
     t0 = time.monotonic()
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=hard_limit)
-        out = r.stdout + r.stderr
-    except subprocess.TimeoutExpired:
+    out, timed_out = run_group(cmd, None, hard_limit)
+    if timed_out:
         return {"status": "killed", "wall": time.monotonic() - t0}
     wall = time.monotonic() - t0
     if solved.search(out):

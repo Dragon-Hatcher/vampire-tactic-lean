@@ -127,7 +127,7 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
       let some proof := (← get).proofs[refutation.number]?
         | throwError "the refutation was not replayed"
       let started ← IO.monoMsNow
-      let closed ← bindLets bound proof
+      let closed ← bindLets bound proof (share := true)
       trace[vampire.timing] "binding the {bound.size} steps took \
         {(← IO.monoMsNow) - started}ms"
       return closed
