@@ -56,7 +56,7 @@ def component (step : Step) : ReconstructM Expr := do
   let some parent := step.unit.parents[0]?
     | throwError "an avatar component clause without its definition"
   let core ← step.conclusion
-  if ← isDefEq (← inferType assumption) core then
+  if ← sameFormula (← inferType assumption) core then
     return assumption
   -- The definition states the component as a formula, which `Formula::fromClause`
   -- builds by pushing the clause's literals onto a list, so the two disagree

@@ -172,6 +172,17 @@ structure State where
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
 /--
+Whether two formulas replay has built are the same one: equal as terms, or
+once instances and reducible definitions are unfolded, which is how the same
+operator reached through two instance paths is recognised. Never by unfolding
+a definition of the goal's: that would take what is only provably equal for
+the same formula, and search where the formulas should just be compared.
+-/
+def sameFormula (a b : Expr) : MetaM Bool := do
+  if a == b then return true
+  withTransparency .instances (isDefEq a b)
+
+/--
 `x`, with what it did to the metavariables undone if it fails.
 
 An attempt that may not succeed -- asking a decision procedure, say -- can

@@ -254,7 +254,7 @@ private def carriedAlike (s t : Expr) : ReconstructM (Option Expr) := do
       (equalityLiteral? s, equalityLiteral? t) then
     if τ == τ' && lhs == rhs' && rhs == lhs' && negated == negated' then
       return some (.lam `a s (← symmLiteral τ lhs rhs negated (.bvar 0)) .default)
-  if ← isDefEq s t then
+  if ← sameFormula s t then
     return some (.lam `a s (.bvar 0) .default)
   return none
 
@@ -267,7 +267,7 @@ when nothing was done to any of them.
 partial def carryAll (source target proof : Expr)
     (placed : Option Placement := none) (into : Option Into := none) :
     ReconstructM Expr := do
-  if ← isDefEq source target then
+  if ← sameFormula source target then
     return proof
   let rec alike (source target : Expr) : ReconstructM (Option Expr) := do
     if source.isAppOfArity ``Or 2 && target.isAppOfArity ``Or 2 then

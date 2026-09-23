@@ -55,7 +55,7 @@ otherwise its literals related one by one.
 -/
 def restatedLiterals (step : Step) (parent : Vampire.Unit) (proof stated : Expr) :
     ReconstructM Expr := do
-  if ← isDefEq (← instantiateMVars stated) (← step.conclusion) then
+  if ← sameFormula (← instantiateMVars stated) (← step.conclusion) then
     return proof
   relateLiterals step parent proof stated
 

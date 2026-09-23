@@ -314,7 +314,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
   -- Naming, and the shuffling of a negation between a formula and its sign,
   -- leave what is said untouched.
   if h' : replacement.size = 1 then
-    if ← isDefEq (← literalOf c.literals childParts replacement[0]) stated then
+    if ← sameFormula (← literalOf c.literals childParts replacement[0]) stated then
       return mkApp against[0]! h
   if replacement.isEmpty then
     -- A constant: either the clause said `False`, or it said `¬True`.
@@ -433,7 +433,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         | throwError "expected the refutation of a quantifier's replacement to be \
             a negation"
       let stated ← instantiateMVars (← inferType body)
-      if ← isDefEq refuted stated then
+      if ← sameFormula refuted stated then
         return mkApp negation body
       let some says ← sameUpToDoubleNegation stated refuted
         | throwError "a skolemised block leaves{indentExpr stated}\nwhich is \

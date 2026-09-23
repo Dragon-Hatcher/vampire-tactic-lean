@@ -116,12 +116,12 @@ its own, as `t ≠ t` is, which is how a removed literal is accounted for.
 partial def implies (source target : Expr) : ReconstructM Expr := do
   let source ← instantiateMVars source
   let target ← instantiateMVars target
-  if ← isDefEq source target then
+  if ← sameFormula source target then
     return ← withLocalDeclD `h source fun h => mkLambdaFVars #[h] h
   match source, target with
   | .forallE _ sd sb _, .forallE _ td tb _ =>
     -- Only a genuine quantifier: `¬a` is an arrow too, but not a `forallE`.
-    unless ← isDefEq sd td do
+    unless ← sameFormula sd td do
       throwError "cannot show that{indentExpr source}\nimplies{indentExpr target}\n\
         their binders have different types"
     withLocalDeclD `x sd fun x => do
@@ -139,7 +139,7 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
     if source.isAppOfArity ``And 2 && !target.isAppOfArity ``And 2 then
       let conjuncts := junctionParts ``And source
       for (conjunct, i) in conjuncts.zipIdx do
-        if ← isDefEq conjunct target then
+        if ← sameFormula conjunct target then
           return ← withLocalDeclD `h source fun h => do
             mkLambdaFVars #[h] (← projectPart ``And source i h)
     let parts := junctionParts ``Or target
@@ -161,7 +161,7 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       if let some inner := d.not? then
         -- Absent, so it has to be refutable: `t ≠ t` is what removal leaves.
         if let some (_, a, b) := inner.eq? then
-          if ← isDefEq a b then
+          if ← sameFormula a b then
             return ← withLocalDeclD `l d fun l => do
               mkLambdaFVars #[l]
                 (← mkAppOptM ``absurd
@@ -293,11 +293,11 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   -- metavariable; every recogniser below would miss it.
   let a ← instantiateMVars a
   let b ← instantiateMVars b
-  if ← isDefEq a b then
+  if ← sameFormula a b then
     return ← mkAppOptM ``Iff.refl #[some a]
   -- An equality can be stated either way round.
   if let (some (α, x, y), some (_, x', y')) := (a.eq?, b.eq?) then
-    if (← isDefEq x y') && (← isDefEq y x') then
+    if (← sameFormula x y') && (← sameFormula y x') then
       return ← mkAppOptM ``eq_comm #[some α, some x, some y]
   -- Flattening cancels a double negation, so one side can carry two where the
   -- other carries none.
@@ -341,7 +341,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
     if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
       -- An arrow: its left side is negative, which is why this is an ↔.
       return ← mkAppM ``imp_congr #[← equivNormal ad bd, ← equivNormal ab bb]
-    unless ← isDefEq ad bd do
+    unless ← sameFormula ad bd do
       throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
         their binders have different types"
     return ← withLocalDeclD `x ad fun x => do
@@ -509,7 +509,7 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr)
 def equiv (a b : Expr) : ReconstructM Expr := do
   let a ← instantiateMVars a
   let b ← instantiateMVars b
-  if ← isDefEq a b then
+  if ← sameFormula a b then
     return ← mkAppOptM ``Iff.refl #[some a]
   -- Each side put the same way round and into negation normal form, and the
   -- two results related: `a ↔ wa ↔ na ↔ nb ↔ wb ↔ b`, where any of the steps
@@ -533,7 +533,7 @@ written two ways: the proof itself where they are the same, and otherwise the
 equivalence `equiv` finds between them.
 -/
 def restate (proof stated conclusion : Expr) : ReconstructM Expr := do
-  if ← isDefEq (← instantiateMVars stated) conclusion then
+  if ← sameFormula (← instantiateMVars stated) conclusion then
     return proof
   mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
 
