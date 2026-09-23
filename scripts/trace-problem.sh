@@ -11,8 +11,25 @@ set -e
 cd "$(dirname "$0")/.."
 stem=$1
 [ -n "$stem" ] || { echo "usage: ${0##*/} <problem>" >&2; exit 2; }
-src=$(ls problems/*/"$stem".lean)
+matches=(problems/*/"$stem".lean)
+if [ ! -e "${matches[0]}" ]; then
+  echo "no such problem: $stem" >&2
+  exit 2
+fi
+if [ "${#matches[@]}" -gt 1 ]; then
+  echo "$stem is in more than one directory: ${matches[*]}" >&2
+  exit 2
+fi
+src=${matches[0]}
 dir=$(dirname "$src")
+# The libraries lake would load: the worker is started by a native function,
+# which `lean` can only call out of a library it has been given. Read before
+# anything is made, so that a missing build stops here.
+libs=()
+lib_lines=$(python3 scripts/_common.py dynlibs)
+while IFS= read -r lib; do
+  [ -n "$lib" ] && libs+=("$lib")
+done <<< "$lib_lines"
 work=$(mktemp -d "$PWD/.trace-XXXXXX")
 trap 'rm -rf "$work"' EXIT
 # After `import Vampire`, which is what registers the trace class.
@@ -20,11 +37,4 @@ awk '/^import Vampire$/ { print; print "set_option trace.vampire true"; next } {
   "$src" > "$work/problem.lean"
 # The problem file itself, which the tactic reads from beside the Lean file.
 cp "$dir/$stem".p "$work/" 2>/dev/null || cp "$dir/$stem".smt2 "$work/" 2>/dev/null || true
-# The libraries lake would load: the worker is started by a native function,
-# which `lean` can only call out of a library it has been given.
-libs=$(python3 -c "
-import json
-setup = json.load(open('.lake/build/ir/Vampire/Frontend.setup.json'))
-print(' '.join('--load-dynlib=' + (lib['path'] if isinstance(lib, dict) else lib)
-               for lib in setup.get('dynlibs', [])))")
-LEAN_PATH=$(lake env printenv LEAN_PATH) lean $libs "$work/problem.lean"
+LEAN_PATH=$(lake env printenv LEAN_PATH) lean ${libs[@]+"${libs[@]}"} "$work/problem.lean"

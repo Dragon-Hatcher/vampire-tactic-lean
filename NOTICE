@@ -25,8 +25,9 @@ into the binary:
     University Linz, Austria.
 
     VIRAS — https://github.com/joe-hauns/viras
-    That repository carries no licence file and states no terms. It is used
-    here as a part of Vampire's build, which declares it.
+    That repository carries no licence file and states no terms. This
+    repository does not use it directly: it is here only because Vampire's
+    build lists it as a submodule and compiles it into the binary.
 
 `Vampire/Preprocess.lean` follows lean-smt in how it reduces a goal to the
 smallest query that states it. lean-smt is used under the Apache License 2.0.

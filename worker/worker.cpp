@@ -12,13 +12,30 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    43 words, see `write`. Words 36 to 39 are the strategy the proof
- *             was found by (a string offset, `NONE` when there is no proof: the
- *             same run can be had again from that alone), what it ran for, what
- *             starting up took and when the proof was found. Word 34 is how
- *             many inference rules vampire declares and word 40 a hash of their
- *             names in order (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt),
- *             which is what the Lean side checks its generated copy against
+ *   header    43 words, see `write`:
+ *               0  `MAGIC`, then 1 `VERSION`
+ *               2  vampire's termination reason
+ *               3  1 if there is a refutation, 0 if not
+ *               4  the refutation's unit index, `NONE` when there is none
+ *               5 to 31  how many records each section from `functions` to
+ *                  `congruenceArgs` holds, in the order they are written
+ *              32  how many bytes `strings` holds, and 33 `proofText`, both
+ *                  before padding
+ *              34  how many inference rules vampire declares
+ *              35  the number of the first step polarity flipping made, or
+ *                  zero if it never ran
+ *              36  the strategy the proof was found by, a string offset, or
+ *                  `NONE` when there is no proof: the same run can be had
+ *                  again from that alone
+ *              37  what that strategy ran for, 38 what starting up and parsing
+ *                  took and 39 when the proof was found, in milliseconds
+ *              40  a hash of the inference rules' names in order
+ *                  (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt); with word
+ *                  34 it is what the Lean side checks its generated copy
+ *                  against
+ *              41  how many records `placements` holds, and 42
+ *                  `placementEntries`
+ *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
  *             `numeral` says what number the symbol is, if it is one: 0 = none,
@@ -56,11 +73,12 @@
  *             inference puts into its conclusion, and the step is sound
  *             because the conclusion failing makes each of those pairs equal.
  *             Binary resolution puts them before the literals it carried over
- *             and every other rule after, so a count alone would not say
+ *             and every other rule after, so a count alone would not say which
+ *             literals they are.
  *             `genState` is the generalised clause a clause came out of, and
- *             the choices are the conjuncts its clausification went into
+ *             the choices are the conjuncts its clausification went into.
  *             `satPremise` is the propositional clause a step derived by SAT
- *             solving stands on, and `NONE` for anything else
+ *             solving stands on, and `NONE` for anything else.
  *             `name` is the string offset of the name the input gave this
  *             formula, and `NONE` for anything vampire derived. It says which
  *             hypothesis an `input` step restates, so replay need not search
@@ -79,6 +97,50 @@
  *             term back needs its sort as much as any other. They are kept
  *             apart because a unit's own variables are the quantifier prefix
  *             its conclusion is rebuilt with, and these are not part of it
+ *   skolems   {variable, term} pairs: the existential variable a skolemisation
+ *             step replaced, and the term it became. Skolemisation works on
+ *             NNF rather than prenex input and a skolem takes only the
+ *             universals it depends on, so the term is recorded as vampire
+ *             built it rather than re-derived
+ *   splits    string offsets of the names a clause holds under: splitting
+ *             asserts a component's name and works on with the clause under
+ *             that assumption, so what such a clause says is that its literals
+ *             follow from the names it is written against
+ *   satClauses{firstLit, numLits, firstPremise, numPremises, origin}: a clause
+ *             of the propositional problem splitting hands to a SAT solver.
+ *             `origin` is the unit this clause came from, for one that is a
+ *             first-order clause's propositional shadow, and `NONE` for one
+ *             the solver derived -- whose premises are then the clauses it was
+ *             derived from, in the order the solver used them, each of which
+ *             holds all but one of its literals falsified by the ones before
+ *   satLits   string offsets of a propositional clause's literals, each the
+ *             name of a component or its negation
+ *   satPremises indices into `satClauses`
+ *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
+ *             clausification introduced to name a subformula, the variables it
+ *             was applied to, and the formula it names. The clauses saying
+ *             what the name means come out of the same clausification rather
+ *             than being stated on their own, so nothing in the proof says
+ *             what the name stands for
+ *   namingArgs variable numbers, the arguments of a naming
+ *   genStates {parent, position, firstLit, numLits, firstReplacement,
+ *              numReplacements, firstBinding, numBindings}: one state of one of
+ *             clausification's generalised clauses -- a disjunction of signed
+ *             subformulas, together with what the variables it quantifies have
+ *             been bound to. `parent` is the state this one was reached from
+ *             and `position` the position replaced in it, both `NONE` for a
+ *             clause clausification started from. Which conjunct a clause came
+ *             from, which way round an equivalence was taken and what a
+ *             quantifier was skolemised at are all here, and would otherwise
+ *             have to be searched for
+ *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
+ *             clause and of what replaced a position in one
+ *   choices   {formula, argument} pairs: which argument of each conjunction
+ *             the clausification of a clause went into. The other clausifier
+ *             walks a formula in negation normal form, taking every disjunct
+ *             into the clause it is building and each conjunct into a clause of
+ *             its own, so a clause is one path through the conjunctions and
+ *             this is that path
  *   uses      {premise, literal, term, flags, firstBinding, numBindings}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
@@ -93,45 +155,6 @@
  *             superposition does
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
- *   choices   {formula, argument} pairs: which argument of each conjunction
- *             the clausification of a clause went into. The other clausifier
- *             walks a formula in negation normal form, taking every disjunct
- *             into the clause it is building and each conjunct into a clause of
- *             its own, so a clause is one path through the conjunctions and
- *             this is that path
- *   genStates {parent, position, firstLit, numLits, firstReplacement,
- *              numReplacements, firstBinding, numBindings}: one state of one of
- *             clausification's generalised clauses -- a disjunction of signed
- *             subformulas, together with what the variables it quantifies have
- *             been bound to. `parent` is the state this one was reached from
- *             and `position` the position replaced in it, both `NONE` for a
- *             clause clausification started from. Which conjunct a clause came
- *             from, which way round an equivalence was taken and what a
- *             quantifier was skolemised at are all here, and would otherwise
- *             have to be searched for
- *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
- *             clause and of what replaced a position in one
- *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
- *             clausification introduced to name a subformula, the variables it
- *             was applied to, and the formula it names. The clauses saying
- *             what the name means come out of the same clausification rather
- *             than being stated on their own, so nothing in the proof says
- *             what the name stands for
- *   namingArgs variable numbers, the arguments of a naming
- *   satClauses{firstLit, numLits, firstPremise, numPremises, origin}: a clause
- *             of the propositional problem splitting hands to a SAT solver.
- *             `origin` is the unit this clause came from, for one that is a
- *             first-order clause's propositional shadow, and `NONE` for one
- *             the solver derived -- whose premises are then the clauses it was
- *             derived from, in the order the solver used them, each of which
- *             holds all but one of its literals falsified by the ones before
- *   satLits   string offsets of a propositional clause's literals, each the
- *             name of a component or its negation
- *   satPremises indices into `satClauses`
- *   splits    string offsets of the names a clause holds under: splitting
- *             asserts a component's name and works on with the clause under
- *             that assumption, so what such a clause says is that its literals
- *             follow from the names it is written against
  *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
  *             behind a congruence-closure conflict, which is stated as an
  *             axiom and says only that its literals cannot all be false.
@@ -159,49 +182,50 @@
  *             for the component's literals, under the renaming recorded
  *             against it, and index the clause being split
  *   placementEntries words, the entries of `placements`
- *   skolems   {variable, term} pairs: the existential variable a skolemisation
- *             step replaced, and the term it became. Skolemisation works on
- *             NNF rather than prenex input and a skolem takes only the
- *             universals it depends on, so the term is recorded as vampire
- *             built it rather than re-derived
  *   strings   NUL-terminated names, padded to a 4-byte boundary
  *   proofText vampire's own rendering of the proof, padded likewise
  */
 
 #include <algorithm>
-#include <cstdint>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
-#include <unistd.h>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <type_traits>
 #include <string>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 #include "CASC/PortfolioMode.hpp"
 #include "Kernel/Clause.hpp"
 #include "Kernel/EqHelper.hpp"
-#include "Kernel/RobSubstitution.hpp"
-#include "Kernel/SubstHelper.hpp"
 #include "Kernel/Formula.hpp"
 #include "Kernel/Inference.hpp"
 #include "Kernel/InferenceStore.hpp"
 #include "Kernel/Problem.hpp"
+#include "Kernel/RobSubstitution.hpp"
 #include "Kernel/Signature.hpp"
 #include "Kernel/SortHelper.hpp"
-#include "Lib/SharedSet.hpp"
+#include "Kernel/SubstHelper.hpp"
 #include "Kernel/Term.hpp"
 #include "Kernel/Unit.hpp"
 #include "Lib/Environment.hpp"
 #include "Lib/Exception.hpp"
+#include "Lib/SharedSet.hpp"
 #include "Lib/Timer.hpp"
 #include "Parse/TPTP.hpp"
-#include "Saturation/ProvingHelper.hpp"
 #include "SAT/SATClause.hpp"
 #include "SAT/SATInference.hpp"
+#include "Saturation/ProvingHelper.hpp"
 #include "Saturation/Splitter.hpp"
 #include "Shell/Options.hpp"
 #include "Shell/Preprocess.hpp"
@@ -218,6 +242,24 @@ namespace {
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
 const uint32_t VERSION = 24;
 const uint32_t NONE = 0xFFFFFFFFu;
+
+/**
+ * How many inference rules vampire declares, as the Lean side counts them.
+ *
+ * `scripts/gen-inference-rules.py` and CMakeLists.txt both take every
+ * enumerator of `InferenceRule` that is followed by a comma, which is every
+ * one but the closing `GENERIC_THEORY_AXIOM_LAST` marker; the marker's value
+ * is therefore the count. CMakeLists.txt passes its own count in, so that a
+ * change to the enum that the two would read differently -- a new last rule
+ * after the marker, or a comma after it -- stops the build here rather than
+ * making every proof look stale.
+ */
+const uint32_t RULE_COUNT =
+  static_cast<uint32_t>(toNumber(InferenceRule::GENERIC_THEORY_AXIOM_LAST));
+static_assert(toNumber(InferenceRule::GENERIC_THEORY_AXIOM_LAST) ==
+                VAMPIRE_RULE_COUNT,
+              "InferenceRule no longer ends with GENERIC_THEORY_AXIOM_LAST as "
+              "its only enumerator without a comma");
 
 /*
  * The reasoning behind a congruence-closure conflict.
@@ -720,15 +762,24 @@ struct Encoder {
     functions.push_back(NONE);
   }
 
-  /** Interns a sort, which for our purposes is always an atomic type. */
+  /**
+   * Interns a sort, which must be an atomic type.
+   *
+   * The tactic declares every Lean type it translates as a nullary `$tType`,
+   * and the arithmetic sorts TPTP builds in are nullary too, so a sort
+   * variable or a type constructor applied to arguments means a problem this
+   * encoding cannot describe: only the constructor's name is written, and
+   * writing it anyway would conflate sorts that differ in their arguments.
+   */
   uint32_t encodeSort(TermList sort)
   {
     auto seen = sortSeen.find(sort.content());
     if (seen != sortSeen.end())
       return seen->second;
-    std::string name = sort.isTerm()
-      ? env.signature->typeConName(sort.term()->functor())
-      : "$unknown";
+    if (!sort.isTerm() || sort.term()->arity() != 0)
+      throw UserErrorException("cannot encode the sort " + sort.toString() +
+                               ": only atomic sorts are supported");
+    std::string name = env.signature->typeConName(sort.term()->functor());
     uint32_t idx = static_cast<uint32_t>(sorts.size());
     sorts.push_back(addString(name));
     sortSeen.emplace(sort.content(), idx);
@@ -849,7 +900,7 @@ struct Encoder {
         name = addString(static_cast<const NamedFormula*>(f)->name());
         break;
       default:
-        // TRUE, FALSE, BOOL_TERM, NAME, NOCONN carry no subformulas here.
+        // TRUE, FALSE, BOOL_TERM and NOCONN carry no subformulas here.
         break;
     }
 
@@ -1017,7 +1068,8 @@ struct Encoder {
     InferenceStore::instance()->introducedSkolems(u, introduced);
     uint32_t firstSkolem = static_cast<uint32_t>(skolems.size() / 2);
     uint32_t numSkolems = 0;
-    for (auto [sym, replacedVar, symTerm] : introduced) {
+    for (auto [symbol, replacedVar, symTerm] : introduced) {
+      (void)symbol;
       skolems.push_back(replacedVar);
       skolems.push_back(encodeTerm(TermList(symTerm)));
       numSkolems++;
@@ -1202,7 +1254,7 @@ struct Encoder {
     uint32_t numPlacements = 0;
     auto place = [&](uint32_t position, uint32_t useIndex,
                      const std::vector<Literal*>& from, Clause* into,
-                     const Stack<std::pair<unsigned, TermList>>* bindings) {
+                     const Stack<std::pair<unsigned, TermList>>* useBindings) {
       struct Bound {
         DHMap<unsigned, TermList> map;
         TermList apply(unsigned v) {
@@ -1210,8 +1262,8 @@ struct Encoder {
           return map.find(v, t) ? t : TermList(v, false);
         }
       } bound;
-      if (bindings)
-        for (const auto& [var, term] : *bindings)
+      if (useBindings)
+        for (const auto& [var, term] : *useBindings)
           bound.map.set(var, term);
       uint32_t first = static_cast<uint32_t>(placementEntries.size());
       for (Literal* lit : from) {
@@ -1258,12 +1310,13 @@ struct Encoder {
       for (uint32_t pos = 0; pos < premisesInOrder.size(); pos++) {
         Unit* premise = premisesInOrder[pos];
         uint32_t occurrence = occurrences[premise->number()]++;
-        auto uses = usesOf(premise->number());
+        auto premiseUses = usesOf(premise->number());
         if (premise->isClause() && !splitClause) {
           std::vector<Literal*> lits;
           for (unsigned i = 0; i < premise->asClause()->length(); i++)
             lits.push_back((*premise->asClause())[i]);
-          const auto* use = occurrence < uses.size() ? uses[occurrence] : nullptr;
+          const auto* use =
+            occurrence < premiseUses.size() ? premiseUses[occurrence] : nullptr;
           place(pos, occurrence, lits, u->asClause(), use ? &use->bindings : nullptr);
         } else if (splitClause && !premise->isClause() && pos > 0
                    && premisesInOrder[0]->isClause()) {
@@ -1292,8 +1345,9 @@ struct Encoder {
           }
           if (lits.size() != parts.size())
             continue;
-          for (uint32_t k = 0; k < uses.size(); k++)
-            place(pos, k, lits, premisesInOrder[0]->asClause(), &uses[k]->bindings);
+          for (uint32_t k = 0; k < premiseUses.size(); k++)
+            place(pos, k, lits, premisesInOrder[0]->asClause(),
+                  &premiseUses[k]->bindings);
         }
       }
     }
@@ -1403,15 +1457,14 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.strings.size()));
   putWord(buf, static_cast<uint32_t>(enc.proofText.size()));
   // Lets the Lean side notice that its generated `InferenceRule` is stale.
-  putWord(buf, static_cast<uint32_t>(
-    InferenceRule::FUNCTIONAL_EXTENSIONALITY_AXIOM) + 1);
+  putWord(buf, RULE_COUNT);
   putWord(buf, InferenceStore::instance()->polarityFlipBoundary());
   putWord(buf, enc.strategy);
   putWord(buf, enc.strategyMs);
   putWord(buf, enc.setupMs);
   putWord(buf, enc.foundAtMs);
-  // The count above notices a rule added or removed, and this one rules that
-  // traded places, which would otherwise decode as each other.
+  // The count above notices a rule added or removed, and this hash notices
+  // two rules that traded places, which would otherwise decode as each other.
   putWord(buf, VAMPIRE_RULE_FINGERPRINT);
   putWord(buf, static_cast<uint32_t>(enc.placements.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
@@ -1456,24 +1509,45 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
     throw UserErrorException("cannot open output file " + partial);
   out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
   out.close();
-  if (!out)
+  if (!out) {
+    std::remove(partial.c_str());
     throw UserErrorException("cannot write output file " + partial);
-  if (std::rename(partial.c_str(), path.c_str()) != 0)
-    throw UserErrorException("cannot rename " + partial + " to " + path);
+  }
+  if (std::rename(partial.c_str(), path.c_str()) != 0) {
+    std::string reason = std::strerror(errno);
+    std::remove(partial.c_str());
+    throw UserErrorException("cannot rename " + partial + " to " + path + ": " +
+                             reason);
+  }
 }
 
-/** Where `emitProof` writes; set once from `main`. */
+/**
+ * Where `emitProof` writes; set once from `main`, and absolute, since `main`
+ * then moves into the problem's directory.
+ */
 std::string g_outPath;
 
 /**
- * What had been spent when the schedule began, in milliseconds.
+ * What had been spent when the search began, in milliseconds: starting up
+ * and parsing the problem.
  *
- * Set in this process before the slices are forked, so each of them
- * inherits it; their own timers start from zero. Measured from the top of
- * `main` rather than from vampire's timer, which is restarted for each slice
- * and so says nothing about what starting up cost.
+ * Taken once the problem is parsed, whether one strategy runs or a schedule
+ * of them. In portfolio mode that is before the slices are forked, so each of
+ * them inherits it; their own timers start from zero. Measured from the top
+ * of `main` rather than from vampire's timer, which is restarted for each
+ * slice and so says nothing about what starting up cost.
  */
 long g_setupMs = 0;
+
+/**
+ * What vampire's timer said when a single strategy began, in milliseconds.
+ *
+ * A single strategy runs on the timer started before parsing, so this is
+ * taken off what the timer says to leave what the strategy itself spent, as
+ * a portfolio slice's restarted timer does of itself. It stays zero in
+ * portfolio mode.
+ */
+long g_timerAtStrategyMs = 0;
 
 /** When this process began, for `g_setupMs`. */
 std::chrono::steady_clock::time_point g_startedAt;
@@ -1500,8 +1574,9 @@ void emitProofTo(const std::string& path)
     // the only process that knows which one it was.
     enc.strategy = enc.addString(env.options->generateEncodedOptions());
     // The timer is restarted for each slice, so this is what this strategy
-    // spent, not what the schedule before it did.
-    long ran = Timer::elapsedMilliseconds();
+    // spent, not what the schedule before it did; a single strategy takes off
+    // what parsing spent on the same timer.
+    long ran = Timer::elapsedMilliseconds() - g_timerAtStrategyMs;
     enc.strategyMs = ran < 0 ? 0 : static_cast<uint32_t>(ran);
     enc.setupMs = g_setupMs < 0 ? 0 : static_cast<uint32_t>(g_setupMs);
     long found = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1518,6 +1593,41 @@ void emitProofTo(const std::string& path)
 void emitProof() { emitProofTo(g_outPath); }
 
 void emitSliceProof() { emitProofTo(slicePath(getpid())); }
+
+/**
+ * Removes what the slices left beside `g_outPath`, once the winner's file has
+ * been renamed into place.
+ *
+ * Every slice that succeeds writes its own proof before the schedule settles
+ * on one, and a slice killed while writing leaves its `.part` behind. Only
+ * names of exactly the forms `slicePath` and `write` make are removed:
+ * `<out>.<digits>` and `<out>.<digits>.part`.
+ */
+void removeSliceFiles()
+{
+  namespace fs = std::filesystem;
+  fs::path out(g_outPath);
+  std::string prefix = out.filename().string() + ".";
+  std::vector<fs::path> leftovers;
+  std::error_code ec;
+  for (fs::directory_iterator it(out.parent_path(), ec), end; !ec && it != end;
+       it.increment(ec)) {
+    std::string name = it->path().filename().string();
+    if (name.compare(0, prefix.size(), prefix) != 0)
+      continue;
+    std::string rest = name.substr(prefix.size());
+    const std::string part = ".part";
+    if (rest.size() > part.size() &&
+        rest.compare(rest.size() - part.size(), part.size(), part) == 0)
+      rest.erase(rest.size() - part.size());
+    if (!rest.empty() &&
+        std::all_of(rest.begin(), rest.end(),
+                    [](char c) { return c >= '0' && c <= '9'; }))
+      leftovers.push_back(it->path());
+  }
+  for (const fs::path& leftover : leftovers)
+    fs::remove(leftover, ec);
+}
 
 bool isPortfolioMode(Options::Mode mode)
 {
@@ -1538,6 +1648,11 @@ int main(int argc, char** argv)
   }
 
   try {
+    // Made absolute before the move into the problem's directory below, which
+    // would otherwise change what a relative path names.
+    g_outPath = std::filesystem::absolute(argv[2]).string();
+    std::remove(g_outPath.c_str());
+
     for (int i = 3; i < argc; i++) {
       std::string arg(argv[i]);
       size_t eq = arg.find('=');
@@ -1545,9 +1660,6 @@ int main(int argc, char** argv)
         throw UserErrorException("expected name=value, got " + arg);
       env.options->set(arg.substr(0, eq), arg.substr(eq + 1));
     }
-
-    g_outPath = argv[2];
-    std::remove(g_outPath.c_str());
 
     // Run where the problem is, rather than being told where it is: vampire
     // writes the path it was given into the proof, and the caller's directory
@@ -1557,9 +1669,10 @@ int main(int argc, char** argv)
     std::string problem(argv[1]);
     size_t slash = problem.find_last_of('/');
     if (slash != std::string::npos) {
-      std::string dir = problem.substr(0, slash);
+      std::string dir = slash == 0 ? "/" : problem.substr(0, slash);
       if (chdir(dir.c_str()) != 0) {
-        std::fprintf(stderr, "could not enter %s\n", dir.c_str());
+        std::fprintf(stderr, "cannot enter %s: %s\n", dir.c_str(),
+                     std::strerror(errno));
         return 2;
       }
       problem = problem.substr(slash + 1);
@@ -1571,9 +1684,17 @@ int main(int argc, char** argv)
 
     // On reaching a limit vampire exits from its timer thread, skipping both
     // the code below and any atexit handler, and re-encoding from that thread
-    // would race with the search. So write a proof-less result now: whatever
-    // happens, the caller finds a decodable file rather than an empty one.
+    // would race with the search. So write a proof-less result now: from here
+    // on, however the search ends, the caller finds a decodable file rather
+    // than none. What fails before this point -- a malformed option, a
+    // directory that cannot be entered, a problem that does not parse --
+    // leaves no file, and says why on stderr with a nonzero exit status.
     emitProof();
+
+    // Starting up and parsing are behind us, and a run that names the
+    // strategy pays for both of them too.
+    g_setupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - g_startedAt).count();
 
     if (isPortfolioMode(env.options->mode())) {
       // The slice that succeeds runs in a child of this process and exits
@@ -1582,24 +1703,30 @@ int main(int argc, char** argv)
       // running more than one may succeed, and the schedule then says which
       // is kept. Portfolio mode preprocesses per slice, so not here.
       UIHelper::onProofFound = &emitSliceProof;
-      // Starting up and parsing are behind us, and a run that names the
-      // strategy pays for both of them too.
-      g_setupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - g_startedAt).count();
       CASC::PortfolioMode::perform(prb);
-      if (pid_t winner = CASC::PortfolioMode::winner)
-        if (std::rename(slicePath(winner).c_str(), g_outPath.c_str()) != 0)
-          throw UserErrorException("cannot rename the winning slice's proof");
+      if (pid_t winner = CASC::PortfolioMode::winner) {
+        std::string won = slicePath(winner);
+        if (std::rename(won.c_str(), g_outPath.c_str()) != 0) {
+          std::string reason = std::strerror(errno);
+          throw UserErrorException("cannot rename the winning slice's proof " +
+                                   won + " to " + g_outPath + ": " + reason);
+        }
+      }
+      removeSliceFiles();
     } else {
+      g_timerAtStrategyMs = Timer::elapsedMilliseconds();
       env.options->setForcedOptionValues();
       env.options->checkGlobalOptionConstraints();
       Preprocess(*env.options).preprocess(*prb);
       ProvingHelper::runVampireSaturation(*prb, *env.options);
     }
 
-    // A portfolio slice reports for itself, whether it refuted the problem or
-    // showed it satisfiable, and it is the only process that knows; this one
-    // would only overwrite that with what the placeholder already says.
+    // A portfolio slice that refutes the problem or shows it satisfiable
+    // reports for itself, and it is the only process that knows. When none
+    // does, this process knows no better either: the slices' termination
+    // reasons stay in the slices, and the schedule sets none here. So the
+    // placeholder stands, saying `UNKNOWN`, and re-encoding would only write
+    // it again.
     if (!isPortfolioMode(env.options->mode()))
       emitProof();
     return 0;

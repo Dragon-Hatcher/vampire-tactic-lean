@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fill `problems/smtlib/` with SMT-LIB arithmetic problems, over ℤ, ℚ and ℝ.
 
-    ./scripts/collect-smtlib.py [n]        # n total, default 100
+    SMTLIB_DIR=... VAMPIRE_BIN=... SMT2LEAN=... ./scripts/collect-smtlib.py [n]
+
+`n` is the total wanted, 100 by default.
 
 Same shape as `collect-problems.py`: a uniform shuffle under a fixed seed, kept when the
 `vampire` binary refutes the problem inside one second and this side can state it. The
@@ -11,9 +13,9 @@ conjecture to negate.
 
 ## Where each numeric sort comes from, and why it is that one
 
-SMT-LIB has two numeric sorts, `Int` and `Real`. Lean has three that matter here, and
-getting ℚ out of a corpus that does not mention it takes an argument rather than a
-substitution:
+SMT-LIB has two numeric sorts, `Int` and `Real`. Lean has three that matter here.
+SMT-LIB has no rational sort, so the ℚ problems rely on an argument that `unsat` over
+`Real` carries over to ℚ; the sort is not simply renamed:
 
 * **ℤ — `LIA`, `NIA`, `UFIDL`.** Integer logics; `Int` maps to `ℤ` directly.
 * **ℝ — `NRA`.** *Nonlinear* real arithmetic, which is the one fragment that genuinely
@@ -31,34 +33,37 @@ substitution:
 The vampire check runs on the `.smt2` as written, over `Real`; for the ℚ problems it is
 the transfer above that carries the result across, not a second measurement.
 
-## What the tactic has to do with these
+## What the tactic does with these
 
-Nothing, yet. `Vampire/` has no arithmetic translation at all -- no file in it mentions
-ℤ, ℚ or ℝ -- so every problem here fails today. They are the target, in the same way
-`problems/tptp/` was a target when its proofs were `sorry`.
+The tactic translates arithmetic over ℤ, ℚ and ℝ into TPTP's `$int`, `$rat` and `$real`,
+and replays the arithmetic steps vampire takes, so these problems are part of the
+corpus `run-problems.py` elaborates like any other.
 
-`smt2lean.py` comes from the tree next door, for the reason `collect-problems.py` reuses
-`tptp2lean.py`: one translation, so these statements say what that corpus's statements
-say. Its own header imports lean-smt, which this project does not depend on, so the
-header is rewritten here.
+## Where the inputs come from
+
+Three things come from outside this repository and are named by environment variables:
+
+  SMTLIB_DIR   the SMT-LIB `non-incremental` benchmarks (the directory holding `LIA/`,
+               `LRA/`, ...)
+  VAMPIRE_BIN  a vampire binary
+  SMT2LEAN     the path of `smt2lean.py`, the SMT-LIB-to-Lean converter. As with
+               `collect-problems.py` and `tptp2lean.py`, using the same converter as
+               the corpus these problems are compared against keeps the statements the
+               same. Its own header imports lean-smt, which this project does not
+               depend on, so the header is rewritten here.
 """
-import os, random, re, shutil, subprocess, sys, tempfile, time
+import argparse, os, random, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 OUT = HERE / "problems" / "smtlib"
-NEXT_DOOR = HERE.parent.parent / "vampire-tactic"
 
-CORPUS = Path(os.environ.get("SMTLIB_DIR", NEXT_DOOR / "smtlib" / "non-incremental"))
-VAMPIRE = Path(os.environ.get(
-    "VAMPIRE_BIN", NEXT_DOOR / "vampire-tactic-vampire" / "build" / "vampire"))
-SMT2LEAN = Path(os.environ.get(
-    "SMT2LEAN", NEXT_DOOR / "bench-smtlib" / "smt2lean.py"))
+# Set by `main`, from the environment.
+CORPUS = VAMPIRE = SMT2LEAN = None
 
-WANT = int(sys.argv[1]) if len(sys.argv) > 1 else 100
 SEED, LIMIT, MAX_LEAN = 20260911, 1.0, 300_000
 
-# (lean sort, source logics, share of WANT)
+# (lean sort, source logics, percentage of the total wanted)
 KINDS = [("ℤ", ["LIA", "NIA", "UFIDL"], 34),
          ("ℝ", ["NRA"], 33),
          ("ℚ", ["LRA"], 33)]
@@ -91,6 +96,23 @@ WHY = {
          "-- groups and that theory is complete -- so `unsat` transfers from the `Real`\n"
          "-- the problem is written over to the ℚ it is stated over here.",
 }
+
+
+def from_env(names: list[str]) -> list[Path]:
+    """The paths the environment variables `names` give, or exit naming those unset."""
+    missing = [n for n in names if not os.environ.get(n)]
+    if missing:
+        sys.exit(f"set {', '.join(missing)} (see --help for what each one is)")
+    return [Path(os.environ[n]) for n in names]
+
+
+def reread(lean: Path) -> tuple[str, float]:
+    """The logic and the vampire time out of a file this script wrote earlier."""
+    text = lean.read_text()
+    logic = re.search(r"from SMT-LIB \((\S+?), status", text)
+    wall = re.search(r"The vampire binary refutes it in ([0-9.]+)s", text)
+    return (logic.group(1) if logic else "unknown",
+            float(wall.group(1)) if wall else 0.0)
 
 
 def solves(path: Path) -> float | None:
@@ -156,13 +178,21 @@ def stem_for(logic: str, path: Path) -> str:
 
 
 def main() -> None:
+    global CORPUS, VAMPIRE, SMT2LEAN
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("n", nargs="?", type=int, default=100,
+                    help="how many problems `problems/smtlib/` should hold "
+                         "(default: 100)")
+    want = ap.parse_args().n
+    CORPUS, VAMPIRE, SMT2LEAN = from_env(["SMTLIB_DIR", "VAMPIRE_BIN", "SMT2LEAN"])
     for needed in (CORPUS, VAMPIRE, SMT2LEAN):
         if not needed.exists():
             sys.exit(f"not found: {needed}")
     OUT.mkdir(parents=True, exist_ok=True)
     kept = []
     for sort, logics, share in KINDS:
-        share = round(share * WANT / 100)
+        share = round(share * want / 100)
         got = 0
         print(f"=== {sort} from {'/'.join(logics)}: want {share} ===", flush=True)
         for logic, path in pool(logics):
@@ -170,8 +200,11 @@ def main() -> None:
                 break
             stem = stem_for(logic, path)
             if (OUT / f"{stem}.lean").exists():
+                # Already here. Its logic and timing are read back out of the header
+                # rather than re-measured, so the manifest keeps the real timings.
                 got += 1
-                kept.append((stem, logic, sort, 0.0))
+                was_logic, was_wall = reread(OUT / f"{stem}.lean")
+                kept.append((stem, was_logic, sort, was_wall))
                 continue
             c = convert(path)
             if c is None:
@@ -192,7 +225,7 @@ def main() -> None:
             shutil.copy2(path, OUT / f"{stem}.smt2")
             kept.append((stem, logic, sort, wall))
             got += 1
-            print(f"[{len(kept):3d}/{WANT}] {stem[:44]:44s} {sort} {wall:.2f}s",
+            print(f"[{len(kept):3d}/{want}] {stem[:44]:44s} {sort} {wall:.2f}s",
                   flush=True)
         if got < share:
             print(f"  only {got} of {share} for {sort}", flush=True)

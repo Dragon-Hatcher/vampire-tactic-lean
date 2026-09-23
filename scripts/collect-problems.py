@@ -1,47 +1,53 @@
 #!/usr/bin/env python3
-"""Fill `problems/` with TPTP problems the vampire binary refutes in under a second.
+"""Fill `problems/tptp/` with TPTP problems the vampire binary refutes in under a second.
 
-    ./scripts/collect-problems.py [n]        # n total, default 100
+    TPTP_DIR=... VAMPIRE_BIN=... TPTP2LEAN=... ./scripts/collect-problems.py [n]
+
+`n` is the total wanted, 100 by default.
 
 The sample is a uniform shuffle, under a fixed seed, of every TPTP v9.3.1 problem whose
-declared status is provable. It is walked in that order and a problem is kept when the
-`vampire` binary refutes it inside one second *and* this side can state it. The second
-condition is what confines the set to untyped first-order logic: a `tff`/`thf` problem is
-one the converter declines, so it falls out of the sample rather than being filtered for.
+declared status is provable. It is walked in that order, and a problem is kept when the
+`vampire` binary refutes it inside one second *and* the converter can state it in Lean.
+The converter declines `tff`/`thf` problems, so the kept set is untyped first-order
+logic without any explicit filter for it.
 
-**Resumable, and that is the point of the seed.** The order is fixed, so asking for more
-walks the same sequence and pays only for the problems it does not already have. The
-first ten of `problems/` were collected by this at `n = 10`; running it at 100 keeps
-those ten and adds ninety.
+The run is resumable, because the seed fixes the order: asking for more walks the same
+sequence and does work only for the problems not already collected. The first ten of
+`problems/` were collected by this at `n = 10`; running it at 100 keeps those ten and
+adds ninety.
 
-**Under a second for the binary is not under a second for the tactic.** These are easy
-*searches* on purpose, so that a failure here points at the translation or the proof
-reconstruction rather than at the prover's ability to find a refutation. The search is
-deliberately not the variable.
+Under a second for the binary is not under a second for the tactic. These are easy
+searches on purpose, so that a failure points at the translation or the proof
+reconstruction, not at the prover's ability to find a refutation.
 
-Two things live outside this project and are read from the tree next door: the TPTP
-checkout, and `tptp2lean.py`, which is the translation. Using that converter rather than
-writing a second one means these statements say what the other corpus's statements say.
-Override with `$TPTP_DIR`, `$VAMPIRE_BIN` and `$TPTP2LEAN`.
+Three things come from outside this repository and are named by environment variables:
+
+  TPTP_DIR     a TPTP v9.3.1 checkout (the directory holding `Problems/`)
+  VAMPIRE_BIN  a vampire binary
+  TPTP2LEAN    the directory holding `tptp2lean.py`, the TPTP-to-Lean converter. Using
+               the same converter as the corpus these problems are compared against
+               keeps the statements the same.
 """
-import os, random, re, shutil, subprocess, sys, tempfile, time
+import argparse, os, random, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent.parent          # the `lean/` package
+HERE = Path(__file__).resolve().parent.parent          # the root of this repository
 OUT = HERE / "problems" / "tptp"
-NEXT_DOOR = HERE.parent.parent / "vampire-tactic"
 
-TPTP = Path(os.environ.get("TPTP_DIR", NEXT_DOOR / "tptp" / "TPTP-v9.3.1"))
-VAMPIRE = Path(os.environ.get(
-    "VAMPIRE_BIN", NEXT_DOOR / "vampire-tactic-vampire" / "build" / "vampire"))
-TPTP2LEAN = Path(os.environ.get(
-    "TPTP2LEAN", NEXT_DOOR / "vampire-tactic-lean" / "bench-tptp"))
-
-WANT = int(sys.argv[1]) if len(sys.argv) > 1 else 100
 SEED, LIMIT, TYPECHECK = 20260909, 1.0, 90.0
 
-sys.path.insert(0, str(TPTP2LEAN))
-import tptp2lean  # noqa: E402
+# Set by `main`, from the environment.
+TPTP = VAMPIRE = TPTP2LEAN = None
+tptp2lean = None
+
+
+def from_env(names: list[str]) -> list[Path]:
+    """The paths the environment variables `names` give, or exit naming those unset."""
+    missing = [n for n in names if not os.environ.get(n)]
+    if missing:
+        sys.exit(f"set {', '.join(missing)} (see --help for what each one is)")
+    return [Path(os.environ[n]) for n in names]
+
 
 HEADER = """\
 -- {stem}, from TPTP v9.3.1 ({domain}).
@@ -131,18 +137,27 @@ def candidates() -> list[Path]:
 
 
 def main() -> None:
+    global TPTP, VAMPIRE, TPTP2LEAN, tptp2lean
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("n", nargs="?", type=int, default=100,
+                    help="how many problems `problems/tptp/` should hold (default: 100)")
+    want = ap.parse_args().n
+    TPTP, VAMPIRE, TPTP2LEAN = from_env(["TPTP_DIR", "VAMPIRE_BIN", "TPTP2LEAN"])
     sys.setrecursionlimit(100000)
     for needed in (TPTP, VAMPIRE, TPTP2LEAN / "tptp2lean.py"):
         if not needed.exists():
-            sys.exit(f"not found: {needed}  (see the module docstring for the overrides)")
+            sys.exit(f"not found: {needed}")
+    sys.path.insert(0, str(TPTP2LEAN))
+    import tptp2lean
     OUT.mkdir(parents=True, exist_ok=True)
     pool = candidates()
-    print(f"{len(pool)} provable problems in the pool, seed {SEED}, want {WANT}",
+    print(f"{len(pool)} provable problems in the pool, seed {SEED}, want {want}",
           flush=True)
 
     kept, tried = [], 0
     for path in pool:
-        if len(kept) == WANT:
+        if len(kept) == want:
             break
         if (OUT / path.name).exists() and (OUT / f"{path.stem}.lean").exists():
             # Already here. Its status and timing are read back out of the header rather
@@ -161,11 +176,11 @@ def main() -> None:
         name = stmt.split(" :", 1)[0]
         decls = body.split("variable [inst : Inhabited ι]\n", 1)[1] \
                     .split("\ntheorem", 1)[0]
-        # Vampire before the typecheck, and the order is worth a second's thought: the
-        # prover rejects roughly seven candidates in eight and costs at most a second,
-        # while `lean` costs a few and accepts nearly everything. Typechecking first
-        # meant paying the expensive filter on every candidate to save the cheap one on
-        # an eighth of them.
+        # Vampire runs before the typecheck because it is the cheaper filter per
+        # rejection: the prover rejects roughly seven candidates in eight and costs at
+        # most a second, while `lean` costs a few seconds and accepts nearly everything.
+        # Typechecking first would pay the expensive check on every candidate to save
+        # the cheap one on an eighth of them.
         wall = solves(path)
         if wall is None:
             continue
@@ -179,10 +194,11 @@ def main() -> None:
             + decls + f"\ntheorem {stmt} := by\n  vampire\n")
         shutil.copy2(path, OUT / path.name)
         kept.append((path.stem, path.parent.name, status, wall))
-        print(f"[{len(kept):3d}/{WANT}] {path.stem:16s} {path.parent.name:4s} "
+        print(f"[{len(kept):3d}/{want}] {path.stem:16s} {path.parent.name:4s} "
               f"{status:14s} {wall:.2f}s", flush=True)
 
-    # A manifest, because a hundred rows is a table nobody reads in a README.
+    # The list of kept problems, with their status and vampire's time, as a TSV file
+    # rather than a table in a README.
     rows = sorted(kept)
     (OUT / "MANIFEST.tsv").write_text(
         "problem\tdomain\tstatus\tvampire_s\n"

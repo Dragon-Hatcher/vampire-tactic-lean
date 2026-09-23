@@ -3,11 +3,18 @@
 
   ./scripts/gen-inference-rules.py [vampire checkout]
 
-The checkout defaults to the one `lake build` builds against: a sibling
-`vampire-fork/` if there is one, and otherwise the pinned revision Lake fetched
-into `.lake/build/vampire`.
+The checkout defaults to the one `lake build` builds against, chosen the way
+lakefile.lean chooses it: `$VAMPIRE_DIR` if set, then a sibling `vampire-fork/`
+if there is one, and otherwise the pinned revision Lake fetched into
+`.lake/build/vampire`.
+
+The rules are read the way worker/CMakeLists.txt reads them: the enum's body
+runs to the first line starting with `};`, and a rule is a line holding an
+upper-case name followed by a comma, so the closing `GENERIC_THEORY_AXIOM_LAST`
+marker is not one.
 """
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -35,6 +42,12 @@ def camel(name: str) -> str:
 def main() -> int:
     if len(sys.argv) > 1:
         root = sys.argv[1]
+    elif os.environ.get("VAMPIRE_DIR"):
+        root = os.environ["VAMPIRE_DIR"]
+        if not (Path(root) / "CMakeLists.txt").exists():
+            print(f"VAMPIRE_DIR is set to {root}, which holds no CMakeLists.txt",
+                  file=sys.stderr)
+            return 1
     elif (HERE.parent / "vampire-fork" / "CMakeLists.txt").exists():
         root = str(HERE.parent / "vampire-fork")
     else:
@@ -48,10 +61,10 @@ def main() -> int:
     if body is None:
         print(f"could not find InferenceRule in {header}", file=sys.stderr)
         return 1
-    if re.search(r"^\s*([A-Z][A-Z_0-9]*)\s*=", body.group(1), re.M):
+    if re.search(r"^[ \t]*([A-Z][A-Z_0-9]*)[ \t]*=", body.group(1), re.M):
         print("InferenceRule now assigns explicit values", file=sys.stderr)
         return 1
-    names = re.findall(r"^\s*([A-Z][A-Z_0-9]*)\s*,", body.group(1), re.M)
+    names = re.findall(r"^[ \t]*([A-Z][A-Z_0-9]*)[ \t]*,", body.group(1), re.M)
     if len(names) != len(set(names)):
         print("InferenceRule has duplicate names", file=sys.stderr)
         return 1

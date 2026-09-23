@@ -10,21 +10,22 @@ The measure is `replay + share + check`:
   share   Lean sharing the subterms of the term it was handed
   check   the kernel checking it
 
-The prover's search is deliberately excluded: it is not what this measures, and
-it is counted in beats so it does not move when replay does. Import and
-elaboration overhead are excluded for the same reason -- they are a fixed cost
-per file that would dilute any ratio.
+The prover's search is excluded: it is not what this measures, and its limit is
+set in beats (a count of work done, not time), so a faster or slower replay does
+not change what the search does. Import and elaboration are excluded too: they
+cost about the same for every file and would only dilute any ratio.
 
-Serial by default, because the numbers are times: seven problems at once on
-sixteen cores inflates each of them by a factor that varies with what else is
-running, which is how a 1.1s problem comes to read 35s.
+Each problem is copied into `.measure/` at the top of the package and elaborated
+there; the directory is removed when the run ends.
+
+Problems run one at a time, because the numbers are times: seven problems at
+once on sixteen cores inflates each of them by a factor that varies with what
+else is running, which is how a 1.1s problem comes to read 35s.
 """
-import argparse, re, subprocess, sys
+import argparse, os, re, shutil, subprocess
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent.parent
-PROBLEMS = HERE / "problems"
-SPLITS = HERE / "scripts" / "splits"
+from _common import HERE, dynlibs, find_problem, incomplete, lean_path, read_split
 
 OPTIONS = ("set_option profiler true\nset_option profiler.threshold 0\n"
            "set_option trace.vampire.timing true")
@@ -38,28 +39,13 @@ def ms(value: str, unit: str) -> float:
     return float(value) * (1.0 if unit == "ms" else 1000.0)
 
 
-def dynlibs() -> list[str]:
-    """What Lake loads when it elaborates a file importing `Vampire`.
-
-    The replay core is precompiled, so its native code has to be loaded or the
-    tactic runs in the interpreter -- which is what `lean` on its own does, and
-    what would make this measure the wrong thing. Read from Lake's own setup
-    rather than guessed at.
-    """
-    setup = HERE / ".lake" / "build" / "ir" / "Vampire" / "Frontend.setup.json"
-    if not setup.exists():
-        return []
-    import json
-    libs = json.loads(setup.read_text()).get("dynlibs", [])
-    return [f"--load-dynlib={x['path'] if isinstance(x, dict) else x}" for x in libs]
-
-
 def measure(stem: str, work: Path, env: dict, timeout: float,
             libs: list[str]) -> dict:
     """One problem, with the profiler on."""
-    src = next(iter(PROBLEMS.glob(f"*/{stem}.lean")), None)
-    if src is None:
-        sys.exit(f"no such problem: {stem}")
+    hits = find_problem(stem)
+    if not hits:
+        return {"stem": stem, "failed": "no such problem"}
+    src = hits[0]
     # The options go after `import Vampire`, which registers the trace class.
     lines = []
     for line in src.read_text().split("\n"):
@@ -77,10 +63,8 @@ def measure(stem: str, work: Path, env: dict, timeout: float,
     except subprocess.TimeoutExpired:
         return {"stem": stem, "failed": "timed out"}
     out = p.stdout + p.stderr
-    for mark in ("error:", "declaration uses 'sorry'", "which this tactic does not"):
-        if mark in out:
-            line = next(l for l in out.split("\n") if mark in l)
-            return {"stem": stem, "failed": line.strip()[:120]}
+    if (line := incomplete(out)) is not None:
+        return {"stem": stem, "failed": line[:120]}
     replay = REPLAY.search(out)
     share = SHARE.search(out)
     check = CHECK.search(out)
@@ -100,41 +84,43 @@ def measure(stem: str, work: Path, env: dict, timeout: float,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--set", required=True, help="a file under scripts/splits/")
     ap.add_argument("--total-only", action="store_true",
                     help="report only the totals, not the problems")
-    ap.add_argument("--timeout", type=float, default=1800.0)
+    ap.add_argument("--timeout", type=float, default=1800.0,
+                    help="seconds before a problem counts as failed (default: 1800)")
     ap.add_argument("--out", help="write the per-problem numbers here as TSV")
     args = ap.parse_args()
 
-    stems = [l.strip() for l in (SPLITS / args.set).read_text().split("\n") if l.strip()]
-    env = dict(__import__("os").environ)
-    env["LEAN_PATH"] = subprocess.run(
-        ["lake", "env", "printenv", "LEAN_PATH"], cwd=HERE,
-        capture_output=True, text=True, check=True).stdout.strip()
+    stems = read_split(args.set)
+    libs = dynlibs()
+    env = dict(os.environ, LEAN_PATH=lean_path())
 
     work = HERE / ".measure"
     work.mkdir(exist_ok=True)
-    libs = dynlibs()
     if not args.total_only:
         print(f"loading {len(libs)} precompiled librar"
               f"{'y' if len(libs) == 1 else 'ies'}")
     rows, failed = [], []
-    for i, stem in enumerate(stems, 1):
-        got = measure(stem, work, env, args.timeout, libs)
-        if "failed" in got:
-            failed.append(got)
+    try:
+        for i, stem in enumerate(stems, 1):
+            got = measure(stem, work, env, args.timeout, libs)
+            if "failed" in got:
+                failed.append(got)
+                if not args.total_only:
+                    print(f"[{i:3d}/{len(stems)}] {stem:32s} FAILED {got['failed']}",
+                          flush=True)
+                continue
+            rows.append(got)
             if not args.total_only:
-                print(f"[{i:3d}/{len(stems)}] {stem:32s} FAILED {got['failed']}",
+                print(f"[{i:3d}/{len(stems)}] {stem:32s} "
+                      f"replay {got['replay']:9.0f}  share {got['share']:8.0f}  "
+                      f"check {got['check']:8.0f}  total {got['total']:9.0f} ms",
                       flush=True)
-            continue
-        rows.append(got)
-        if not args.total_only:
-            print(f"[{i:3d}/{len(stems)}] {stem:32s} "
-                  f"replay {got['replay']:9.0f}  share {got['share']:8.0f}  "
-                  f"check {got['check']:8.0f}  total {got['total']:9.0f} ms",
-                  flush=True)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
     def s(key): return sum(r[key] for r in rows)
     print(f"\n{args.set}: {len(rows)} measured, {len(failed)} not")
@@ -143,7 +129,8 @@ def main() -> None:
     print(f"  check  {s('check') / 1000:9.1f}s")
     print(f"  TOTAL  {s('total') / 1000:9.1f}s")
     if failed and args.total_only:
-        print(f"  ({len(failed)} problems reported no replay; they are excluded)")
+        print(f"  ({len(failed)} problems failed or reported no replay time; "
+              f"they are not in these totals)")
 
     if not args.total_only:
         by_rule, counts = {}, {}
@@ -166,4 +153,5 @@ def main() -> None:
                         f"\t{r['check']:.0f}\t{r['total']:.0f}\n")
 
 
-main()
+if __name__ == "__main__":
+    main()
