@@ -28,10 +28,11 @@ def conflict (step : Step) : ReconstructM Expr := do
   let recorded ←
     match step.unit.congruences with
     | .ok steps => pure steps
-    | .error e => throwError "{e}"
+    | .error e => throwError "step {step.unit.number}: cannot read the recorded \
+        congruence closure: {e}"
   if recorded.isEmpty then
-    throwError "nothing is recorded of why the literals of step \
-      {step.unit.number} cannot all be false"
+    throwError "step {step.unit.number}: no congruence closure was recorded for \
+      this conflict"
   step.underVars fun vars target => do
     let literals := clause.literals
     let parts ← literals.mapM (literal vars)
@@ -109,7 +110,8 @@ def conflict (step : Step) : ReconstructM Expr := do
             #[some part, some (mkConst ``False),
               some (← mkEqMP alike holds), some (← refuting positive)])
       let some contradiction := closed
-        | throwError "what is recorded of step {step.unit.number} settles nothing"
+        | throwError "step {step.unit.number}: the recorded congruence closure \
+            reaches no contradiction"
       mkLambdaFVars #[h] contradiction
     pure (ofNotNot target refuted)
 

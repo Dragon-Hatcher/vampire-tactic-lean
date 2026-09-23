@@ -60,6 +60,7 @@ private partial def roundingsOf (e : Expr) (acc : Array Expr × Std.HashSet Expr
     let acc :=
       if e.isAppOfArity ``Int.cast 3 then
         let inner := e.appArg!
+        -- Mathlib's names, with a single backtick: see `rounding` in `Stated.lean`.
         if inner.isAppOfArity `Int.floor 5 || inner.isAppOfArity `Int.ceil 5
           then (acc.1.push e, acc.2) else acc
       else if e.isAppOfArity ``ite 5 then (acc.1.push e, acc.2)
@@ -92,6 +93,8 @@ private partial def withRoundings (formulas : Array Expr)
       continue
     let inner := e.appArg!
     let x := inner.appArg!
+    -- Mathlib's lemmas, named rather than referred to: see `rounding` in
+    -- `Stated.lean`.
     let lemmas := if inner.isAppOfArity `Int.floor 5
       then [`Int.floor_le, `Int.lt_floor_add_one]
       else [`Int.le_ceil, `Int.ceil_lt_add_one]
@@ -130,7 +133,8 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
   -- where the arithmetic is.
   if step.unit.clause?.isNone then
     let #[(proof, stated)] := step.premises
-      | throwError "a formula normalised from {step.premises.size} premises"
+      | throwError "{step.rule.name} on a formula should have one premise, got \
+        {step.premises.size}"
     return ← restate proof stated (← step.conclusion)
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
@@ -200,8 +204,8 @@ def divisibility (step : Step) : ReconstructM Expr := do
         if l == x then return (part, r, a)
       none
     let #[(failsZ, z, y), (failsW, w, y')] := products
-      | throwError "a divisibility axiom states {products.size} products of \
-        the number it says is zero, not two:{indentExpr target}"
+      | throwError "expected a divisibility axiom to state two products of the \
+        number it says is zero, got {products.size}:{indentExpr target}"
     unless y == y' do
       throwError "a divisibility axiom's products reach{indentExpr y}\nand\
         {indentExpr y'}, which are not the same"
@@ -213,8 +217,8 @@ def divisibility (step : Step) : ReconstructM Expr := do
       | throwError "a divisibility axiom without the equation it \
         concludes:{indentExpr target}"
     let some cancel ← (← read).cancelling x z w
-      | throwError "nothing says that multiplication by a nonzero \
-        {← inferType x} cancels"
+      | throwError "step {step.unit.number}: no cancellation lemma for \
+        multiplication on{indentExpr (← inferType x)}"
     let suffix := suffixJunctions ``Or ``False parts
     let inject (part h : Expr) : ReconstructM Expr := do
       let some i := parts.findIdx? (· == part)

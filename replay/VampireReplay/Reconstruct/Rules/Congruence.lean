@@ -1,4 +1,5 @@
 import VampireReplay.Reconstruct.Basic
+import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Rules that restate a formula without changing what it says.
@@ -16,7 +17,7 @@ open Lean Meta
 /-- A step that restates its premise. -/
 def restated (step : Step) : ReconstructM Expr := do
   let #[(proof, stated)] := step.premises
-    | throwError "expected one premise, got {step.premises.size}"
+    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
   restate proof stated (← step.conclusion)
 
 /--
@@ -30,14 +31,11 @@ no further weight.
 -/
 def unfolded (step : Step) : ReconstructM Expr := do
   let some (proof, stated) := step.premises[0]?
-    | throwError "expected at least one premise"
+    | throwError "{step.rule.name} should have at least one premise, got none"
   let some parent := step.unit.parents[0]?
-    | throwError "expected at least one premise"
-  let conclusion ← step.conclusion
-  if ← isDefEq (← instantiateMVars stated) conclusion then
-    return proof
+    | throwError "{step.rule.name} should have at least one premise, got none"
   -- Folding rebuilds the clause, so its literals can come back in another
   -- order; they are related one by one rather than by the clause's shape.
-  relateLiterals step parent proof stated
+  Clause.restatedLiterals step parent proof stated
 
 end Vampire.Reconstruct.Congruence

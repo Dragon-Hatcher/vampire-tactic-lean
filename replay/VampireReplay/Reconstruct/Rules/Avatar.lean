@@ -20,6 +20,27 @@ namespace Vampire.Reconstruct.Avatar
 open Lean Meta
 
 /--
+The component an avatar definition `name <=> component` names, and the
+variables its leading universal quantifier binds.
+-/
+private def definedComponent (definition : Formula) :
+    ReconstructM (Option (Formula × Array UInt32)) := do
+  let some component := (← definition.subformulas.findSomeM? fun g => do
+      return if (← connectiveOf g) matches .name then none else some g)
+    | return none
+  let bound :=
+    if (← connectiveOf component) matches .«forall» then component.boundVars else #[]
+  return some (component, bound)
+
+/-- Whether a name is the negation `~name` of a component's name. -/
+private def isNegatedName (name : String) : Bool :=
+  name.startsWith "~"
+
+/-- The component name a name speaks of, without the `~` of its negation. -/
+private def positiveName (name : String) : String :=
+  if isNegatedName name then (name.drop 1).toString else name
+
+/--
 `avatar_component`: the component a name stands for, under that name.
 
 The clause is the component itself, and the name assumed is the definition of
@@ -44,16 +65,9 @@ def component (step : Step) : ReconstructM Expr := do
   -- the variable each stands for, and the literals found by what they say.
   let some definition := parent.formula?
     | throwError "an avatar component clause's definition states no formula"
-  let some component := (← definition.subformulas.filterM fun g => do
-      return !((← connectiveOf g) matches .name))[0]?
-    | throwError "an avatar definition states no component"
-  let bound :=
-    if (← connectiveOf component) matches .«forall» then component.boundVars
-    else #[]
-  forallBoundedTelescope core (some step.unit.varSorts.size) fun xs target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+  let some (_, bound) ← definedComponent definition
+    | throwError "the avatar definition in step {parent.number} states no component"
+  step.underVars fun vars target => do
     let args ← bound.mapM fun v => do
       let some x := vars[v]?
         | throwError "the definition of `{name}` binds X{v}, which the \
@@ -61,7 +75,7 @@ def component (step : Step) : ReconstructM Expr := do
       return x
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
-    mkLambdaFVars xs (← carryAll stated target instance_)
+    carryAll stated target instance_
 
 /--
 `avatar_contradiction_clause`: the names a refuted clause held under cannot all
@@ -75,7 +89,7 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
     | throwError "an avatar contradiction clause should have one premise, got \
       {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "an avatar contradiction clause without a premise"
+    | throwError "an avatar contradiction clause should have one premise, got none"
   let target ← step.conclusion
   let parts := junctionParts ``Or target
   -- Were every one of those names to fail, nothing would follow from the
@@ -92,8 +106,8 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
       let some i := found
         | throwError "the negation of `{name}`{indentExpr flipped}\nis not \
           among{indentExpr target}"
-      let refuted ← pure (.lam `d flipped
-        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default)
+      let refuted : Expr := .lam `d flipped
+        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default
       let body ← namedFormula name
       proof := mkApp proof
         (← mkAppM ``Iff.mp
@@ -108,9 +122,9 @@ What a propositional clause says: what each of its names stands for, and their
 disjunction.
 
 Built once per clause and read back from `states`. The solver uses a clause as a
-premise of as many derivations as it likes -- one refutation here has 79013
-premise uses over 2205 derived clauses -- and rebuilding what it says at each
-of them was most of what replaying the refutation did.
+premise of as many derivations as it likes, so premise uses far outnumber
+clauses, and rebuilding what a clause says at each use would dominate replaying
+the refutation.
 -/
 private def satClauseParts (c : SatClause) :
     ReconstructM (Array Expr × Expr) := do
@@ -161,9 +175,8 @@ false.
 Self-contained: it says nothing about the rest of the propagation, which is what
 keeps the propagation linear. Carrying the rest of the chain inside the
 elimination instead binds the hypothesis of each case into everything the walk
-went on to build, and that costs the square of the chain's length -- one
-refutation here propagates through 975 premises, and spent ten minutes of a
-twelve-minute replay doing it.
+went on to build, and that costs the square of the chain's length, which for
+a propagation through hundreds of premises is most of the replay.
 -/
 private def implied (parts : Array Expr) (names : Array String) (u : Nat)
     (known : Std.HashMap String (Expr × Expr)) (proof : Expr) :
@@ -190,8 +203,8 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
     (known : Std.HashMap String (Expr × Expr)) (premises : Array SatClause)
     (i : Nat) (bound : Array Expr) : ReconstructM Expr := do
   let some premise := premises[i]?
-    | throwError "the clauses a propositional step was derived from left \
-      nothing to contradict"
+    | throwError "unit propagation through the recorded premises ended without \
+      a contradiction"
   let names := premise.literals
   let some proof := proved[premise.index]?
     | throwError "a propositional clause used before it was proved"
@@ -224,8 +237,8 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
     -- than a propagation. The solver's derivations are propagations, each
     -- premise leaving one literal, so a derivation that is not one is not what
     -- the solver recorded.
-    throwError "a propositional premise leaves {unassigned.size} of its \
-      literals unassigned rather than one: the derivation is not a propagation"
+    throwError "expected a propositional premise to leave one literal \
+      unassigned, got {unassigned.size}: the derivation is not unit propagation"
 
 /--
 A proof of what a propositional clause says, from proofs of the clauses it was
@@ -245,8 +258,8 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
     | throwError "a propositional clause proved before it was stated"
   if let some origin := c.origin? then
     let some (proof, stated) := origins[origin.number]?
-      | throwError "the propositional shadow of step {origin.number}, which is \
-        not among the refutation's premises"
+      | throwError "the propositional clause for step {origin.number} is not \
+        among the refutation's premises"
     return ← carryAll stated target proof
   -- Suppose the clause fails; then each of its literals is false, which is to
   -- say that each of their negations holds.
@@ -256,8 +269,8 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
     for (name, i) in c.literals.zipIdx do
       let (flipped, says) ← flipName name
       let some body := parts[i]? | throwError "missing literal"
-      let refuted ← pure (.lam `d body
-        (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
+      let refuted : Expr := .lam `d body
+        (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
       known := known.insert (flippedName name)
         (← mkAppM ``Iff.mpr #[says, refuted], flipped)
     mkLambdaFVars #[n] (← propagate states proved known c.premises 0 #[])
@@ -370,9 +383,9 @@ def splitClause (step : Step) : ReconstructM Expr := do
     for (name, i) in disjuncts.zipIdx do
       if (parent.splits.contains (flippedName name)) then
         continue
-      let key := if name.startsWith "~" then (name.drop 1).toString else name
+      let key := positiveName name
       let some (definition, uses, position) := definitions[key]?
-        | throwError "nothing says what `{name}` means"
+        | throwError "no definition was recorded for `{name}`"
       let seen := met.getD key 0
       met := met.insert key (seen + 1)
       let some use := uses[seen]?
@@ -380,12 +393,8 @@ def splitClause (step : Step) : ReconstructM Expr := do
       let mut against ← refuted i (← namedFormula name)
       let some body := definition.formula?
         | throwError "the definition of `{name}` states no formula"
-      let some quantified := (← body.subformulas.findSomeM? fun g => do
-          return if (← connectiveOf g) matches .name then none else some g)
+      let some (quantified, binders) ← definedComponent body
         | throwError "the definition of `{name}` states no component"
-      let binders :=
-        if (← connectiveOf quantified) matches .«forall» then quantified.boundVars
-        else #[]
       let renamed := Std.HashMap.ofList use.bindings.toList
       let mut componentVars : Vars := {}
       for v in binders do
@@ -403,7 +412,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- vampire states it: a literal naming a subformula stands for a whole
       -- formula, so the disjuncts of what it rebuilds to are not its literals.
       let parts ←
-        if name.startsWith "~" then
+        if isNegatedName name then
           -- A ground component of one negative literal is named positively,
           -- the definition stating the literal's complement, so the component
           -- is what the negated name says rather than what the definition does.
@@ -420,11 +429,11 @@ def splitClause (step : Step) : ReconstructM Expr := do
             else #[component]
           literals.mapM (Reconstruct.formula definition.varSorts componentVars)
       let disjunction := junction ``Or ``False parts
-      let placed := if name.startsWith "~" then none
+      let placed := if isNegatedName name then none
         else step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
-        let negation ← pure (.lam `l part
-          (mkApp against (← injectPart ``Or disjunction j (.bvar 0))) .default)
+        let negation : Expr := .lam `l part
+          (mkApp against (← injectPart ``Or disjunction j (.bvar 0))) .default
         negations := negations.push (part, negation)
         if let some placed := placed then
           if let some (some (k, false)) := placed[j]? then

@@ -31,17 +31,19 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     | throwError "subsumption resolution should have two premises, got \
       {step.premises.size}"
   let #[mainParent, sideParent] := step.unit.parents
-    | throwError "subsumption resolution should have two premises"
-  -- Which premise is which is read off the record rather than assumed: it is
-  -- the main premise that loses a literal, so it is the one with a literal
-  -- recorded against it.
+    | throwError "subsumption resolution should have two premises, got \
+      {step.unit.parents.size}"
+  -- The main premise is taken to be the first. It is the one that loses a
+  -- literal, so it has to have one recorded against it and the side premise
+  -- none; that is checked, so premises the other way round are an error
+  -- rather than a wrong proof.
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
   let some resolved := mainUse.literal
     | throwError "subsumption resolution did not record the literal it removed"
   unless sideUse.literal.isNone do
-    throwError "subsumption resolution recorded a literal against the side \
-      premise, so which premise is which is not clear"
+    throwError "subsumption resolution recorded a literal against its second \
+      premise, expected the first to be the main premise"
   step.underVars fun kept target => do
     -- The removed literal can be the only one mentioning a variable, which the
     -- conclusion then does not keep; σ may still mention it.

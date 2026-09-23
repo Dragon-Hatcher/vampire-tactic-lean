@@ -1,4 +1,5 @@
 import VampireReplay.Reconstruct.Basic
+import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Clausification.
@@ -110,9 +111,9 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
         if positive then pure h
         else
           let some quantified := (← instantiateMVars (← inferType h)).not?
-            | throwError "a universal block is not refuted by{indentExpr h}"
+            | throwError "expected the refutation of a universal block, got{indentExpr h}"
           let .forallE n τ' inner bi := quantified
-            | throwError "a universal block is not one:{indentExpr quantified}"
+            | throwError "expected a universal quantifier, got{indentExpr quantified}"
           let over := Expr.lam n τ' inner bi
           pure (mkApp4 (mkConst ``Iff.mp)
             (mkApp (mkConst ``Not) quantified)
@@ -125,51 +126,39 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
   go (boundOf sorts f).toList vars h
 
 /--
-The parts of a junction of `count` of them, taken apart rather than rebuilt.
-
-A formula's own parts are all built the moment any one of them is, so a clause
-that came from one conjunct would otherwise pay for the whole formula, and the
-formula is clausified into as many clauses as it has.
--/
-private def partsOf (fn : Name) (whole : Expr) (count : Nat) :
-    ReconstructM (Array Expr) := do
-  if count == 0 then return #[]
-  let mut parts := #[]
-  let mut rest := whole
-  for _ in [0 : count - 1] do
-    unless rest.isAppOfArity fn 2 do
-      throwError "a junction of {count} parts is not one:{indentExpr whole}"
-    parts := parts.push rest.appFn!.appArg!
-    rest := rest.appArg!
-  return parts.push rest
-
-/--
 The parts of a signed subformula, taken apart rather than built again.
 
 What a step put in a clause is a part of what it replaced, so the clause it
 reached says nothing the clause it came from had not said already.
+
+`stated` is what the signed subformula says as a clause states it, which is
+built the way `genLit` builds it or taken apart from something that was: so a
+junction, an equivalence or a negation is always in the shape its connective
+gives it, and one that is not is a mistake rather than something to rebuild.
 -/
 private def subformulaParts (sorts : Array (UInt32 × String)) (vars : Vars)
     (g : Formula) (sign : Bool) (stated : Expr) : ReconstructM (Array Expr) := do
-  let body := if sign then stated else (stated.not?).getD stated
+  let body : ReconstructM Expr := do
+    if sign then return stated
+    let some inner := stated.not?
+      | throwError "expected a negated subformula, got{indentExpr stated}"
+    return inner
   let subs := g.subformulas
-  let rebuilt : ReconstructM (Array Expr) :=
-    subs.mapM (Reconstruct.formula sorts vars)
+  let sides (e : Expr) : ReconstructM (Array Expr) := do
+    unless e.isAppOfArity ``Iff 2 do
+      throwError "expected an equivalence, got{indentExpr e}"
+    return #[e.appFn!.appArg!, e.appArg!]
+  let negated (e : Expr) : ReconstructM Expr := do
+    let some inner := e.not?
+      | throwError "expected a negation, got{indentExpr e}"
+    return inner
   match ← connectiveOf g with
-  | .and => partsOf ``And body subs.size
-  | .or => partsOf ``Or body subs.size
-  | .iff =>
-    if body.isAppOfArity ``Iff 2 then pure #[body.appFn!.appArg!, body.appArg!]
-    else rebuilt
-  | .xor =>
-    match body.not? with
-    | some inner =>
-      if inner.isAppOfArity ``Iff 2 then
-        pure #[inner.appFn!.appArg!, inner.appArg!]
-      else rebuilt
-    | none => rebuilt
-  | .not => if let some inner := body.not? then pure #[inner] else rebuilt
-  | _ => rebuilt
+  | .and => Clause.partsOf ``And (← body) subs.size
+  | .or => Clause.partsOf ``Or (← body) subs.size
+  | .iff => sides (← body)
+  | .xor => sides (← negated (← body))
+  | .not => return #[← negated (← body)]
+  | _ => subs.mapM (Reconstruct.formula sorts vars)
 
 private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
     (c : GenClause) (parent : Array (Formula × Bool)) (parentParts : Array Expr) :
@@ -246,8 +235,8 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
           let part := parts[i]!
           if let some says ← sameUpToDoubleNegation part e then
             return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], ← refuting i]
-        throwError "the clause does not say{indentExpr e}\nwhich a step it was \
-          reached from does"
+        throwError "clausify: the clause is missing the literal{indentExpr e}\n\
+          which an earlier clausification step produced"
       let body ←
         match c.parent? with
         | none => root r parts refuted
@@ -291,8 +280,8 @@ private partial def root (r : Replay) (parts : Array Expr)
       throwError "a definition's parts{indentExpr positive}\nand\
         {indentExpr negative}\nare not each other's negation"
     return mkApp (← refuted negative) (← refuted positive)
-  throwError "clausification began at a clause of {parts.size} parts, which is \
-    neither the formula nor a definition"
+  throwError "clausify: the first clause of the chain has {parts.size} literals, \
+    expected 1 (the formula) or 2 (a definition)"
 
 /--
 The step that replaced one position: what was put there follows from what was
@@ -350,7 +339,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         let some negation := against[i]?
           | throwError "a replacement without a refutation"
         return (sign, negation)
-    throwError "a part of a junction is not among what replaced it"
+    throwError "a part of a junction is missing from the step's replacements"
   -- The only replacement there is, whatever subformula it is of.
   let only : ReconstructM (Nat × Bool × Expr) := do
     let some (f, sign) := replacement[0]?
@@ -360,7 +349,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
     for (sub, j) in subs.zipIdx do
       if f == sub then
         return (j, sign, negation)
-    throwError "what a step put in place of a junction is not one of its parts"
+    throwError "the step's replacement for a junction is not one of its parts"
   -- `a` from a refutation of `¬a`, and `¬a` from one of `a`.
   let held (sign : Bool) (negation : Expr) : ReconstructM Expr := do
     if sign then
@@ -368,11 +357,12 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
     -- A refutation states itself as an arrow or as a negation according to how
     -- it was built, and the two are the same thing.
     let some inner := asNegation (← instantiateMVars (← inferType negation))
-      | throwError "a refutation is not one"
+      | throwError "expected a refutation to be a negation"
     let some innermost := asNegation inner
-      | throwError "a refutation of a negation is not one"
+      | throwError "expected the refutation of a negation to be a double negation"
     return ofNotNot innermost negation
-  match ← connectiveOf g with
+  let connective ← connectiveOf g
+  match connective with
   | .and =>
     if sign then
       let (j, _, negation) ← only
@@ -396,19 +386,17 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
     let (rightSign, rightAgainst) ← replacementOf 1
     -- What is at hand is the equivalence, or its failing; which of the two is
     -- settled by the connective and the polarity together.
-    let equivalence ← do
-      let isIff := (← connectiveOf g) matches .iff
-      if isIff == sign then
-        -- `⟦l <=> r⟧` at positive polarity, or `⟦l <+> r⟧` at negative.
-        if isIff then pure h
-        else
-          let some inner := stated.not?
-            | throwError "the failing of an exclusive or is not a negation"
-          let some innermost := inner.not?
-            | throwError "the failing of an exclusive or is not a negation"
-          pure (ofNotNot innermost h)
+    let isIff := connective matches .iff
+    let equivalence ←
+      if !isIff && !sign then
+        -- `⟦l <+> r⟧` at negative polarity is the equivalence under a double
+        -- negation.
+        let some inner := stated.not?
+          | throwError "expected a negated exclusive or, got{indentExpr stated}"
+        let some innermost := inner.not?
+          | throwError "expected a negated exclusive or, got{indentExpr stated}"
+        pure (ofNotNot innermost h)
       else pure h
-    let isIff := (← connectiveOf g) matches .iff
     if isIff == sign then
       -- The two sides are taken at opposite signs: one holds and the other
       -- fails, which the equivalence cannot allow.
@@ -433,16 +421,17 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
       return mkApp equivalence sides
   | .«forall» | .«exists» =>
     let bound := boundOf r.sorts g
-    let isExists := (← connectiveOf g) matches .«exists»
+    let isExists := connective matches .«exists»
     let some negation := against[0]?
       | throwError "a quantifier replaced by nothing"
-    if skolemises (← connectiveOf g) sign then
+    if skolemises connective sign then
       let (_, body) ← peelBlock r.sorts sign r.vars g h
       -- What the block leaves and what the step recorded in its place can meet
       -- with a double negation between them, for the same reason a literal can:
       -- the record is taken before the clausifier's own normalisation.
       let some refuted := asNegation (← instantiateMVars (← inferType negation))
-        | throwError "a quantifier's replacement is not refuted"
+        | throwError "expected the refutation of a quantifier's replacement to be \
+            a negation"
       let stated ← instantiateMVars (← inferType body)
       if ← isDefEq refuted stated then
         return mkApp negation body
@@ -468,7 +457,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
           instantiated := instantiated.insert v arg
         let mut witnessed ← held false negation
         for j in (List.range bound.size).reverse do
-          let some (v, sortName) := bound[j]? | throwError "a quantifier's variable"
+          let some (v, sortName) := bound[j]? | throwError "a quantifier has no variable {j}"
           let τ ← sortType sortName
           let rest := (bound.extract (j + 1) bound.size).toList
           let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
@@ -479,7 +468,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         return mkApp h witnessed
       else
         return mkApp negation (mkAppN h args)
-  | c => throwError "cannot replay a clausification step on {repr c}"
+  | other => throwError "cannot replay a clausification step on {repr other}"
 
 end
 
@@ -657,7 +646,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
   | .and =>
     -- The clause came from one conjunct, the recorded one.
-    let parts ← partsOf ``And stated f.subformulas.size
+    let parts ← Clause.partsOf ``And stated f.subformulas.size
     let some argument := choices[f.index]?
       | throwError "nothing says which conjunct of{indentExpr stated}\nthis \
           clause came from"
@@ -670,7 +659,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       mkLambdaFVars #[h] (mkApp rest (← projectGiven parts argument.toNat h))
   | .or =>
     -- Every disjunct is taken into the same clause, so each must lead to it.
-    let parts ← partsOf ``Or stated f.subformulas.size
+    let parts ← Clause.partsOf ``Or stated f.subformulas.size
     -- A disjunction of literals is the clause itself, up to the order its
     -- literals are in, and is carried into it following the shape of both.
     let literals ← f.subformulas.allM fun g => do
@@ -699,15 +688,14 @@ def clausify (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, premiseStated)] := step.premises
     | throwError "clausify should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "clausify without a premise"
+    | throwError "clausify should have one premise, got none"
   let some premise := parent.formula?
     | throwError "clausify should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
   forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
       fun xs target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+    let mut vars : Vars :=
+      (xs.zip step.unit.varSorts).foldl (init := {}) fun vars (x, (v, _)) => vars.insert v x
     match step.unit.genClause? with
     | some clause =>
       -- A variable the clause quantifies stands for what it was bound to;

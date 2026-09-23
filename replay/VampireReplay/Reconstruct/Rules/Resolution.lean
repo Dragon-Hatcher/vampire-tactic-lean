@@ -20,7 +20,7 @@ def resolution (step : Step) : ReconstructM Expr := do
   let #[(proof₁, stated₁), (proof₂, stated₂)] := step.premises
     | throwError "resolution should have two premises, got {step.premises.size}"
   let #[parent₁, parent₂] := step.unit.parents
-    | throwError "resolution should have two premises"
+    | throwError "resolution should have two premises, got {step.unit.parents.size}"
   let use₁ ← step.useAt 0
   let use₂ ← step.useAt 1
   let some resolved₁ := use₁.literal
@@ -103,7 +103,7 @@ def factoring (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, premiseStated)] := step.premises
     | throwError "factoring should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "factoring without a premise"
+    | throwError "factoring should have one premise, got none"
   let use ← step.useAt 0
   step.underVars fun kept target => do
     let vars ← coverVars parent kept step.unit.boundVarSorts
@@ -131,17 +131,15 @@ def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
     -- vampire's https://github.com/vprover/vampire/issues/938. The premise
     -- gives the conclusion only of the terms that do make them equal, not of
     -- every term, so there is nothing here to replay.
-    throwError "vampire resolved an inequality between{indentExpr inner}\n\
-      whose sides no substitution makes one, and recorded neither a unifier \
-      nor a constraint: this is vampire's unsoundness bug \
-      https://github.com/vprover/vampire/issues/938, and the step does not \
-      hold"
+    throwError "step {step.unit.number}: vampire resolved{indentExpr inner}\n\
+      although no substitution makes its sides equal and no constraints were \
+      recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
   let some (_, lhs, rhs) := inner.eq?
     | throwError "the literal resolved on is not an equality:{indentExpr inner}"
   underConstraints step vars rest fun equal => do
     let some made ← equalUnder equal lhs rhs
-      | throwError "the sides of{indentExpr inner}\nare not one term even with \
-          every pair the unifier deferred equal"
+      | throwError "step {step.unit.number}: the sides of{indentExpr inner}\n\
+          are not equal even assuming the unifier's deferred constraints"
     mkAppOptM ``absurd #[some inner, some rest, some made, some h]
 
 /--
@@ -158,7 +156,8 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     | throwError "equality resolution with deletion should have one premise, \
       got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "equality resolution with deletion without a premise"
+    | throwError "equality resolution with deletion should have one premise, \
+      got none"
   let use ← step.useAt 0
   let some resolved := use.literal
     | throwError "equality resolution with deletion did not record the \
@@ -204,7 +203,7 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
     | throwError "equality factoring should have one premise, got \
       {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "equality factoring without a premise"
+    | throwError "equality factoring should have one premise, got none"
   let uses := step.unit.premiseUses.filter (·.premise == parent.number)
   let #[selected, side] := uses
     | throwError "equality factoring recorded {uses.size} uses of its premise, \

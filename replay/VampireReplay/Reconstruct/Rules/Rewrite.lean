@@ -1,4 +1,5 @@
 import VampireReplay.Reconstruct.Basic
+import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Rewriting with an equation.
@@ -130,8 +131,12 @@ that side in the premise's own variables.
 private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
     (proof stated : Expr) : ReconstructM (Expr × Expr × Expr) := do
   let some (_, lhs, rhs) := (← instantiateMVars stated).eq?
-    | throwError "the equation is not one:{indentExpr stated}"
-  if ← recordedSideIsLeft parent use ((use.literal.map (·.toNat)).getD 0) then
+    | throwError "expected an equation from step {parent.number}, got\
+        {indentExpr stated}"
+  let some literal := use.literal
+    | throwError "no literal was recorded for the equation used from step \
+        {parent.number}"
+  if ← recordedSideIsLeft parent use literal.toNat then
     return (lhs, rhs, proof)
   return (rhs, lhs, ← mkEqSymm proof)
 
@@ -149,11 +154,11 @@ private structure Rewritten where
 private def rewrittenOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars) :
     ReconstructM Rewritten := do
   let some literal := use.literal
-    | throwError "the step did not record the literal it rewrote"
+    | throwError "no rewritten literal was recorded against step {parent.number}"
   let some rewritten := use.term
-    | throwError "the step did not record the term it rewrote"
+    | throwError "no rewritten term was recorded against step {parent.number}"
   let some clause := parent.clause?
-    | throwError "the premise being rewritten is not a clause"
+    | throwError "the rewritten premise, step {parent.number}, is not a clause"
   let bindings := Std.HashMap.ofList use.bindings.toList
   return { literals := clause.literals, bindings, literal := literal.toNat
            wholePremise := use.rewritesWholePremise
@@ -187,19 +192,6 @@ private def clauseAbstracting (rw : Rewritten) (vars : Vars) (x : Option Expr) :
       literalAt vars rw.bindings l none
   sharedClause (junction ``Or ``False parts)
 
-/-- The literals of a clause of `count` of them, taken apart rather than built. -/
-private def clausePartsOf (whole : Expr) (count : Nat) :
-    ReconstructM (Array Expr) := do
-  if count == 0 then return #[]
-  let mut parts := #[]
-  let mut rest := whole
-  for _ in [0 : count - 1] do
-    unless rest.isAppOfArity ``Or 2 do
-      throwError "a clause of {count} literals is not one:{indentExpr whole}"
-    parts := parts.push rest.appFn!.appArg!
-    rest := rest.appArg!
-  return parts.push rest
-
 /--
 What the premise says once the rewrite is made: its own literals, with the one
 the inference rewrote in replaced.
@@ -212,7 +204,7 @@ private def clauseRewritten (rw : Rewritten) (vars : Vars) (stated to : Expr) :
     ReconstructM Expr := do
   if rw.wholePremise then
     return ← clauseAbstracting rw vars (some to)
-  let parts ← clausePartsOf stated rw.literals.size
+  let parts ← Clause.partsOf ``Or stated rw.literals.size
   let some l := rw.literals[rw.literal]?
     | throwError "the premise has no literal {rw.literal}"
   let rewritten ← literalAt vars rw.bindings l (some (rw.target, to))
@@ -221,9 +213,10 @@ private def clauseRewritten (rw : Rewritten) (vars : Vars) (stated to : Expr) :
 /-- `forward_demodulation`: the premise with one literal rewritten. -/
 def demodulation (step : Step) : ReconstructM Expr := do
   let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
-    | throwError "demodulation should have two premises, got {step.premises.size}"
+    | throwError "{step.rule.name} should have two premises, got {step.premises.size}"
   let #[mainParent, sideParent] := step.unit.parents
-    | throwError "demodulation should have two premises"
+    | throwError "{step.rule.name} should have two premises, got \
+        {step.unit.parents.size}"
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
   step.underVars fun kept target => do
@@ -251,13 +244,14 @@ at the unifier, with the rewritten literal in place of the equation's.
 -/
 def superposition (step : Step) : ReconstructM Expr := do
   let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
-    | throwError "superposition should have two premises, got {step.premises.size}"
+    | throwError "{step.rule.name} should have two premises, got {step.premises.size}"
   let #[mainParent, sideParent] := step.unit.parents
-    | throwError "superposition should have two premises"
+    | throwError "{step.rule.name} should have two premises, got \
+        {step.unit.parents.size}"
   let mainUse ← step.useAt 0
   let sideUse ← step.useAt 1
   let some equationLiteral := sideUse.literal
-    | throwError "superposition did not record which literal is the equation"
+    | throwError "{step.rule.name} did not record which literal is the equation"
   step.underVars fun kept target => do
     let vars ← coverVars sideParent (← coverVars mainParent kept)
       step.unit.boundVarSorts
@@ -289,9 +283,10 @@ def superposition (step : Step) : ReconstructM Expr := do
             -- once composed with that.
             underConstraints step vars inner fun equal => do
               let some same ← equalUnder equal source «from»
-                | throwError "the term rewritten{indentExpr source}\nis not \
-                    the side of the equation{indentExpr «from»}\neven with \
-                    every pair the unifier deferred equal"
+                | throwError "step {step.unit.number}: the rewritten term\
+                    {indentExpr source}\nand the side of the equation\
+                    {indentExpr «from»}\nare not equal even assuming the \
+                    unifier's deferred constraints"
               let bridged ← mkEqTrans same heq
               placeLiteral inner (← rewriteWith rw vars bridged to i h)))
     pure body
@@ -309,7 +304,7 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, premiseStated)] := step.premises
     | throwError "inner rewriting should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "inner rewriting without a premise"
+    | throwError "inner rewriting should have one premise, got none"
   let some clause := parent.clause?
     | throwError "inner rewriting should be given a clause"
   let use ← step.useAt 0
@@ -323,7 +318,7 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let args ← argsFor parent vars
     let premiseAt := mkAppN premiseProof args
-    let parts ← clausePartsOf (← instantiateForall premiseStated args) count
+    let parts ← Clause.partsOf ``Or (← instantiateForall premiseStated args) count
 
     let some equation := parts[i]?.bind (·.not?)
       | throwError "the literal inner rewriting rewrote with is not a disequality"

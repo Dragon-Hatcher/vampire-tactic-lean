@@ -53,8 +53,8 @@ vampire gave it makes the conclusion rebuild to the same term.
 partial def walk (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt32 Term)
     (vars : Vars) (premise conclusion : Formula) : ReconstructM (Expr × Expr) := do
   match ← connectiveOf premise with
-  | .and => congrJunction ``And ``True ``and_congr
-  | .or => congrJunction ``Or ``False ``or_congr
+  | .and => junctionCongr ``And ``True ``and_congr
+  | .or => junctionCongr ``Or ``False ``or_congr
   | .«forall» =>
     unless (← connectiveOf conclusion) matches .«forall» do
       throwError "skolemisation should keep a universal quantifier"
@@ -85,7 +85,7 @@ where
     boundSorts sorts f.boundVars
 
   /-- An n-ary junction, congruent argument by argument. -/
-  congrJunction (fn unit lemma : Name) : ReconstructM (Expr × Expr) := do
+  junctionCongr (fn unit lemma : Name) : ReconstructM (Expr × Expr) := do
     unless (← connectiveOf conclusion) matches .and | .or do
       throwError "skolemisation should keep a junction"
     unless premise.subformulas.size == conclusion.subformulas.size do
@@ -125,7 +125,7 @@ def skolemize (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, _)] := step.premises
     | throwError "skolemize should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "skolemize without a premise"
+    | throwError "skolemize should have one premise, got none"
   let some premise := parent.formula?
     | throwError "skolemize should be given a formula"
   let some conclusion := step.unit.formula?

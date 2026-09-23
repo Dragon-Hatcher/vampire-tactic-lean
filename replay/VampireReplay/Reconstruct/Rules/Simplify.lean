@@ -110,71 +110,83 @@ as `f` does.
 This is `SimplifyFalseTrue::innerSimplify`, case for case: what it returns is
 what that returns, and the equivalence is built out of the one lemma each of its
 rewrites stands on.
+
+Returns what was given as well, since a lemma about it has to be stated at it.
+What the formula says as given is put together from what its parts said, as
+`Normalize.normalize` does, so that no part of it is rebuilt at each node above
+it.
 -/
 partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formula) :
-    ReconstructM (Expr × Option Expr) := do
-  let given ← Reconstruct.formula sorts vars f
-  let unchanged : ReconstructM (Expr × Option Expr) := return (given, none)
+    ReconstructM (Expr × Expr × Option Expr) := do
   let sub (i : Nat) : ReconstructM Formula := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     return g
-  match ← connectiveOf f with
+  let connective ← connectiveOf f
+  match connective with
   -- A truth value is what it is, and a literal has nothing in it to absorb.
   -- (`innerSimplify` descends into an unshared literal's arguments, which is
   -- where a FOOL formula hides a boolean term; nothing in this fragment has
   -- one, and a step that simplified inside one would be caught by the check
   -- that what was proved is what the step claims.)
-  | .literal | .«true» | .«false» | .boolTerm => unchanged
+  | .literal | .«true» | .«false» | .boolTerm =>
+    let given ← Reconstruct.formula sorts vars f
+    return (given, given, none)
   | .not =>
-    let (inner, innerProof) ← simplify sorts vars (← sub 0)
+    let (innerGiven, inner, innerProof) ← simplify sorts vars (← sub 0)
+    let given := mkApp (mkConst ``Not) innerGiven
     let congruence ← congr1? ``not_congr innerProof
-    let compose (result absorption : Expr) : ReconstructM (Expr × Option Expr) :=
-      return (result, ← iffTrans? congruence (some absorption))
+    let compose (result absorption : Expr) : ReconstructM (Expr × Expr × Option Expr) :=
+      return (given, result, ← iffTrans? congruence (some absorption))
     if inner.isConstOf ``False then
       compose (mkConst ``True) (← ofCore ``not_false_eq_true #[])
     else if inner.isConstOf ``True then
       compose (mkConst ``False) (← ofCore ``not_true_eq_false #[])
     else
-      return (mkApp (mkConst ``Not) inner, congruence)
+      return (given, mkApp (mkConst ``Not) inner, congruence)
   | .and | .or =>
-    let isAnd := (← connectiveOf f) matches .and
+    let isAnd := connective matches .and
     let absorbing := mkConst (if isAnd then ``False else ``True)
-    let givens ← f.subformulas.mapM (Reconstruct.formula sorts vars)
     -- Left to right, and stopping where an argument absorbs the junction:
     -- vampire returns there, leaving the arguments after it as they stand.
+    let mut givens : Array Expr := #[]
     let mut results : Array Expr := #[]
     let mut proofs : Array (Option Expr) := #[]
     let mut absorbed := false
-    for (g, given) in f.subformulas.zip givens do
+    for g in f.subformulas do
       if absorbed then
+        let given ← Reconstruct.formula sorts vars g
+        givens := givens.push given
         results := results.push given
         proofs := proofs.push none
       else
-        let (result, proof) ← simplify sorts vars g
+        let (given, result, proof) ← simplify sorts vars g
         if result == absorbing then absorbed := true
+        givens := givens.push given
         results := results.push result
         proofs := proofs.push proof
+    let given :=
+      if isAnd then junction ``And ``True givens else junction ``Or ``False givens
     let congruence ←
       if proofs.all Option.isNone then pure none
       else do
         let filled ← (proofs.zip givens).mapM fun (proof, given) => iffOrRefl given proof
         pure (some (← congrJunction (if isAnd then ``and_congr else ``or_congr) filled))
     let (result, absorption) ← absorbUnits isAnd results
-    return (result, ← iffTrans? congruence absorption)
+    return (given, result, ← iffTrans? congruence absorption)
   | .imp =>
-    let left ← Reconstruct.formula sorts vars (← sub 0)
-    let rightGiven ← Reconstruct.formula sorts vars (← sub 1)
-    let (right, rightProof) ← simplify sorts vars (← sub 1)
+    let (rightGiven, right, rightProof) ← simplify sorts vars (← sub 1)
     -- `_ → ⊤` is `⊤` whatever the antecedent, which is why vampire tests the
     -- consequent before it walks the antecedent at all.
     if right.isConstOf ``True then
-      return (mkConst ``True,
+      let left ← Reconstruct.formula sorts vars (← sub 0)
+      return (← mkArrow left rightGiven, mkConst ``True,
         ← iffTrans? (← congr2? ``imp_congr left rightGiven none rightProof)
           (some (← ofCore ``implies_true #[left])))
-    let (antecedent, leftProof) ← simplify sorts vars (← sub 0)
+    let (left, antecedent, leftProof) ← simplify sorts vars (← sub 0)
+    let given ← mkArrow left rightGiven
     let congruence ← congr2? ``imp_congr left rightGiven leftProof rightProof
-    let compose (result absorption : Expr) : ReconstructM (Expr × Option Expr) :=
-      return (result, ← iffTrans? congruence (some absorption))
+    let compose (result absorption : Expr) : ReconstructM (Expr × Expr × Option Expr) :=
+      return (given, result, ← iffTrans? congruence (some absorption))
     if antecedent.isConstOf ``True then
       compose right (← ofCore ``true_implies #[right])
     else if antecedent.isConstOf ``False then
@@ -183,37 +195,38 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
       compose (mkApp (mkConst ``Not) antecedent)
         (← mkAppOptM ``imp_false #[some antecedent])
     else
-      return (← mkArrow antecedent right, congruence)
+      return (given, ← mkArrow antecedent right, congruence)
   | .iff | .xor =>
-    let isIff := (← connectiveOf f) matches .iff
-    let (left, leftProof) ← simplify sorts vars (← sub 0)
-    let (right, rightProof) ← simplify sorts vars (← sub 1)
+    let isIff := connective matches .iff
+    let (leftGiven, left, leftProof) ← simplify sorts vars (← sub 0)
+    let (rightGiven, right, rightProof) ← simplify sorts vars (← sub 1)
+    let negate (e : Expr) := mkApp (mkConst ``Not) e
+    let equivalenceGiven := mkApp2 (mkConst ``Iff) leftGiven rightGiven
+    let given := if isIff then equivalenceGiven else negate equivalenceGiven
     -- `l <+> r` is `¬(l ↔ r)`, so both connectives are the same congruence
     -- with a negation around one of them.
-    let inner ← congr2? ``iff_congr (← Reconstruct.formula sorts vars (← sub 0))
-      (← Reconstruct.formula sorts vars (← sub 1)) leftProof rightProof
+    let inner ← congr2? ``iff_congr leftGiven rightGiven leftProof rightProof
     let congruence ← if isIff then pure inner else congr1? ``not_congr inner
-    let compose (result absorption : Expr) : ReconstructM (Expr × Option Expr) :=
-      return (result, ← iffTrans? congruence (some absorption))
+    let compose (result absorption : Expr) : ReconstructM (Expr × Expr × Option Expr) :=
+      return (given, result, ← iffTrans? congruence (some absorption))
     let constant (e : Expr) : Option Bool :=
       if e.isConstOf ``True then some true
       else if e.isConstOf ``False then some false
       else none
     let truth := mkConst ``True
     let falsity := mkConst ``False
-    let negate (e : Expr) := mkApp (mkConst ``Not) e
     match constant left, constant right with
     | some false, some false =>
       if isIff then compose truth (← ofCore ``iff_self #[mkConst ``False])
       else compose falsity (← mkAppOptM ``xor_false_false #[])
     | some false, some true =>
-      if isIff then compose falsity (← pure (mkConst ``false_iff_true))
+      if isIff then compose falsity (mkConst ``false_iff_true)
       else compose truth (← mkAppOptM ``xor_false_true #[])
     | some false, none =>
       if isIff then compose (negate right) (← ofCore ``false_iff #[right])
       else compose right (← mkAppOptM ``xor_false_left #[some right])
     | some true, some false =>
-      if isIff then compose falsity (← pure (mkConst ``true_iff_false))
+      if isIff then compose falsity (mkConst ``true_iff_false)
       else compose truth (← mkAppOptM ``xor_true_false #[])
     | some true, some true =>
       if isIff then compose truth (← ofCore ``iff_self #[mkConst ``True])
@@ -229,9 +242,9 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
       else compose (negate left) (← mkAppOptM ``xor_true_right #[some left])
     | none, none =>
       let equivalence := mkApp2 (mkConst ``Iff) left right
-      return (if isIff then equivalence else negate equivalence, congruence)
+      return (given, if isIff then equivalence else negate equivalence, congruence)
   | .«forall» | .«exists» =>
-    let isForall := (← connectiveOf f) matches .«forall»
+    let isForall := connective matches .«forall»
     let bound := boundSorts sorts f.boundVars
     quantified sorts (← sub 0) isForall bound.toList vars
   | c => throwError "cannot absorb the truth values of a formula with \
@@ -250,22 +263,24 @@ domains are never empty, and `someElement` is what says so here.
 -/
 partial def quantified (sorts : Array (UInt32 × String)) (body : Formula)
     (isForall : Bool) (rest : List (UInt32 × String)) (vars : Vars) :
-    ReconstructM (Expr × Option Expr) := do
+    ReconstructM (Expr × Expr × Option Expr) := do
   match rest with
   | [] => simplify sorts vars body
   | (v, sortName) :: rest =>
     let τ ← sortType sortName
-    let (result, congruence, inner) ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-      let (inner, innerProof) ← quantified sorts body isForall rest (vars.insert v x)
+    let (given, result, congruence, inner) ←
+        withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
+      let (innerGiven, inner, innerProof) ←
+        quantified sorts body isForall rest (vars.insert v x)
       let congruence ← innerProof.mapM fun proof => do
         mkAppM (if isForall then ``forall_congr' else ``exists_congr)
           #[← mkLambdaFVars #[x] proof]
-      let result ←
-        if isForall then mkForallFVars #[x] inner
-        else mkAppM ``Exists #[← mkLambdaFVars #[x] inner]
-      return (result, congruence, inner)
-    let compose (result absorption : Expr) : ReconstructM (Expr × Option Expr) :=
-      return (result, ← iffTrans? congruence (some absorption))
+      let bind (e : Expr) : ReconstructM Expr := do
+        if isForall then mkForallFVars #[x] e
+        else mkAppM ``Exists #[← mkLambdaFVars #[x] e]
+      return (← bind innerGiven, ← bind inner, congruence, inner)
+    let compose (result absorption : Expr) : ReconstructM (Expr × Expr × Option Expr) :=
+      return (given, result, ← iffTrans? congruence (some absorption))
     -- A constant body is closed, so what the binder ranges over drops out of
     -- what the formula says.
     if inner.isConstOf ``True then
@@ -281,7 +296,7 @@ partial def quantified (sorts : Array (UInt32 × String)) (body : Formula)
       else
         compose (mkConst ``False) (← mkAppM ``iff_false_intro #[← mkAppOptM ``exists_false #[some τ]])
     else
-      return (result, congruence)
+      return (given, result, congruence)
 
 end
 
@@ -295,11 +310,11 @@ def reduceFalseTrue (step : Step) : ReconstructM Expr := do
   let #[(premiseProof, _)] := step.premises
     | throwError "reduce_false_true should have one premise, got {step.premises.size}"
   let some parent := step.unit.parents[0]?
-    | throwError "reduce_false_true without a premise"
+    | throwError "reduce_false_true should have one premise, got none"
   let some premise := parent.formula?
     | throwError "reduce_false_true should be given a formula"
   match ← simplify (parent.varSorts ++ step.unit.varSorts) {} premise with
-  | (_, some proof) => mkAppM ``Iff.mp #[proof, premiseProof]
-  | (_, none) => pure premiseProof
+  | (_, _, some proof) => mkAppM ``Iff.mp #[proof, premiseProof]
+  | (_, _, none) => pure premiseProof
 
 end Vampire.Reconstruct.Simplify

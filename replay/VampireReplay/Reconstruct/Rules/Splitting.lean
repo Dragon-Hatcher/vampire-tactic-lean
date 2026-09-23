@@ -64,6 +64,16 @@ private def splitVars (u : Vampire.Unit) (arguments : Array UInt32) :
   u.varSorts.filter fun (v, _) => !arguments.contains v
 
 /--
+That the half a name stands against holds at every value of the split
+variables `split`, the others standing for what `vars` has for them. The name
+says that this fails.
+-/
+private def halfHolds (split : Array (UInt32 × String)) (rest : Array Literal)
+    (vars : Vars) : ReconstructM Expr :=
+  withVars split vars fun inner bound => do
+    mkForallFVars bound (junction ``Or ``False (← rest.mapM (Reconstruct.literal inner)))
+
+/--
 Binds the name a general splitting introduced: that the half it was split from
 fails at some value of the split variable.
 -/
@@ -73,8 +83,7 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
   let sorts := u.varSorts
   let bound := boundSorts sorts arguments
   let definition ← withVars bound {} fun vars locals => do
-    let inner ← withVars (splitVars u arguments) vars fun vars split => do
-      mkForallFVars split (junction ``Or ``False (← rest.mapM (Reconstruct.literal vars)))
+    let inner ← halfHolds (splitVars u arguments) rest vars
     mkLambdaFVars locals (mkApp (mkConst ``Not) inner)
   modify fun s => { s with introduced := s.introduced.insert name definition }
 
@@ -90,18 +99,12 @@ def component (step : Step) : ReconstructM Expr := do
   let { arguments, rest, restAt, nameAt, .. } ← componentOf step.unit
   let some clause := step.unit.clause?
     | throwError "a general splitting component is not a clause"
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs _target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+  step.underVars fun vars _target => do
     let parts ← clause.literals.mapM (Reconstruct.literal vars)
     let suffix := suffixJunctions ``Or ``False parts
     let halves ← rest.mapM (Reconstruct.literal vars)
-    -- What the name says, at the variables it is applied to.
-    let quantified ← withVars (splitVars step.unit arguments) vars fun inner split => do
-      mkForallFVars split
-        (junction ``Or ``False (← rest.mapM (Reconstruct.literal inner)))
+    -- What the name denies, at the variables it is applied to.
+    let quantified ← halfHolds (splitVars step.unit arguments) rest vars
     let held ← withLocalDeclD `h quantified fun h => do
       -- The half holds of the split variable in particular.
       let args ← (splitVars step.unit arguments).mapM fun (v, sortName) => do
@@ -120,9 +123,7 @@ def component (step : Step) : ReconstructM Expr := do
       mkLambdaFVars #[h]
         (← injectGiven parts nameAt (← mkExpectedTypeHint h (parts[nameAt]!))
           (suffix? := some suffix))
-    mkLambdaFVars xs
-      (← mkAppM ``Or.elim
-        #[← mkAppOptM ``Classical.em #[some quantified], held, failed])
+    mkAppM ``Or.elim #[← mkAppOptM ``Classical.em #[some quantified], held, failed]
 
 /--
 `general_splitting`: the other half, under the denial of the name.
@@ -137,23 +138,18 @@ def general (step : Step) : ReconstructM Expr := do
     | throwError "a general splitting should have two premises, got \
       {step.premises.size}"
   let #[parent, component] := step.unit.parents
-    | throwError "a general splitting should have two premises"
+    | throwError "a general splitting should have two premises, got \
+      {step.unit.parents.size}"
   let some source := parent.clause?
     | throwError "a general splitting is not given a clause"
   let some conclusion := step.unit.clause?
     | throwError "a general splitting is not a clause"
   let { name, arguments, rest, .. } ← componentOf component
   let split := splitVars component arguments
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let mut vars : Vars := {}
-    for (x, (v, _)) in xs.zip step.unit.varSorts do
-      vars := vars.insert v x
+  step.underVars fun vars target => do
     let parts ← conclusion.literals.mapM (Reconstruct.literal vars)
-    -- What the name says, at the variables it is applied to.
-    let quantified ← withVars split vars fun inner bound => do
-      mkForallFVars bound
-        (junction ``Or ``False (← rest.mapM (Reconstruct.literal inner)))
+    -- What the name denies, at the variables it is applied to.
+    let quantified ← halfHolds split rest vars
     -- The conclusion denies the name; the rest of it is the other half.
     let mut denied := none
     for (l, j) in conclusion.literals.zipIdx do
@@ -205,10 +201,8 @@ def general (step : Step) : ReconstructM Expr := do
         if let some j := conclusionLiterals.findIdx? (· == l) then
           return ← injectGiven parts j hl (suffix? := some suffix)
         throwError "the literal{indentExpr (← instantiateMVars (← inferType hl))}\n\
-          is neither of the half the name stands against nor of the conclusion")
+          is in neither the split-off half nor the conclusion")
         (mkAppN clauseProof args))
-    mkLambdaFVars xs
-      (← mkAppM ``Or.elim
-        #[← mkAppOptM ``Classical.em #[some quantified], held, failed])
+    mkAppM ``Or.elim #[← mkAppOptM ``Classical.em #[some quantified], held, failed]
 
 end Vampire.Reconstruct.Splitting

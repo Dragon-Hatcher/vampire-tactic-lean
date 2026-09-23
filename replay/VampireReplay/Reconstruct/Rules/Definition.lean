@@ -16,22 +16,26 @@ namespace Vampire.Reconstruct.Definition
 
 open Lean Meta
 
+/--
+A formula without its leading universal quantifiers: a definition is stated
+quantified over the variables of what it defines.
+-/
+private def stripForalls (f : Formula) : ReconstructM Formula := do
+  let mut f := f
+  repeat
+    unless (← connectiveOf f) matches .«forall» do break
+    let some body := f.subformulas[0]? | throwError "a quantifier without a body"
+    f := body
+  return f
+
 /-- The single literal a definition step states. -/
-private partial def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
+private def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
   if let some c := u.clause? then
     let some l := c.literals[0]?
       | throwError "definition step {u.number} states no literal"
     return l
   if let some f := u.formula? then
-    -- A definition can be stated with its variables quantified.
-    let rec descend (f : Formula) : ReconstructM (Option Literal) := do
-      if let some l := f.literal? then
-        return some l
-      if (← connectiveOf f) matches .«forall» then
-        let some body := f.subformulas[0]? | return none
-        return ← descend body
-      return none
-    if let some l ← descend f then
+    if let some l := (← stripForalls f).literal? then
       return l
   throwError "definition step {u.number} does not state an equation"
 
@@ -110,11 +114,7 @@ private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit 
     | throwError "a predicate_definition step should state a formula"
   Reconstruct.withVars u.varSorts {} fun vars _ => do
     -- The definition is quantified over the free variables of what it names.
-    let mut f := f
-    repeat
-      unless (← connectiveOf f) matches .«forall» do break
-      let some body := f.subformulas[0]? | throwError "quantifier without a body"
-      f := body
+    let f ← stripForalls f
     let (name, body) ←
       match ← connectiveOf f with
       | .iff =>
@@ -175,16 +175,23 @@ def byDefinition (conclusion : Expr) : ReconstructM Expr :=
     mkLambdaFVars xs proof
 
 /--
+The definitions a `definition_unfolding` step unfolds, by the symbol each
+defines: the premise stating it, the variables the symbol is applied to, the
+side of the equation it unfolds to, a proof of the equation, and whether the
+symbol is its right-hand side.
+-/
+private abbrev Definitions :=
+  Std.HashMap String (Vampire.Unit × Array UInt32 × Term × Expr × Bool)
+
+/--
 The equations `definition_unfolding` unfolds with, by the symbol each defines.
 
 `FunctionDefinition::applyDefinitions` takes the definitions it used as
 premises of the step, one per use, and each is a unit equation whose left-hand
 side applies the defined symbol to distinct variables.
 -/
-private def definitions (step : Step) :
-    ReconstructM (Std.HashMap String
-      (Vampire.Unit × Array UInt32 × Term × Expr × Bool)) := do
-  let mut out := {}
+private def definitions (step : Step) : ReconstructM Definitions := do
+  let mut out : Definitions := {}
   for (parent, (proof, _)) in (step.unit.parents.zip step.premises).extract 1 do
     let some clause := parent.clause?
       | throwError "a definition premise of definition_unfolding is not a clause"
@@ -197,17 +204,19 @@ private def definitions (step : Step) :
     -- Either side of an equation can be the symbol it defines, and the
     -- equation alone does not say which; the step records it.
     let some use := step.unit.premiseUses.find? (·.premise == parent.number)
-      | throwError "nothing says which side of the definition in step \
-        {parent.number} is the symbol it defines"
+      | throwError "definition_unfolding did not record which side of the \
+        definition in step {parent.number} is the defined symbol"
     let some side := use.term
-      | throwError "nothing says which side of the definition in step \
-        {parent.number} is the symbol it defines"
+      | throwError "definition_unfolding did not record which side of the \
+        definition in step {parent.number} is the defined symbol"
     let (defined, body, flipped) ←
       if side == left then pure (left, right, false)
       else if side == right then pure (right, left, true)
-      else throwError "what a definition defines is neither side of it"
+      else throwError "the recorded defined side {side} is neither side of the \
+        definition in step {parent.number}"
     let some symbol := defined.symbol?
-      | throwError "what a definition defines is not an applied symbol"
+      | throwError "the defined side {defined} of the definition in step \
+        {parent.number} is not an applied symbol"
     let args ← defined.args.mapM fun arg => do
       unless arg.isVar do
         throwError "the definition of {symbol.name} applies it to {arg}, \
@@ -215,6 +224,23 @@ private def definitions (step : Step) :
       return arg.var
     out := out.insert symbol.name (parent, args, body, proof, flipped)
   return out
+
+mutual
+
+/--
+Arguments as they stand and unfolded, with, for each unfolding changed, a proof
+that the two are equal.
+-/
+private partial def unfoldArgs (defs : Definitions) (vars : Vars) (ts : Array Term) :
+    ReconstructM (Array Expr × Array Expr × Array (Option Expr)) := do
+  let before ← ts.mapM (term vars)
+  let mut args := #[]
+  let mut equal := #[]
+  for (arg, given) in ts.zip before do
+    let (unfolded, proof) ← unfold defs vars arg
+    args := args.push unfolded
+    equal := equal.push (if unfolded == given then none else some proof)
+  return (before, args, equal)
 
 /--
 `t` at the unfolded definitions, with a proof that it equals what unfolding
@@ -224,22 +250,14 @@ The definition's right-hand side is not unfolded again -- the definitions were
 unfolded in dependency order before any clause was -- but the arguments the
 symbol was applied to are.
 -/
-private partial def unfold
-    (defs : Std.HashMap String
-      (Vampire.Unit × Array UInt32 × Term × Expr × Bool))
-    (vars : Vars) (t : Term) : ReconstructM (Expr × Expr) := do
+private partial def unfold (defs : Definitions) (vars : Vars) (t : Term) :
+    ReconstructM (Expr × Expr) := do
   if t.isVar then
     let e ← term vars t
     return (e, ← mkEqRefl e)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
-  let before ← t.args.mapM (term vars)
-  let mut args := #[]
-  let mut equal := #[]
-  for (arg, given) in t.args.zip before do
-    let (unfolded, proof) ← unfold defs vars arg
-    args := args.push unfolded
-    equal := equal.push (if unfolded == given then none else some proof)
+  let (before, args, equal) ← unfoldArgs defs vars t.args
   let congruence ← congrApplied symbol.name before args equal
   let applied ← applySymbol symbol.name args
   match defs[symbol.name]? with
@@ -263,6 +281,8 @@ private partial def unfold
       bodyVars := bodyVars.insert v e
     return (← term bodyVars body, ← mkEqTrans congruence equation)
 
+end
+
 /--
 `definition_unfolding`: the premise with every use of a defined symbol replaced
 by what defines it.
@@ -275,9 +295,9 @@ dependency order before any clause was.
 -/
 def definitionUnfolding (step : Step) : ReconstructM Expr := do
   let some (clauseProof, _) := step.premises[0]?
-    | throwError "definition_unfolding without a premise"
+    | throwError "definition_unfolding should have at least one premise, got none"
   let some parent := step.unit.parents[0]?
-    | throwError "definition_unfolding without a premise"
+    | throwError "definition_unfolding should have at least one premise, got none"
   let some clause := parent.clause?
     | throwError "definition_unfolding should be given a clause"
   let defs ← definitions step
@@ -289,13 +309,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
-        let before ← l.args.mapM (term vars)
-        let mut args := #[]
-        let mut equal := #[]
-        for (arg, given) in l.args.zip before do
-          let (unfolded, proof) ← unfold defs vars arg
-          args := args.push unfolded
-          equal := equal.push (if unfolded == given then none else some proof)
+        let (before, args, equal) ← unfoldArgs defs vars l.args
         let congruence ←
           if l.isEquality then
             let some sortName := l.sort?
@@ -327,23 +341,25 @@ private partial def weaken (premise stated conclusion : Expr) :
   if let (.forallE _ d body _, .forallE n d' body' _) := (← whnf stated, conclusion) then
     unless (← isProp d) && !body.hasLooseBVars do
       unless ← isDefEq d d' do
-        throwError "the definition binds{indentExpr d}\nwhere what is kept of \
-          it binds{indentExpr d'}"
+        throwError "the definition binds{indentExpr d}\nbut the implication kept \
+          from it binds{indentExpr d'}"
       return ← withLocalDeclD n d' fun x => do
         let inner ← weaken (mkApp premise x) (body.instantiate1 x) (body'.instantiate1 x)
         mkLambdaFVars #[x] inner
   let some (antecedent, consequent) := conclusion.arrow?
-    | throwError "what is kept of a definition is not an implication:\
-      {indentExpr conclusion}"
+    | throwError "expected the kept part of a definition to be an implication, \
+      got{indentExpr conclusion}"
   if let some (left, right) := stated.iff? then
     if (← isDefEq left antecedent) && (← isDefEq right consequent) then
       return ← mkAppM ``Iff.mp #[premise]
     if (← isDefEq right antecedent) && (← isDefEq left consequent) then
       return ← mkAppM ``Iff.mpr #[premise]
-    throwError "neither direction of{indentExpr stated}\nis{indentExpr conclusion}"
+    throwError "neither direction of{indentExpr stated}\nis the implication \
+      kept{indentExpr conclusion}"
   if ← isDefEq stated conclusion then
     return premise
-  throwError "cannot keep{indentExpr conclusion}\nof{indentExpr stated}"
+  throwError "the implication kept{indentExpr conclusion}\ndoes not match the \
+    definition{indentExpr stated}"
 
 /--
 `pure_predicate_removal`: a step that does not follow from its premise.
@@ -360,10 +376,9 @@ off (`updr=off`) rather than meeting the step. Reaching it means the forcing was
 undone.
 -/
 def purePredicateRemoval (step : Step) : ReconstructM Expr := do
-  throwError "step {step.unit.number} replaced a pure predicate by a truth \
-    value, which preserves satisfiability but does not follow from the \
-    premise, so it cannot be replayed; the tactic forces `updr=off` to keep \
-    the pass out of the search"
+  throwError "step {step.unit.number}: pure predicate removal preserves \
+    satisfiability but is not an entailment, so it cannot be replayed; the \
+    tactic forces `updr=off` to prevent it"
 
 /--
 `unused_predicate_definition_removal`: one direction of a definition, the only
@@ -397,9 +412,9 @@ private def splitNameOf (u : Vampire.Unit) : ReconstructM (String × Term) := do
   let some symbol := l.symbol?
     | throwError "literal has unknown predicate {l.predicate}"
   let #[t] := l.args
-    | throwError "inequality splitting named a term with \
-      {l.args.size} arguments rather than one; the extra ones are the sorts a \
-      polymorphic equality ranges over, which this fragment does not have"
+    | throwError "step {u.number}: the inequality splitting name {symbol.name} \
+      takes {l.args.size} arguments, expected one (polymorphic equality is not \
+      supported)"
   return (symbol.name, t)
 
 /--
@@ -459,7 +474,7 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
     -- variables; it records no unifier because there is none to record.
     let vars ← coverVars parent kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
-      Clause.instantiateAt parent vars proof stated
+      Clause.instantiateKept parent vars proof stated
     carryAll premiseType target premiseAt
 
 /-- Whether a rule introduces a name by defining it. -/
@@ -503,13 +518,10 @@ def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
     | throwError "no premise in position {i}"
   let some parent := step.unit.parents[i]?
     | throwError "no premise in position {i}"
-  let conclusion ← step.conclusion
-  if ← isDefEq (← instantiateMVars stated) conclusion then
-    return proof
   -- The replacement rebuilds the clause, so its literals can come back in
   -- another order, and a literal over the proxy is an application of what it
   -- is bound to rather than an equation: each is placed where it went.
-  relateLiterals step parent proof stated
+  Clause.restatedLiterals step parent proof stated
 
 /--
 `equality_proxy_axiom`: an axiom about the proxy, which is equality.
