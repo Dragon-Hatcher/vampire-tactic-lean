@@ -64,9 +64,8 @@ private def replay (u : Vampire.Unit) (context : LocalContext) :
       let mut proof := proof
       let mut stated := stated
       for name in parent.splits do
-        let some i := names.findIdx? (· == name)
+        let some (_, h) := (names.zip assumed).find? (·.1 == name)
           | throwError "step {u.number} does not assume `{name}`"
-        let some h := assumed[i]? | throwError "no assumption for `{name}`"
         proof := mkApp proof h
         stated ← instantiateForall stated #[h]
       return (proof, stated)
@@ -135,7 +134,7 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
   let started ← IO.monoMsNow
   let (value, stated) ← replay u (← getLCtx)
   trace[vampire.timing] "step {(u.rule?.map (·.name)).getD "?"} took \
-{(← IO.monoMsNow) - started}ms"
+    {(← IO.monoMsNow) - started}ms"
   withLetDecl (Name.mkSimple s!"s{u.number}") stated value fun s => do
     modify fun st => { st with proofs := st.proofs.insert u.number s }
     replayAll steps (i + 1) (bound.push s) refutation
@@ -226,10 +225,14 @@ private partial def bindIntroduced : ReconstructM PUnit := do
     (u.number, failures.getD u.number m!"no reason given") }
 
 /--
-Replays a refutation as a Lean proof of `False`.
+Replays a refutation as a Lean proof of `False` from the hypotheses in the
+current local context, or gives `none` when the proof has no refutation.
 
-Fails if the proof mentions a name vampire introduced itself, since nothing in
-the goal corresponds to it.
+What vampire introduced itself -- skolem functions, the names clausification
+and splitting define -- has nothing in the goal to stand for, so each is bound
+to the Lean term it means: before any step is replayed where that can be done
+(`bindIntroduced`), and otherwise by the step that introduces it. Fails if a
+step needs a name that was never bound, or cannot be replayed.
 -/
 def run (proof : Proof) (symbols : Symbols)
     (contradiction : Array Expr → Option Expr → MetaM Expr)

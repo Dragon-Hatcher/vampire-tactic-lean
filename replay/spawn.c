@@ -61,17 +61,36 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
   }
   int flags = O_WRONLY | O_CREAT | O_TRUNC;
   /* Nothing to read: the child is given its problem as a file. */
-  posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
-  posix_spawn_file_actions_addopen(&actions, 1, lean_string_cstr(outPath), flags, 0600);
-  posix_spawn_file_actions_addopen(&actions, 2, lean_string_cstr(errPath), flags, 0600);
+  rc = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+  if (rc == 0)
+    rc = posix_spawn_file_actions_addopen(&actions, 1, lean_string_cstr(outPath), flags, 0600);
+  if (rc == 0)
+    rc = posix_spawn_file_actions_addopen(&actions, 2, lean_string_cstr(errPath), flags, 0600);
+  if (rc != 0) {
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    return vampire_spawn_error("spawning the worker", rc);
+  }
 
   posix_spawnattr_t attr;
-  posix_spawnattr_init(&attr);
+  rc = posix_spawnattr_init(&attr);
+  if (rc != 0) {
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    return vampire_spawn_error("spawning the worker", rc);
+  }
 #ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
-  /* Hand the child nothing of ours but the three it was given. `fork` closed
-     what it should; `posix_spawn` keeps whatever is not marked close-on-exec,
-     and this asks for the same tidiness where the flag exists. */
-  posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+  /* Hand the child nothing of ours but the three it was given. `posix_spawn`
+     keeps every descriptor not marked close-on-exec, and this flag, which only
+     macOS has, closes the rest. Elsewhere -- Linux -- the child inherits
+     whatever descriptors of ours are not marked close-on-exec. */
+  rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+  if (rc != 0) {
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    return vampire_spawn_error("spawning the worker", rc);
+  }
 #endif
 
   pid_t child;

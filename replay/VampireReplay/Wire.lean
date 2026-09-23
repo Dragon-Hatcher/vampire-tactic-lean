@@ -11,6 +11,24 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 2]!.toUInt32 <<< 16)
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
+/-- The header's length, in words. -/
+private def headerWords : Nat := 43
+
+/-- A unit's record's length, in words. -/
+private def unitWidth : Nat := 30
+
+/-- The header word that is nonzero when there is a refutation. -/
+private def hasRefutationWord : Nat := 3
+
+/-- The header word holding the refutation's unit, when there is one. -/
+private def refutationWord : Nat := 4
+
+/--
+The header word holding the offset of the strategy the proof was found by, and
+`none32` when there is no proof.
+-/
+private def strategyWord : Nat := 36
+
 /-- Byte offsets of each section, derived once from the header. -/
 private structure Layout where
   functions : Nat
@@ -43,6 +61,7 @@ private structure Layout where
   placements : Nat
   placementEntries : Nat
   strings : Nat
+  stringsLen : Nat
   proofText : Nat
   numFunctions : Nat
   numPredicates : Nat
@@ -79,23 +98,16 @@ deriving Inhabited, Repr, BEq, DecidableEq
 /-- Why vampire stopped, as a person would say it. -/
 def TerminationReason.describe : TerminationReason → String
   | .refutation => "it found a refutation"
-  | .satisfiable => "the problem is satisfiable, so the goal does not follow from what was sent"
+  | .satisfiable =>
+    "the goal does not follow from the hypotheses that were sent: vampire found \
+    a model of them and the negated goal"
   | .refutationNotFound => "it ran out of inferences to make"
   | .inappropriate => "no strategy it has suits the problem"
   | .unknown => "it stopped without saying why"
   | .timeLimit => "it ran out of time"
-  | .instructionLimit => "it ran out of steps"
+  | .instructionLimit => "it reached its instruction limit"
   | .memoryLimit => "it ran out of memory"
   | .activationLimit => "it reached its limit on activations"
-
-inductive UnitInputType where
-  | «axiom»
-  | assumption
-  | conjecture
-  | negatedConjecture
-  | claim
-  | extensionalityAxiom
-deriving Inhabited, Repr, BEq, DecidableEq
 
 inductive Connective where
   | literal | and | or | imp | iff | xor | not
@@ -138,19 +150,23 @@ private def version : UInt32 := 24
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
-  if data.size < 43 * 4 then
-    Error.fail (s!"proof is {data.size} bytes, too short for a header")
+  let malformed (what : String) : Except Error PUnit :=
+    Error.fail s!"malformed proof from the worker: {what}"
+  if data.size < headerWords * 4 then
+    malformed s!"it is {data.size} bytes, too short for a header"
   if readU32 data 0 != magic then
-    Error.fail ("proof does not start with the expected magic bytes")
+    malformed "it does not start with the expected magic bytes"
   let v := readU32 data 4
   if v != version then
-    Error.fail (s!"proof has format version {v}, expected {version}")
-  let word (i : Nat) : Nat := (readU32 data (4 * i)).toNat
+    Error.fail (s!"the worker writes proof format version {v}, but replay reads \
+      version {version}; run `lake build` to rebuild the worker")
+  let raw (i : Nat) : UInt32 := readU32 data (4 * i)
+  let word (i : Nat) : Nat := (raw i).toNat
   -- Rules are numbered by where vampire declares them, so the count notices
   -- one added or removed and the fingerprint, a hash of their names in order,
   -- two that traded places.
   let numRules := word 34
-  let fingerprint := readU32 data (40 * 4)
+  let fingerprint := raw 40
   if numRules != InferenceRule.count || fingerprint != InferenceRule.fingerprint then
     Error.fail (s!"the vampire the worker was built from declares \
       {numRules} inference rules (fingerprint {fingerprint}), but \
@@ -186,7 +202,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numCongruenceArgs := word 31
   let stringsLen := word 32
   let proofTextLen := word 33
-  let functions := 43 * 4
+  let numPlacements := word 41
+  let numPlacementEntries := word 42
+  let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
   let terms := sorts + numSorts * 4
@@ -196,7 +214,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let subs := formulas + numFormulas * 7 * 4
   let vars := subs + numSubs * 4
   let units := vars + numVars * 4
-  let unitLits := units + numUnits * 30 * 4
+  let unitLits := units + numUnits * unitWidth * 4
   let parents := unitLits + numUnitLits * 4
   let varSorts := parents + numParents * 4
   let skolems := varSorts + numVarSorts * 2 * 4
@@ -213,8 +231,6 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let bindings := uses + numUses * 6 * 4
   let congruences := bindings + numBindings * 2 * 4
   let congruenceArgs := congruences + numCongruences * 5 * 4
-  let numPlacements := word 41
-  let numPlacementEntries := word 42
   let placements := congruenceArgs + numCongruenceArgs * 4
   let placementEntries := placements + numPlacements * 4 * 4
   let strings := placementEntries + numPlacementEntries * 4
@@ -222,26 +238,57 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
   if data.size < expected then
-    Error.fail (s!"proof is {data.size} bytes, expected at least {expected}")
-  -- Every index is checked against the section it points into, once, here:
-  -- the accessors read with `!`, and an index past the end of its section
-  -- would read another section's words, or zeros past the buffer's end,
-  -- and replay would go on with them.
+    malformed s!"it is {data.size} bytes, but its header says at least {expected}"
+  -- A name is read from its offset up to the NUL after it. So the blob has to
+  -- end in a NUL, for every name to have one before the blob ends, and has to
+  -- be UTF-8: a name then decodes, since every offset is checked below to be
+  -- where one starts -- at the blob's start or just past a NUL -- and a NUL is
+  -- a character of its own.
+  if stringsLen != 0 && data[strings + stringsLen - 1]! != 0 then
+    malformed "its last string is not NUL-terminated"
+  unless (data.extract strings (strings + stringsLen)).validateUTF8 do
+    malformed "its strings are not valid UTF-8"
+  unless (data.extract proofText (proofText + proofTextLen)).validateUTF8 do
+    malformed "its proof text is not valid UTF-8"
+  -- Every index an accessor follows is checked here, once, against the section
+  -- it points into: the accessors read with `!`, and an index past the end of
+  -- its section would read another section's words, or zeros past the
+  -- buffer's end, and replay would go on with them. So is every string offset,
+  -- and every position that picks out a clause's literal, a formula's
+  -- subformula or an earlier congruence step, as far as the format says what
+  -- it indexes. What is not an index is not checked: variable numbers, step
+  -- numbers, and the premise a use names by its number.
   let at_ (base width i off : Nat) : Nat := (readU32 data (base + (width * i + off) * 4)).toNat
   let none := none32.toNat
-  let index (what : String) (i bound : Nat) : Except Error Unit :=
-    if i < bound then pure () else Error.fail s!"proof has {what} {i}, of {bound}"
-  let optional (what : String) (i bound : Nat) : Except Error Unit :=
+  let index (what : String) (i bound : Nat) : Except Error PUnit :=
+    if i < bound then pure ()
+    else malformed s!"{what} {i} is out of range (there are {bound})"
+  let optional (what : String) (i bound : Nat) : Except Error PUnit :=
     if i == none then pure () else index what i bound
-  let range (what : String) (first count bound : Nat) : Except Error Unit :=
+  let range (what : String) (first count bound : Nat) : Except Error PUnit :=
     if count == 0 || first + count ≤ bound then pure ()
-    else Error.fail s!"proof has {what} {first} to {first + count}, of {bound}"
+    else malformed s!"{what} {first} to {first + count} are out of range \
+      (there are {bound})"
+  let string (what : String) (off : Nat) : Except Error PUnit :=
+    if off < stringsLen && (off == 0 || data[strings + off - 1]! == 0) then pure ()
+    else malformed s!"{what} is at offset {off}, where no string starts"
+  let optionalString (what : String) (off : Nat) : Except Error PUnit :=
+    if off == none then pure () else string what off
+  -- How many literals a unit's clause has, and zero for a formula.
+  let clauseSize (unit : Nat) : Nat :=
+    if at_ units unitWidth unit 3 &&& 1 != 0 then at_ units unitWidth unit 5 else 0
   for i in [0:numFunctions] do
-    index "function name" (at_ functions 5 i 0) stringsLen
-    optional "numerator" (at_ functions 5 i 3) stringsLen
-    optional "denominator" (at_ functions 5 i 4) stringsLen
-  for i in [0:numPredicates] do index "predicate name" (at_ predicates 3 i 0) stringsLen
-  for i in [0:numSorts] do index "sort name" (at_ sorts 1 i 0) stringsLen
+    string "function name" (at_ functions 5 i 0)
+    -- 0 is no numeral, 1 to 3 an integer, rational or real one, and 5 to 7 the
+    -- same for multiplication by one.
+    match at_ functions 5 i 2 with
+    | 0 => pure ()
+    | 1 | 2 | 3 | 5 | 6 | 7 =>
+      string "numerator" (at_ functions 5 i 3)
+      string "denominator" (at_ functions 5 i 4)
+    | kind => malformed s!"function {i} has unknown numeral kind {kind}"
+  for i in [0:numPredicates] do string "predicate name" (at_ predicates 3 i 0)
+  for i in [0:numSorts] do string "sort name" (at_ sorts 1 i 0)
   for i in [0:numTerms] do
     if at_ terms 4 i 0 != 0 then
       index "functor" (at_ terms 4 i 1) numFunctions
@@ -255,16 +302,16 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     optional "atom" (at_ formulas 7 i 1) numLiterals
     range "subformulas" (at_ formulas 7 i 2) (at_ formulas 7 i 3) numSubs
     range "bound variables" (at_ formulas 7 i 4) (at_ formulas 7 i 5) numVars
-    optional "formula name" (at_ formulas 7 i 6) stringsLen
+    optionalString "formula name" (at_ formulas 7 i 6)
   for i in [0:numSubs] do index "subformula" (at_ subs 1 i 0) numFormulas
   for i in [0:numUnits] do
-    let u (off : Nat) := at_ units 30 i off
+    let u (off : Nat) := at_ units unitWidth i off
     if u 3 &&& 1 != 0 then range "clause literals" (u 4) (u 5) numUnitLits
     else index "unit formula" (u 4) numFormulas
     range "premises" (u 6) (u 7) numParents
     range "variable sorts" (u 8) (u 9 + u 25) numVarSorts
     range "skolems" (u 10) (u 11) numSkolems
-    optional "input name" (u 12) stringsLen
+    optionalString "input name" (u 12)
     range "premise uses" (u 13) (u 14) numUses
     range "splits" (u 15) (u 16) numSplits
     optional "SAT premise" (u 17) numSatClauses
@@ -274,79 +321,132 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     range "congruence steps" (u 23) (u 24) numCongruences
     range "constraints" (u 26) (u 27) (u 5)
     range "placements" (u 28) (u 29) numPlacements
+    -- A unit's congruence steps are a run of their own: a step names the
+    -- clause's literals, and the steps of the run recorded before it, by
+    -- where they stand in the run.
+    let numLits := clauseSize i
+    for k in [0:u 24] do
+      let c (off : Nat) := at_ congruences 5 (u 23 + k) off
+      let literal (i : Nat) := index "congruence literal" i numLits
+      let earlier (i : Nat) := index "congruence step" i k
+      match c 0 with
+      | 0 => literal (c 1)
+      | 1 =>
+        index "congruence term" (c 1) numTerms
+        index "congruence term" (c 2) numTerms
+      | 2 =>
+        earlier (c 1)
+        earlier (c 2)
+      | 3 => earlier (c 1)
+      -- The equality's proof is absent where its two sides are one term.
+      | 4 =>
+        literal (c 1)
+        if c 2 != none then earlier (c 2)
+      | 5 =>
+        literal (c 1)
+        literal (c 2)
+      | kind => malformed s!"step {u 0} has unknown congruence step kind {kind}"
+      range "congruence arguments" (c 3) (c 4) numCongruenceArgs
+      for j in [0:c 4] do
+        optional "congruence argument" (at_ congruenceArgs 1 (c 3 + j) 0) k
   for i in [0:numUnitLits] do index "clause literal" (at_ unitLits 1 i 0) numLiterals
   for i in [0:numParents] do index "premise" (at_ parents 1 i 0) numUnits
   for i in [0:numVarSorts] do index "variable sort" (at_ varSorts 2 i 1) numSorts
   for i in [0:numSkolems] do index "skolem term" (at_ skolems 2 i 1) numTerms
-  for i in [0:numSplits] do index "split name" (at_ splits 1 i 0) stringsLen
+  for i in [0:numSplits] do string "split name" (at_ splits 1 i 0)
   for i in [0:numSatClauses] do
     range "SAT literals" (at_ satClauses 5 i 0) (at_ satClauses 5 i 1) numSatLits
     range "SAT premises" (at_ satClauses 5 i 2) (at_ satClauses 5 i 3) numSatPremises
     optional "SAT origin" (at_ satClauses 5 i 4) numUnits
-  for i in [0:numSatLits] do index "SAT literal" (at_ satLits 1 i 0) stringsLen
+  for i in [0:numSatLits] do string "SAT literal" (at_ satLits 1 i 0)
   for i in [0:numSatPremises] do index "SAT premise" (at_ satPremises 1 i 0) numSatClauses
   for i in [0:numNamings] do
-    index "naming" (at_ namings 4 i 0) stringsLen
+    string "naming" (at_ namings 4 i 0)
     range "naming arguments" (at_ namings 4 i 1) (at_ namings 4 i 2) numNamingArgs
     index "named formula" (at_ namings 4 i 3) numFormulas
   for i in [0:numGenStates] do
-    optional "generalised clause parent" (at_ genStates 8 i 0) numGenStates
+    let parent := at_ genStates 8 i 0
+    optional "generalised clause parent" parent numGenStates
+    -- The position replaced is one of the parent's signed subformulas.
+    let position := at_ genStates 8 i 1
+    if parent != none && position != none then
+      index "replaced position" position (at_ genStates 8 parent 3)
     range "generalised literals" (at_ genStates 8 i 2) (at_ genStates 8 i 3) numGenLits
     range "replacement" (at_ genStates 8 i 4) (at_ genStates 8 i 5) numGenLits
     range "generalised bindings" (at_ genStates 8 i 6) (at_ genStates 8 i 7) numBindings
   for i in [0:numGenLits] do index "generalised literal" (at_ genLits 2 i 0) numFormulas
-  for i in [0:numChoices] do index "conjunction" (at_ choices 2 i 0) numFormulas
+  for i in [0:numChoices] do
+    let conjunction := at_ choices 2 i 0
+    index "conjunction" conjunction numFormulas
+    index "conjunct" (at_ choices 2 i 1) (at_ formulas 7 conjunction 3)
   for i in [0:numUses] do
     optional "used term" (at_ uses 6 i 2) numTerms
     range "use bindings" (at_ uses 6 i 4) (at_ uses 6 i 5) numBindings
   for i in [0:numBindings] do index "binding" (at_ bindings 2 i 1) numTerms
-  for i in [0:numCongruences] do
-    match at_ congruences 5 i 0 with
-    | 1 =>
-      index "congruence term" (at_ congruences 5 i 1) numTerms
-      index "congruence term" (at_ congruences 5 i 2) numTerms
-    -- A step stands on the ones recorded before it.
-    | 2 =>
-      index "congruence step" (at_ congruences 5 i 1) numCongruences
-      index "congruence step" (at_ congruences 5 i 2) numCongruences
-    | 3 => index "congruence step" (at_ congruences 5 i 1) numCongruences
-    | _ => pure ()
-    range "congruence arguments" (at_ congruences 5 i 3) (at_ congruences 5 i 4)
-      numCongruenceArgs
-  for i in [0:numCongruenceArgs] do
-    optional "congruence argument" (at_ congruenceArgs 1 i 0) numCongruences
   for i in [0:numPlacements] do
     range "placement entries" (at_ placements 4 i 2) (at_ placements 4 i 3)
       numPlacementEntries
-  if readU32 data 12 != 0 then index "refutation" (word 4) numUnits
-  optional "strategy" (word 36) stringsLen
+  -- What indexes a premise's literals, now that the premises themselves are
+  -- checked.
+  for i in [0:numUnits] do
+    let u (off : Nat) := at_ units unitWidth i off
+    let parent (k : Nat) : Nat := at_ parents 1 (u 6 + k) 0
+    -- A placement's entries are the unit's own literals, except in a split
+    -- clause: those are of the components' literals, into the clause split,
+    -- which is the step's first premise.
+    if u 29 != 0 then
+      let into ←
+        if InferenceRule.ofNat? (u 1) == some .avatarSplitClause then do
+          if u 7 == 0 then malformed s!"split clause {u 0} has no premises"
+          pure (clauseSize (parent 0))
+        else pure (clauseSize i)
+      for k in [0:u 29] do
+        let first := at_ placements 4 (u 28 + k) 2
+        for j in [0:at_ placements 4 (u 28 + k) 3] do
+          let entry := at_ placementEntries 1 (first + j) 0
+          if entry != none then index "placed literal" (entry &&& 0x7FFFFFFF) into
+  if raw hasRefutationWord != 0 then index "refutation" (word refutationWord) numUnits
+  optionalString "strategy" (word strategyWord)
   let reason ← ofIndex
     #[.refutation, .satisfiable, .refutationNotFound, .inappropriate, .unknown,
       .timeLimit, .instructionLimit, .memoryLimit, .activationLimit]
-    (readU32 data 8) "termination reason"
+    (raw 2) "termination reason"
   return {
     data, terminationReason := reason
-    polarityFlipBoundary := readU32 data (35 * 4)
+    polarityFlipBoundary := raw 35
     layout := {
       functions, predicates, sorts, terms, args, literals, formulas, subs, vars,
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      strings, proofText, numFunctions,
+      strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
   }
 
-/-- Reads a NUL-terminated name from the string blob. -/
+@[inline] private def header (p : Proof) (i : Nat) : UInt32 := readU32 p.data (4 * i)
+
+/--
+Reads a NUL-terminated name from the string blob.
+
+`ofByteArray` checked that the blob is UTF-8, ends in a NUL, and that every
+offset is where a name starts, so the scan stops at a NUL within the blob and
+what it reads decodes.
+-/
 private def string (p : Proof) (off : UInt32) : String :=
   let start := p.layout.strings + off.toNat
+  let stop := p.layout.strings + p.layout.stringsLen
   let rec len (i : Nat) (fuel : Nat) : Nat :=
     match fuel with
     | 0 => i
     | fuel + 1 => if p.data[start + i]! == 0 then i else len (i + 1) fuel
-  let n := len 0 (p.data.size - start)
-  String.fromUTF8! (p.data.extract start (start + n))
+  let n := len 0 (stop - start)
+  (String.fromUTF8? (p.data.extract start (start + n))).getD ""
+
+/-- A header word the worker writes only with a proof, `none` without one. -/
+private def ifProved (p : Proof) (i : Nat) : Option Nat :=
+  if p.header strategyWord == none32 then none else some (p.header i).toNat
 
 /--
 The strategy the proof was found by, as vampire's `strategy` option reads it,
@@ -356,7 +456,7 @@ In portfolio mode the strategy that wins is one of a schedule of them, and
 running it on its own is the same run without the ones it won against.
 -/
 def strategy? (p : Proof) : Option String :=
-  let off := readU32 p.data (36 * 4)
+  let off := p.header strategyWord
   if off == none32 then none else some (p.string off)
 
 /--
@@ -367,9 +467,7 @@ The schedule is worked through one strategy at a time, so what the search
 took beyond this went on strategies that did not find the proof -- which is
 what naming this one saves.
 -/
-def strategyTime? (p : Proof) : Option Nat :=
-  if (readU32 p.data (36 * 4)) == none32 then none
-  else some (readU32 p.data (37 * 4)).toNat
+def strategyTime? (p : Proof) : Option Nat := p.ifProved 37
 
 /--
 What the search spent before the schedule began -- starting vampire up and
@@ -378,9 +476,7 @@ parsing the problem -- in milliseconds, and `none` when there is no proof.
 A run that names the strategy pays this too, so it is not part of what
 naming one saves.
 -/
-def setupTime? (p : Proof) : Option Nat :=
-  if (readU32 p.data (36 * 4)) == none32 then none
-  else some (readU32 p.data (38 * 4)).toNat
+def setupTime? (p : Proof) : Option Nat := p.ifProved 38
 
 /--
 When the proof was found, in milliseconds after the worker began, and `none`
@@ -390,14 +486,15 @@ What the caller timed beyond this went on starting the worker's process,
 which a run naming the strategy pays as well -- so the difference is not
 part of what naming one saves.
 -/
-def foundAtTime? (p : Proof) : Option Nat :=
-  if (readU32 p.data (36 * 4)) == none32 then none
-  else some (readU32 p.data (39 * 4)).toNat
+def foundAtTime? (p : Proof) : Option Nat := p.ifProved 39
 
-/-- Vampire's own rendering of the proof, empty when there is no refutation. -/
+/--
+Vampire's own rendering of the proof, empty when there is no refutation.
+`ofByteArray` checked that it is UTF-8.
+-/
 def proofText (p : Proof) : String :=
-  String.fromUTF8! <|
-    p.data.extract p.layout.proofText (p.layout.proofText + p.layout.proofTextLen)
+  (String.fromUTF8? <|
+    p.data.extract p.layout.proofText (p.layout.proofText + p.layout.proofTextLen)).getD ""
 
 end Proof
 
@@ -555,11 +652,18 @@ def function? (p : Proof) (functor : UInt32) : Option Symbol :=
   else
     let at_ (off : Nat) := p.field p.layout.functions 5 functor.toNat off
     let numeral? : Option Numeral := do
-      let kind := (at_ 2).toNat
-      let sort ← ["$int", "$rat", "$real"][kind % 4 - 1]?
+      let (sort, multiplies) ← match at_ 2 with
+        | 1 => some ("$int", false)
+        | 2 => some ("$rat", false)
+        | 3 => some ("$real", false)
+        | 5 => some ("$int", true)
+        | 6 => some ("$rat", true)
+        | 7 => some ("$real", true)
+        -- 0: the symbol is no numeral.
+        | _ => none
       let numerator ← (p.string (at_ 3)).toInt?
       let denominator ← (p.string (at_ 4)).toNat?
-      return { sort, multiplies := kind ≥ 4, numerator, denominator }
+      return { sort, multiplies, numerator, denominator }
     some { name := p.string (at_ 0), arity := at_ 1, numeral? }
 
 /-- Every function symbol of the problem's signature. -/
@@ -575,15 +679,18 @@ def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
     flipped := p.field p.layout.predicates 3 predicate.toNat 2 != 0
   }
 
+/-- The name of the sort vampire numbers `i`, which has to be one of them. -/
+private def sortNameAt (p : Proof) (i : UInt32) : String :=
+  p.string (readU32 p.data (p.layout.sorts + i.toNat * 4))
+
 /-- The name of the sort vampire numbers `i`. -/
 def sortName? (p : Proof) (i : UInt32) : Option String :=
-  if i.toNat >= p.layout.numSorts then none
-  else some (p.string (readU32 p.data (p.layout.sorts + i.toNat * 4)))
+  if i.toNat >= p.layout.numSorts then none else some (p.sortNameAt i)
 
 /-- The final step of the derivation, when vampire found a refutation. -/
 def refutation? (p : Proof) : Option Unit :=
-  if readU32 p.data 12 == 0 then none
-  else some ⟨p, readU32 p.data 16⟩
+  if p.header hasRefutationWord == 0 then none
+  else some ⟨p, p.header refutationWord⟩
 
 /-- Every step of the derivation. -/
 def units (p : Proof) : Array Unit :=
@@ -691,14 +798,14 @@ namespace Clause
 /-- The literals of the clause. -/
 def literals (c : Clause) : Array Literal :=
   let p := c.proof
-  let first := p.field p.layout.units 30 c.idx.toNat 4
-  let count := p.field p.layout.units 30 c.idx.toNat 5
+  let first := p.field p.layout.units unitWidth c.idx.toNat 4
+  let count := p.field p.layout.units unitWidth c.idx.toNat 5
   Array.ofFn (n := count.toNat) fun i =>
     ⟨p, readU32 p.data (p.layout.unitLits + (first.toNat + i.val) * 4)⟩
 
 /-- The number of literals, read off the clause rather than counted. -/
 def size (c : Clause) : Nat :=
-  (c.proof.field c.proof.layout.units 30 c.idx.toNat 5).toNat
+  (c.proof.field c.proof.layout.units unitWidth c.idx.toNat 5).toNat
 
 /-- Whether this is the empty clause. -/
 def isEmpty (c : Clause) : Bool := c.size == 0
@@ -789,20 +896,13 @@ end Formula
 namespace Unit
 
 @[inline] private def field (u : Unit) (off : Nat) : UInt32 :=
-  u.proof.field u.proof.layout.units 30 u.idx.toNat off
+  u.proof.field u.proof.layout.units unitWidth u.idx.toNat off
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.field 0
 
 /-- The inference rule, as vampire numbers it. -/
 def ruleIndex (u : Unit) : UInt32 := u.field 1
-
-/-- Where this step came from. -/
-def inputType (u : Unit) : Except Error UnitInputType :=
-  ofIndex
-    #[.«axiom», .assumption, .conjecture, .negatedConjecture, .claim,
-      .extensionalityAxiom]
-    (u.field 2) "input type"
 
 /-- Whether this step is a clause rather than a formula. -/
 def isClause (u : Unit) : Bool := u.field 3 &&& 1 != 0
@@ -819,16 +919,22 @@ def formula? (u : Unit) : Option Formula :=
 def rule? (u : Unit) : Option InferenceRule := InferenceRule.ofNat? (u.field 1).toNat
 
 /--
+`count` of the step's variables and their sorts, from the `skip`th on.
+`ofByteArray` checked that each sort is one of the proof's.
+-/
+private def varSortsFrom (u : Unit) (skip count : Nat) : Array (UInt32 × String) :=
+  let p := u.proof
+  let first := (u.field 8).toNat + skip
+  Array.ofFn (n := count) fun i =>
+    let base := p.layout.varSorts + (first + i.val) * 2 * 4
+    (readU32 p.data base, p.sortNameAt (readU32 p.data (base + 4)))
+
+/--
 The sorts of the step's free variables. A clause is implicitly universally
 quantified over them, so rebuilding it as a Lean proposition needs their sorts.
 -/
 def varSorts (u : Unit) : Array (UInt32 × String) :=
-  let p := u.proof
-  let first := u.field 8
-  let count := u.field 9
-  Array.ofFn (n := count.toNat) fun i =>
-    let base := p.layout.varSorts + (first.toNat + i.val) * 2 * 4
-    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+  u.varSortsFrom 0 (u.field 9).toNat
 
 /--
 The sorts of the variables that occur only in what this step's uses bound its
@@ -840,13 +946,7 @@ variable's. They are apart from `varSorts` because those are the quantifier
 prefix the conclusion is rebuilt with, and these are no part of it.
 -/
 def boundVarSorts (u : Unit) : Array (UInt32 × String) :=
-  let p := u.proof
-  let first := u.field 8
-  let own := u.field 9
-  let count := u.field 25
-  Array.ofFn (n := count.toNat) fun i =>
-    let base := p.layout.varSorts + (first.toNat + own.toNat + i.val) * 2 * 4
-    (readU32 p.data base, (p.sortName? (readU32 p.data (base + 4))).getD "?")
+  u.varSortsFrom (u.field 9).toNat (u.field 25).toNat
 
 /--
 Where this step's unification constraints are among its literals, and how many

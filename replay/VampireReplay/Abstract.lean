@@ -81,18 +81,21 @@ private partial def atomsOf (e : Expr) (acc : Array Expr)
     -- sort, so putting one aside is losing the very fact that settles it.
     if ← isProp e then return (acc, seen)
     -- A local already stands for itself, and standing for it again would only
-    -- be another binder.
-    if e.isFVar || acc.any (· == e) then return (acc, seen)
+    -- be another binder. A term met before is in `seen`, so is not met again.
+    if e.isFVar then return (acc, seen)
     return (acc.push e, seen)
 
 /--
-`False`, from facts that cannot all hold of any numbers.
+Runs `ask` on `facts` and `claim` with every term it can only take whole put
+aside.
 
-Two procedures rather than one: `omega` knows that the integers are discrete,
-which is what vampire's integrality steps turn on, and `linarith` works over
-any ordered field, which is where the rationals and the reals are. Neither is
-asked to find the facts -- they are the step's own premises -- only to see that
-together they are impossible.
+`facts` are proofs, and `ask hyps claim` is to prove `claim` -- or `False`, when
+there is none -- from the proofs `hyps`. Each term a decision procedure cannot
+read into is replaced by a local standing for it: `ask` is handed hypotheses
+stating the facts over those locals, and the claim over them, and its answer is
+applied to the terms and the facts again. When nothing is put aside, `ask` gets
+the facts themselves. Either way, applications of lambdas in what the facts and
+the claim state are first beta-reduced, as `readable` below says.
 -/
 def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
     (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
@@ -110,10 +113,13 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
       if s.getAppFn.isLambda && (← isProp (← inferType s)) then
         return .done s.headBeta
       return .done s)
-  let facts ← facts.mapM fun fact => do
+  -- Each fact with what it states, read once.
+  let stated ← facts.mapM fun fact => do
     let stated ← instantiateMVars (← inferType fact)
     let reduced ← readable stated
-    if reduced == stated then pure fact else mkExpectedTypeHint fact reduced
+    let fact ← if reduced == stated then pure fact else mkExpectedTypeHint fact reduced
+    return (fact, reduced)
+  let (facts, types) := stated.unzip
   let claim ← claim.mapM readable
   -- Put aside what the procedure can only take whole and ask about a variable
   -- standing for each, so that what is asked is as wide as the numbers in it
@@ -122,8 +128,8 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
   -- took as hypotheses, proves what was asked.
   let mut atoms := #[]
   let mut seen : Std.HashSet Expr := {}
-  for fact in facts do
-    let (atoms', seen') ← atomsOf (← instantiateMVars (← inferType fact)) atoms seen
+  for type in types do
+    let (atoms', seen') ← atomsOf type atoms seen
     atoms := atoms'; seen := seen'
   if let some claim := claim then
     let (atoms', _) ← atomsOf claim atoms seen
@@ -133,15 +139,14 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
   let mut decls := #[]
   for (atom, i) in atoms.zipIdx do
     decls := decls.push (Name.mkSimple s!"a{i}", fun _ => inferType atom)
+  let position : Std.HashMap Expr Nat :=
+    atoms.zipIdx.foldl (init := {}) fun acc (atom, i) => acc.insert atom i
   withLocalDeclsD decls fun locals => do
     let standingFor (e : Expr) : Expr :=
-      e.replace fun s =>
-        match atoms.findIdx? (· == s) with
-        | some i => some locals[i]!
-        | none => none
+      e.replace fun s => (position[s]?).map fun i => locals[i]!
     let mut hypDecls := #[]
-    for (fact, i) in facts.zipIdx do
-      let stated := standingFor (← instantiateMVars (← inferType fact))
+    for (type, i) in types.zipIdx do
+      let stated := standingFor type
       hypDecls := hypDecls.push (Name.mkSimple s!"h{i}", fun _ => pure stated)
     withLocalDeclsD hypDecls fun hyps => do
       let answer ← ask hyps (claim.map standingFor)

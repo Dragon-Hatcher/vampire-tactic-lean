@@ -108,21 +108,18 @@ def sanitize (name : String) (upper : Bool) : String :=
   | c :: rest => String.ofList ((if upper then c.toUpper else c.toLower) :: rest)
   | [] => "x"
 
-/-- Hands out `name`, or `name_1`, `name_2`, … if it is already in use. -/
+/-- Hands out `name`, or the first of `name_1`, `name_2`, … not already in use. -/
 def freshName (name : String) : TranslateM String := do
   let taken := (← get).taken
-  let name :=
-    if !taken.contains name then name
-    else
-      let rec attempt (i : Nat) : String :=
-        match i with
-        | 0 => name
-        | i + 1 =>
-          let candidate := s!"{name}_{taken.size - i}"
-          if taken.contains candidate then attempt i else candidate
-      attempt (taken.size + 1)
-  modify fun s => { s with taken := s.taken.insert name }
-  return name
+  let mut fresh := name
+  if taken.contains name then
+    -- At most `taken.size` of the `taken.size + 1` candidates tried here are
+    -- in use, so the loop stops at a free one.
+    for k in [1:taken.size + 2] do
+      fresh := s!"{name}_{k}"
+      unless taken.contains fresh do break
+  modify fun s => { s with taken := s.taken.insert fresh }
+  return fresh
 
 /--
 The TPTP arithmetic type a Lean type stands for, for the three that TPTP has of
@@ -168,6 +165,15 @@ def renderNumeral (sort : String) (n : Int) : String :=
 def isPropType (e : Expr) : Bool := e matches .sort .zero
 
 /--
+Whether `τ`, the type of something, is a universe of types rather than `Prop`:
+whether that something is a type.
+-/
+private def isUniverseOfTypes (τ : Expr) : MetaM Bool := do
+  match ← whnf τ with
+  | .sort u => return (← instantiateLevelMVars u).isNeverZero
+  | _ => return false
+
+/--
 Whether `e` is a type whose elements are TPTP individuals. `Prop` is not one,
 and neither is a universe: an argument of type `Type` is a type argument, which
 carries no first-order content. Nor is a proposition, whose elements are its
@@ -175,11 +181,8 @@ proofs: its type is a sort too, but `Prop`, and a quantifier over the proofs of
 `P` is no quantifier over a sort named after `P`.
 -/
 def isSortType (e : Expr) : MetaM Bool := do
-  if isPropType e then return false
-  if e matches .sort _ then return false
-  match ← whnf (← inferType e) with
-  | .sort u => return (← instantiateLevelMVars u).isNeverZero
-  | _ => return false
+  if isPropType e || e matches .sort _ then return false
+  isUniverseOfTypes (← inferType e)
 
 /-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
 def sortName (e : Expr) : TranslateM String := do
@@ -192,7 +195,7 @@ def sortName (e : Expr) : TranslateM String := do
     return builtin
   let hint ← match e with
     | .fvar fvarId => pure (← fvarId.getUserName).toString
-    | .const name _ => pure name.getString!
+    | .const name _ => pure name.toString
     | _ => pure "sort"
   let name ← freshName (sanitize hint false)
   modify fun s => { s with
@@ -267,8 +270,13 @@ tries to relate the two.
 -/
 def throwNotFirstOrder (e domain : Expr) : MetaM α :=
   throwError "cannot translate{indentExpr e}\nto TPTP: it quantifies over\
-    {indentExpr domain}\nwhich is not a type of individuals. `+mono` \
-    monomorphizes a goal like this first"
+    {indentExpr domain}\nwhich is not a type of individuals; try `+mono`"
+
+/-- Rejects a symbol whose type is not first-order over TPTP sorts. -/
+def throwNotFirstOrderSymbol (e symbol : Expr) : MetaM α := do
+  throwError "cannot translate{indentExpr e}\nto TPTP: {symbol} has type\
+    {indentExpr (← inferType symbol)}\nwhich is not first-order over types of \
+    individuals; try `+mono`"
 
 /-- Hands out a fresh TPTP variable name for a bound local. -/
 def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
@@ -296,9 +304,7 @@ def isTypeArgument (e : Expr) : TranslateM Bool := do
   let τ ← inferType e
   if let some answer := (← get).typeArguments[τ]? then
     return answer
-  let answer ← match ← whnf τ with
-    | .sort u => pure (← instantiateLevelMVars u).isNeverZero
-    | _ => pure false
+  let answer ← isUniverseOfTypes τ
   modify fun s => { s with typeArguments := s.typeArguments.insert τ answer }
   return answer
 
@@ -311,18 +317,17 @@ def castInto (sort : String) : String :=
 mutual
 
 /--
-The arguments of a nested conjunction or disjunction, flattened.
+The arguments of a nested conjunction or disjunction, flattened on both sides,
+not just the right.
 
 In the order they are written: vampire's parser flattens a junction however it
 was nested and keeps its arguments in the order it read them, so its reading of
-the formula agrees with the goal's. (Its *printing* reverses them, which is
-only a thing to know when reading a proof by eye.) Were that to stop holding,
-an `input` step would say so: it would no longer prove what the goal states.
+the formula agrees with the goal's, and replay pairs up the parts correctly.
+(Its *printing* reverses them, which is only a thing to know when reading a
+proof by eye.) Were that to stop holding, an `input` step would say so: it
+would no longer prove what the goal states.
 -/
 partial def junctionArgs (fn : Name) (e : Expr) : TranslateM (Array Fm) := do
-  -- Both sides, not just the right: vampire's parser flattens a junction
-  -- however it was nested, and what is emitted has to be what it flattens to
-  -- or replay would pair the parts up against the wrong ones.
   let rec parts (e : Expr) : Array Expr :=
     if e.isAppOfArity fn 2 then
       parts e.appFn!.appArg! ++ parts e.appArg!
@@ -347,7 +352,9 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
   let binary (fn : String) (a b : Expr) : TranslateM (Option Tm) := do
     return some (.app fn #[← translateTerm a, ← translateTerm b])
   -- `$to_int` is the floor, and the ceiling is the floor of the negation,
-  -- negated. Named rather than matched: the two are Mathlib's.
+  -- negated. Named rather than matched: the two are Mathlib's, and take five
+  -- arguments -- the type, its `Ring`, `LinearOrder` and `FloorRing`
+  -- instances, and the number.
   if e.getAppFn.isConstOf `Int.floor && e.getAppNumArgs == 5 then
     return some (.app "$to_int" #[← translateTerm e.appArg!])
   if e.getAppFn.isConstOf `Int.ceil && e.getAppNumArgs == 5 then
@@ -383,8 +390,8 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
     match numeral? a with
     | some n => return some (.app (renderNumeral sort n) #[])
     | none =>
-      throwError "cannot translate {e} to TPTP: it casts{indentExpr a}\nfrom ℕ, \
-        which TPTP has no sort for; only a numeral can be cast from ℕ"
+      throwError "cannot translate{indentExpr e}\nto TPTP: TPTP has no natural \
+        numbers, so only a numeral can be cast from ℕ"
   | _ => return none
 
 /-- Translates a Lean expression of non-`Prop` type into a TPTP term. -/
@@ -397,11 +404,11 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
     if let some name := (← get).vars[fvarId]? then
       return .var name
     let some name ← symbolName e (← fvarId.getType)
-      | throwError "cannot translate {e} of type {← inferType e} to TPTP"
+      | throwNotFirstOrderSymbol e e
     return .app name #[]
   | .const .. =>
     let some name ← symbolName e (← inferType e)
-      | throwError "cannot translate {e} of type {← inferType e} to TPTP"
+      | throwNotFirstOrderSymbol e e
     return .app name #[]
   | .app .. =>
     let fn := e.getAppFn
@@ -411,12 +418,14 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
     let head ← match fn with
       | .fvar fvarId => symbolName fn (← fvarId.getType)
       | .const .. => symbolName fn (← inferType fn)
-      | _ => pure none
+      | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it applies\
+          {indentExpr fn}\nwhich is not a constant or a local"
     let some head := head
-      | throwError "cannot translate application of {fn} to TPTP"
+      | throwNotFirstOrderSymbol e fn
     return .app head (← args.mapM translateTerm)
   | .mdata _ e => translateTerm e
-  | _ => throwError "cannot translate {e} to TPTP"
+  | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it is not a constant, \
+      a local or an application of one"
 
 /-- Translates a Lean proposition into a TPTP formula. -/
 partial def translateFormula (e : Expr) : TranslateM Fm := do
@@ -490,8 +499,7 @@ end
 /--
 The TPTP role of a hypothesis. Vampire treats both as asserted, so this does
 not affect whether a refutation exists, but it drives the goal-directed
-heuristics (set of support, SInE selection, `nongoal_weight_coefficient`) and
-is what makes `inputType` meaningful on the units of a proof.
+heuristics (set of support, SInE selection, `nongoal_weight_coefficient`).
 -/
 inductive Role where
   | «axiom»

@@ -18,13 +18,8 @@ that is what lets the two sit in different packages.
 package vampireReplay
 
 /--
-Compiles the shim that starts the worker; `spawn.c` says why it exists.
-
-It lives in this package because a function with a native implementation can
-only be called from interpreted code if the module declaring it has been
-compiled into a library the interpreter loads -- and this is the package that
-is precompiled. The tactic's own half is interpreted, Mathlib not being
-precompiled, so the declaration could not sit next to the code that uses it.
+Compiles the shim that starts the worker. `spawn.c` says why it exists, and
+`VampireReplay/Spawn.lean` why it is in this package.
 -/
 target spawnShim pkg : FilePath := do
   let src ← inputTextFile <| pkg.dir / "spawn.c"

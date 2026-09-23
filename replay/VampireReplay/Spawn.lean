@@ -1,11 +1,9 @@
 /-!
 Starting a process without copying the address space.
 
-Lean's `IO.Process.spawn` goes through libuv, which forks, and forking costs
-time in proportion to what the parent has mapped. A Lean process with Mathlib
-imported has gigabytes of it, so the fork costs more than most calls to the
-tactic spend proving anything: measured from a 6 GiB process, 117 ms on Linux
-and seconds on macOS, against 0.2 ms for the same spawn by `posix_spawn`.
+Lean's `IO.Process.spawn` forks, which from a process with Mathlib imported
+costs more than most calls to the tactic spend proving anything; `spawn.c`
+says why and what it does instead.
 
 This lives here, away from what uses it, because a function with a native
 implementation can only be called from interpreted code if its module was
@@ -28,9 +26,8 @@ Gives back what the process exited with, or 128 plus the signal that stopped
 it, which is the shell's convention. The output goes to files rather than
 pipes so that nothing here has to pump them while the process runs.
 
-The process starts in this one's working directory: setting the child's
-directory is what makes libuv fall back to forking on macOS, and it is not
-needed -- the worker goes to where its problem is.
+The process starts in this one's working directory, which is left alone: the
+worker goes to where its problem is itself.
 -/
 @[extern "vampire_spawn"]
 opaque spawn (exe : String) (args : Array String)
