@@ -115,6 +115,85 @@ private def replay (u : Vampire.Unit) (context : LocalContext) :
   return (proof, conclusion)
 
 /--
+Whether a term mentions any of `steps`, kept for every subterm asked about.
+
+A step's proof embeds the clauses it reasons about, and those are shared from
+one step's proof to the next, but they never mention a step -- so asked once
+per subterm, across every step, most of the proof is never walked again.
+-/
+private partial def mentionsStep (steps : Std.HashSet FVarId) (e : Expr) :
+    StateM (Std.HashMap Expr Bool) Bool := do
+  if !e.hasFVar then return false
+  if let some known := (← get)[e]? then return known
+  let answer ← match e with
+    | .fvar id => pure (steps.contains id)
+    | .app f a => do pure ((← mentionsStep steps f) || (← mentionsStep steps a))
+    | .lam _ t b _ | .forallE _ t b _ => do
+      pure ((← mentionsStep steps t) || (← mentionsStep steps b))
+    | .letE _ t v b _ => do
+      pure ((← mentionsStep steps t) || (← mentionsStep steps v) || (← mentionsStep steps b))
+    | .mdata _ b | .proj _ _ b => mentionsStep steps b
+    | _ => pure false
+  modify (·.insert e answer)
+  return answer
+
+/--
+`e` with each of `steps` replaced by the bound variable it is under `depth`
+binders of the chain being built: the `j`th of them, of `n` bound so far, is
+`bvar (n - 1 - j + offset)`. Only what mentions a step is descended into.
+-/
+private partial def abstractSteps (steps : Std.HashMap FVarId Nat) (n : Nat)
+    (mentions : Expr → StateM (Std.HashMap Expr Bool) Bool) (e : Expr) (offset : Nat) :
+    StateM (Std.HashMap Expr Bool) Expr := do
+  unless ← mentions e do return e
+  let go := abstractSteps steps n mentions
+  match e with
+  | .fvar id =>
+    match steps[id]? with
+    | some j => return .bvar (n - 1 - j + offset)
+    | none => return e
+  | .app f a => return e.updateApp! (← go f offset) (← go a offset)
+  | .lam _ t b _ => return e.updateLambdaE! (← go t offset) (← go b (offset + 1))
+  | .forallE _ t b _ => return e.updateForallE! (← go t offset) (← go b (offset + 1))
+  | .letE name t v b nondep =>
+    return .letE name (← go t offset) (← go v offset) (← go b (offset + 1)) nondep
+  | .mdata _ b => return e.updateMData! (← go b offset)
+  | .proj _ _ b => return e.updateProj! (← go b offset)
+  | _ => return e
+
+/--
+`let s₀ := v₀; …; let sₙ := vₙ; proof`, over the locals `bound` the steps were
+bound to.
+
+What `mkLetFVars` does, less the part of it this does not need. It walks each
+step's type and value in full to abstract the steps before it, and over a
+refutation of ten thousand steps that walk was most of what replaying it cost
+-- though a step's type mentions no other step, and its value mentions a few,
+while both mention the goal's own locals, which is what defeats `hasFVar`.
+Here which subterms mention a step is worked out once for the whole proof, and
+only those are rebuilt.
+-/
+private def bindSteps (bound : Array Expr) (proof : Expr) : ReconstructM Expr := do
+  let ids := bound.map (·.fvarId!)
+  let stepSet := Std.HashSet.ofArray ids
+  let mentions := mentionsStep stepSet
+  let mut cache : Std.HashMap Expr Bool := {}
+  let mut body := (← instantiateMVars proof)
+  -- The body is under every binder of the chain.
+  let all := Std.HashMap.ofList (ids.toList.zipIdx)
+  (body, cache) := (abstractSteps all bound.size mentions body 0).run cache
+  for k in [0 : bound.size] do
+    let i := bound.size - 1 - k
+    let decl ← ids[i]!.getDecl
+    let some value := decl.value? | throwError "a step is not bound to its proof"
+    -- The `i`th step's value is under the binders of the steps before it,
+    -- which are the only ones it mentions.
+    let (value, cache') := (abstractSteps all i mentions (← instantiateMVars value) 0).run cache
+    cache := cache'
+    body := .letE decl.userName decl.type value body (nondep := false)
+  return body
+
+/--
 Every step of a refutation, each bound to what proves it.
 
 Bound rather than written out: a step a dozen others were inferred from is
@@ -127,7 +206,11 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
     | do
       let some proof := (← get).proofs[refutation.number]?
         | throwError "the refutation was not replayed"
-      return ← mkLetFVars bound proof (usedLetOnly := false)
+      let started ← IO.monoMsNow
+      let closed ← bindSteps bound proof
+      trace[vampire.timing] "binding the {bound.size} steps took \
+        {(← IO.monoMsNow) - started}ms"
+      return closed
   let started ← IO.monoMsNow
   let (value, stated) ← replay u (← getLCtx)
   trace[vampire.timing] "step {(u.rule?.map (·.name)).getD "?"} took \
@@ -235,7 +318,10 @@ def run (proof : Proof) (symbols : Symbols)
     MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
+    let started ← IO.monoMsNow
     bindIntroduced
+    trace[vampire.timing] "binding what the proof introduces took \
+      {(← IO.monoMsNow) - started}ms"
     let (_, steps) := ((order refutation).run ({}, #[])).2
     let term ← replayAll steps 0 #[] refutation
     return { proof := term, unimplemented := (← get).unimplemented.toArray,
