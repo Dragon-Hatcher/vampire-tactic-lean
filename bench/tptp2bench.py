@@ -35,10 +35,19 @@ def convert(path: Path, root: Path, name: str, max_size: int) -> tuple[str, str]
         t2l.walk(ast, sym, free, [])
         prepared.append((role, ast, free))
     goals = [(a, f) for role, a, f in prepared if role == "conjecture"]
-    hyps = [(a, f) for role, a, f in prepared if role != "conjecture"]
+    # A problem with no conjecture that says which of its clauses deny one
+    # states the theorem those deny: the statement is what it asks to be
+    # shown, and a prover reads which hypotheses are the goal's from it.
+    denials = [] if goals else \
+        [(a, f) for role, a, f in prepared if role == "negated_conjecture"]
+    hyps = [(a, f) for role, a, f in prepared
+            if role != "conjecture" and not (denials and role == "negated_conjecture")]
     r = t2l.Render()
     hyp_src = [r.closed(a, f) for a, f in hyps]
-    if not goals:
+    if denials:
+        denied = [r.closed(a, f) for a, f in denials]
+        goal_src = "(¬" + ("(" + " ∧ ".join(denied) + ")" if len(denied) > 1 else denied[0]) + ")"
+    elif not goals:
         goal_src = "False"
     elif len(goals) == 1:
         goal_src = r.closed(*goals[0])
