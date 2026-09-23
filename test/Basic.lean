@@ -51,6 +51,14 @@ example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a b : ι)
   vampire (options := #[("inner_rewriting", "on"), ("forward_demodulation", "off")])
     [h, h1, h2, h3]
 
+-- And under a variable, where the rewritten term is every occurrence of `f X`
+-- in the clause, not of whatever Lean expression it rebuilds to.
+#guard_msgs (drop info) in
+example {ι : Type} (f g : ι → ι) (c : ι) (p : ι → Prop)
+    (h1 : ∀ x, f x ≠ c ∨ p (g (f x))) (h2 : ∀ x, ¬ p (g x)) (h3 : ∀ x, f x = c ∨ p x)
+    (h4 : ∀ x, ¬ p x) : False := by
+  vampire (options := #[("inner_rewriting", "on")]) [h1, h2, h3, h4]
+
 -- Subsumption equality resolution: a disequality whose sides unify, dropped.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (p : ι → ι → Prop) (a : ι)

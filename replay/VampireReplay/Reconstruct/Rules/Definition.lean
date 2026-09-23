@@ -28,6 +28,10 @@ private def stripForalls (f : Formula) : ReconstructM Formula := do
     f := body
   return f
 
+/-- Whether a symbol of that name occurs in a term. -/
+private partial def mentions (name : String) (t : Term) : Bool :=
+  !t.isVar && ((t.symbol?.map (·.name)) == some name || t.args.any (mentions name))
+
 /-- The single literal a definition step states. -/
 private def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
   if let some c := u.clause? then
@@ -46,8 +50,11 @@ Vampire mints a fresh symbol and asserts `sF(X₁, …, Xₙ) = t`, taking the
 variables of `t` as arguments. Nothing constrains `sF` beyond that equation, so
 it is an abbreviation: binding it to `fun X₁ … Xₙ => t` makes the step's own
 conclusion hold by reflexivity, and leaves every later use of `sF` meaning what
-vampire meant by it. The equation can be stored either way round, so whichever
-side is the fresh symbol is the one being defined.
+vampire meant by it. The equation can be stored either way round, so which side
+is being defined is read off the two: the fresh symbol is applied to distinct
+variables, is not the goal's, and cannot occur in what it abbreviates. The
+other side may be headed by an earlier fresh symbol applied to variables too;
+then the one being defined is the one not yet bound.
 -/
 private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit := do
   let l ← definitionLiteral u
@@ -56,18 +63,31 @@ private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit :
   let #[lhs, rhs] := l.args
     | throwError "equality with {l.args.size} arguments"
   withVars u.varSorts {} fun vars _ => do
-    let fresh? (t : Term) : ReconstructM (Option (String × Array Term)) := do
+    let fresh? (t other : Term) : ReconstructM (Option (String × Array Term)) := do
       if t.isVar then return none
       let some symbol := t.symbol? | return none
       if ← isGoalSymbol symbol.name then return none
-      return some (symbol.name, t.args)
+      let args := t.args
+      unless args.all (·.isVar) do return none
+      unless (args.map (·.var)).toList.Nodup do return none
+      if mentions symbol.name other then return none
+      return some (symbol.name, args)
+    let bound (name : String) : ReconstructM Bool :=
+      return (← get).introduced.contains name
     let (name, args, body) ←
-      match ← fresh? lhs, ← fresh? rhs with
-      | some (name, args), _ => pure (name, args, rhs)
-      | _, some (name, args) => pure (name, args, lhs)
+      match ← fresh? lhs rhs, ← fresh? rhs lhs with
+      | some (name, args), none => pure (name, args, rhs)
+      | none, some (name, args) => pure (name, args, lhs)
+      | some (l, largs), some (r, rargs) =>
+        match ← bound l, ← bound r with
+        | false, true => pure (l, largs, rhs)
+        | true, false => pure (r, rargs, lhs)
+        | _, _ =>
+          throwError "a function_definition step should introduce one symbol, \
+            but either side of {l} could be it"
       | none, none =>
         throwError "a function_definition step should introduce a symbol, \
-          but both sides of {l} are already known"
+          but neither side of {l} is a fresh symbol applied to variables"
     let locals ← args.mapM fun arg => do
       unless arg.isVar do
         throwError "function_definition applied {name} to {arg}, not a variable"

@@ -293,7 +293,8 @@ def superposition (step : Step) : ReconstructM Expr := do
 
 /--
 `inner_rewriting`: a clause with one of its own disequalities `l ≠ r` used to
-rewrite `l` to `r` in each of its other literals.
+rewrite `l` to `r` in each of its other literals, wherever vampire's term `l`
+occurs in them.
 
 Either the disequality holds, and it is a literal of the conclusion, or `l = r`
 and each other literal becomes what it was rewritten to. Which disequality and
@@ -326,17 +327,22 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
       | throwError "the literal inner rewriting rewrote with is not a disequality"
     -- The side rewritten away; the equation turned to rewrite it is `lr`.
     let l := if leftRewritten then a else b
+    let some sideTerm := use.term
+      | throwError "inner rewriting did not record which side it rewrote"
+    let side ← treeOf vars {} sideTerm
     let body ← elimGiven parts (motive? := some target) (fun k h => do
       if k == i then return ← placeLiteral target h
       let holds ← withLocalDeclD `h equation fun heq => do
         let lr ← if leftRewritten then pure heq else mkEqSymm heq
-        let some part := parts[k]? | throwError "a missing literal"
-        let abstracted ← kabstract part l
-        let rewritten ←
-          if abstracted.hasLooseBVars then
-            let motive := Expr.lam `x (← inferType l) abstracted .default
-            mkEqMP (← mkCongrArg motive lr) h
-          else pure h
+        let some literal := clause.literals[k]? | throwError "a missing literal"
+        -- Which occurrences are rewritten is settled on vampire's terms, as for
+        -- any rewrite: the side is replaced wherever the premise's literal has
+        -- that term, not wherever its Lean expression happens to appear.
+        let rewritten ← withLocalDeclD `x (← inferType l) fun x => do
+          let abstracted ← literalAt vars {} literal (some (side, x))
+          unless abstracted.containsFVar x.fvarId! do return h
+          let motive ← mkLambdaFVars #[x] abstracted
+          mkEqMP (← mkCongrArg motive lr) h
         let rewritten ← mkExpectedTypeHint rewritten
           (← instantiateMVars (← inferType rewritten)).headBeta
         mkLambdaFVars #[heq] (← placeLiteral target rewritten)
