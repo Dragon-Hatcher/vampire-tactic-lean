@@ -185,7 +185,7 @@ def main() -> None:
             if (d.name, config) in done:
                 continue
             # Between runs, never during one, the machine can be handed over.
-            while (DATA / "PAUSE").exists():
+            while (DATA / os.environ.get("BENCH_PAUSE", "PAUSE")).exists():
                 time.sleep(5)
             if config == "vampire+strategy" and not strategy:
                 res = {"status": "no-strategy"}

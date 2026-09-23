@@ -83,3 +83,16 @@ example {ι : Type} (p q : ι → Prop) (r : Prop) (a : ι)
 #guard_msgs (drop info) in
 example (a b c : Prop) (h : ¬¬(a ↔ ¬(b ↔ ¬¬c))) (ha : a) (hb : b) (hc : c) : False := by
   vampire (options := #[("newcnf", "on")]) [h, ha, hb, hc]
+
+-- A term-level if-then-else, which vampire does not read: lifted out into a
+-- function defined by its two cases, under a binder and at the top.
+#guard_msgs (drop info) in
+example {ι : Type} [Inhabited ι] (p : ι → Prop) (f : ι → ι) (a b : ι)
+    (h1 : ∀ x, f (@ite _ (p x) (Classical.propDecidable _) a b) = b)
+    (h2 : f a ≠ b) (h3 : p a) : False := by
+  vampire [*]
+
+#guard_msgs (drop info) in
+example {ι : Type} [Inhabited ι] (p : Prop) (a b : ι) (f : ι → ι)
+    (h : f (@ite _ p (Classical.propDecidable _) a b) ≠ f a) (hp : p) : False := by
+  vampire [*]

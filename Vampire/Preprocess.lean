@@ -112,6 +112,100 @@ def lemmaWithoutPowers (fact : Auto.Lemma) : MetaM Auto.Lemma := do
     proof := ← mkEqMP says fact.proof
     type := stated }
 
+/-- A term-level `if-then-else` lifted out into a function of its own. -/
+private structure Lifted where
+  /-- Stands for the function until it is in the local context. -/
+  placeholder : FVarId
+  /-- The function's type: from the bound variables the `ite` mentions to its own. -/
+  type : Expr
+  /-- `fun xs => ite c a b`. -/
+  value : Expr
+  /-- `∀ xs, (c → f xs = a) ∧ (¬c → f xs = b)`, over the placeholder. -/
+  says : Expr
+  /-- Its proof, `if_pos` and `if_neg` under the binders. -/
+  proof : Expr
+
+/--
+Each term-level `if-then-else` in `e` replaced by a function applied to the
+bound variables it mentions, with what defines the function.
+
+Vampire reads no `ite`, and a first-order problem has none. The function is
+bound to the `ite` itself, so `e` with it replaced is `e` up to unfolding it,
+and a proof of the one is a proof of the other; what vampire is told of the
+function is the two cases of its definition, which is all of it.
+-/
+private def lifting (e : Expr) : StateRefT (Array Lifted) MetaM Expr := do
+  let base ← getLCtx
+  Meta.transform e (post := fun t => do
+    unless t.isAppOfArity ``ite 5 do return .done t
+    let #[α, c, inst, a, b] := t.getAppArgs | return .done t
+    if ← isProp α then return .done t
+    let placeholders := (← get).map (·.placeholder)
+    let lctx ← getLCtx
+    let xs := ((Lean.collectFVars {} t).fvarIds.filter fun id =>
+        !base.contains id && !placeholders.contains id).qsort
+      fun x y => (lctx.get! x).index < (lctx.get! y).index
+    let xs := xs.map Expr.fvar
+    let placeholder ← mkFreshFVarId
+    let applied := mkAppN (.fvar placeholder) xs
+    let u ← getLevel α
+    let eq (rhs : Expr) := mkApp3 (mkConst ``Eq [u]) α applied rhs
+    let notC := mkApp (mkConst ``Not) c
+    let says := mkApp2 (mkConst ``And) (← mkArrow c (eq a)) (← mkArrow notC (eq b))
+    let pos ← withLocalDeclD `h c fun h => do
+      mkLambdaFVars #[h] (mkAppN (mkConst ``if_pos [u]) #[c, inst, h, α, a, b])
+    let neg ← withLocalDeclD `h notC fun h => do
+      mkLambdaFVars #[h] (mkAppN (mkConst ``if_neg [u]) #[c, inst, h, α, a, b])
+    modify (·.push {
+      placeholder
+      type := ← mkForallFVars xs α
+      value := ← mkLambdaFVars xs t
+      says := ← mkForallFVars xs says
+      proof := ← mkLambdaFVars xs
+        (mkApp4 (mkConst ``And.intro) (← mkArrow c (eq a)) (← mkArrow notC (eq b)) pos neg) })
+    return .done applied)
+
+/--
+The hypotheses with their term-level `if-then-else`s lifted out into functions,
+the functions let-bound in the goal, and what defines each of them added as an
+axiom.
+-/
+def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
+    MetaM (MVarId × Array (Expr × Role)) := goal.withContext do
+  let mut stated := #[]
+  let mut lifted := #[]
+  for (h, role) in hypotheses do
+    let type ← instantiateMVars (← inferType h)
+    unless type.find? (·.isAppOfArity ``ite 5) |>.isSome do
+      stated := stated.push (h, none, role)
+      continue
+    let (type', more) ← (lifting type).run lifted
+    lifted := more
+    stated := stated.push (h, if type' == type then none else some type', role)
+  if lifted.isEmpty then return (goal, hypotheses)
+  let mut goal := goal
+  let mut placeholders := #[]
+  let mut functions := #[]
+  for (l, i) in lifted.zipIdx do
+    let local_ (e : Expr) := e.replaceFVars placeholders functions
+    goal ← goal.define (Name.mkSimple s!"ite{i}") (local_ l.type) (local_ l.value)
+    let (fv, goal') ← goal.intro1P
+    goal := goal'
+    placeholders := placeholders.push (.fvar l.placeholder)
+    functions := functions.push (.fvar fv)
+  let local_ (e : Expr) := e.replaceFVars placeholders functions
+  -- A proof stated with the function in place of what it is bound to: the two
+  -- are the same once it is unfolded, which the kernel does.
+  let hinted (proof type : Expr) := mkApp2 (mkConst ``id [levelZero]) type proof
+  let mut out := #[]
+  for (h, type', role) in stated do
+    out := out.push (match type' with
+      | some t => (hinted h (local_ t), role)
+      | none => (h, role))
+  for l in lifted do
+    out := out.push (hinted (local_ l.proof) (local_ l.says), .axiom)
+  return (goal, out)
+
 /-- The hypotheses to refute, with their roles, and the goal they came from. -/
 structure Result where
   hypotheses : Array (Expr × Role)

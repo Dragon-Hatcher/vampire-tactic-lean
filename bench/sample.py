@@ -9,7 +9,7 @@ The population is every problem that is provable and can be stated in Lean:
   converter nor the vampire tactic reads);
 * SMT-LIB: `unsat` benchmarks of the indexed logics.
 A problem is drawn, converted, and kept if the converter can state it within its size
-cap; otherwise the next one is drawn. Problems in this repository's corpus, and in any
+cap and Lean elaborates the statement; otherwise the next one is drawn. Problems in this repository's corpus, and in any
 suite already under `<data-dir>/suites/`, are never drawn: those have been looked at.
 
 Each problem gets a directory with the original input, the statement (`stmt.lean`,
@@ -36,6 +36,29 @@ def seen(data: Path) -> set[str]:
     for meta in (data / "suites").glob("*/*/meta.json"):
         out.add(json.loads(meta.read_text())["stem"])
     return out
+
+
+STATABLE = """import Lean
+import Mathlib.Algebra.Order.Archimedean.Real.Basic
+set_option maxHeartbeats 0
+set_option maxRecDepth 1000000
+set_option linter.all false
+"""
+
+
+def statable(stmt: str) -> bool:
+    """Whether Lean elaborates the statement at all: some problems exceed what it can
+    represent, and then no tactic can be run on them, so they are no problem to draw."""
+    path = REPO / "BenchStatable.lean"
+    path.write_text(STATABLE + stmt.replace("TACTIC", "sorry"))
+    try:
+        r = subprocess.run(["lake", "lean", path.name], cwd=REPO, capture_output=True,
+                           text=True, timeout=600)
+        return r.returncode == 0 and ": error:" not in r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        return False
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def extract(entries: list[dict], dest: Path, zst: bool) -> dict[str, Path]:
@@ -93,6 +116,10 @@ def sample_tptp(data: Path, suite: Path, rng: random.Random, n: int, avoid: set[
                 print(f"skip {e['stem']}: {r.stderr.strip()[:100]}", flush=True)
                 shutil.rmtree(d)
                 continue
+            if not statable(r.stdout):
+                print(f"skip {e['stem']}: Lean cannot elaborate the statement", flush=True)
+                shutil.rmtree(d)
+                continue
             (d / "stmt.lean").write_text(r.stdout)
             (d / "meta.json").write_text(json.dumps(
                 {"suite": "tptp", "stem": e["stem"], "status": e["status"],
@@ -130,6 +157,10 @@ def sample_smt(data: Path, suite: Path, rng: random.Random, n: int, avoid: set[s
                                capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 print(f"skip {e['stem']}: {r.stderr.strip()[:100]}", flush=True)
+                shutil.rmtree(d)
+                continue
+            if not statable(r.stdout):
+                print(f"skip {e['stem']}: Lean cannot elaborate the statement", flush=True)
                 shutil.rmtree(d)
                 continue
             (d / "stmt.lean").write_text(r.stdout)

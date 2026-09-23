@@ -99,6 +99,10 @@ def pose (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma) :
   let hypotheses ← preprocessed.goal.withContext <|
     preprocessed.hypotheses.mapM fun (h, role) => do
       return (← Preprocess.withoutPowers h, role)
+  -- Vampire reads no `if-then-else` over terms, so each is lifted out into a
+  -- function defined by its two cases.
+  let (goal, hypotheses) ← Preprocess.liftIte preprocessed.goal hypotheses
+  let preprocessed := { preprocessed with goal, hypotheses }
   let preprocessing := (← IO.monoMsNow) - started
   let (problem, symbols) ← preprocessed.goal.withContext (problemOf hypotheses)
   let translation := (← IO.monoMsNow) - started - preprocessing
@@ -250,7 +254,9 @@ private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withCont
   let value ← mkLambdaFVars locals proof
   let levels := (collectLevelParams (collectLevelParams {} type) value).params.toList
   let name ← mkAuxLemma levels type value
-  return mkAppN (mkConst name (levels.map mkLevelParam)) locals
+  -- A let-bound local is a `let` in the lemma, not an argument of it.
+  let args ← locals.filterM fun x => return !(← x.fvarId!.getDecl).isLet
+  return mkAppN (mkConst name (levels.map mkLevelParam)) args
 
 /-- Why the search came back empty, as the error the tactic reports. -/
 private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α := do
