@@ -230,18 +230,22 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
         -- The clause usually says just what the step put in it, so that is
         -- looked for first: a clause of a few hundred literals is refuted a
         -- literal at a time, once for every step of the clausification.
+        -- `fun p => n (inject p)`, written with the variable in place: the
+        -- injection is constructors applied to the clause's parts, which have
+        -- nothing to abstract, and abstracting walks the whole clause.
+        let refuting (i : Nat) : ReconstructM Expr := do
+          let some part := parts[i]? | throwError "the clause has no part {i}"
+          return .lam `p part
+            (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
         if let some i := parts.findIdx? (· == e) then
-          return ← withLocalDeclD `p e fun p => do
-            mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
+          return ← refuting i
         -- What a step put in a clause is recorded before the clausifier's own
         -- normalisation has unwrapped a negation into the sign it carries, so
         -- the part is looked up by what the two say with that undone.
         if let some i := strippedParts.findIdx? (· == stripped e) then
           let part := parts[i]!
           if let some says ← sameUpToDoubleNegation part e then
-            let refutation ← withLocalDeclD `p part fun p => do
-              mkLambdaFVars #[p] (mkApp n (← injectGiven parts i p (suffix? := some suffix)))
-            return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], refutation]
+            return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], ← refuting i]
         throwError "the clause does not say{indentExpr e}\nwhich a step it was \
           reached from does"
       let body ←
@@ -261,7 +265,11 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
                 -- A position the step kept is one of this clause's own.
                 return mkApp (← refuted (← instantiateMVars (← inferType h))) h)
             parentProof
-      mkLambdaFVars #[n] body
+      -- Abstracted directly where there is nothing for `mkLambdaFVars` to do
+      -- beyond it: no metavariable for it to account for.
+      let body ← instantiateMVars body
+      if body.hasMVar then mkLambdaFVars #[n] body
+      else return .lam `n (mkApp (mkConst ``Not) target) (body.abstract #[n]) .default
   return ofNotNot target contradiction
 
 /--
@@ -561,7 +569,10 @@ built for means nothing in another.
 private def chainStep (r : Replay) (parentSays says : Expr)
     (prove : Expr → ReconstructM Expr) : ReconstructM Expr := do
   let stated ← mkArrow parentSays says
-  let occurring := r.locals.filter fun x => stated.containsFVar x.fvarId!
+  -- Which locals a term mentions is asked by one walk that visits each shared
+  -- subterm once; `containsFVar` walks it as a tree, once per local.
+  let mentioned := (Lean.collectFVars {} stated).fvarSet
+  let occurring := r.locals.filter fun x => mentioned.contains x.fvarId!
   let key ← mkLambdaFVars occurring stated
   if let some taken := (← get).clausifyChain[key]? then
     return mkAppN taken occurring
@@ -570,8 +581,8 @@ private def chainStep (r : Replay) (parentSays says : Expr)
   let abstracted ← instantiateMVars (← mkLambdaFVars occurring step)
   -- Nor a term with a hole in it: what fills the hole is settled where the
   -- term was built, and a term used again elsewhere would carry that with it.
-  unless abstracted.hasExprMVar
-      || abstracted.hasAnyFVar fun id => r.locals.any (·.fvarId! == id) do
+  let left := (Lean.collectFVars {} abstracted).fvarSet
+  unless abstracted.hasExprMVar || r.locals.any (left.contains ·.fvarId!) do
     modify fun s => { s with clausifyChain := s.clausifyChain.insert key abstracted }
   return step
 
