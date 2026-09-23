@@ -251,11 +251,18 @@ private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withCont
   -- term, by how many of the proof's lets it is under. `IO.lazyPure` makes
   -- the pure sharing pass run here, rather than be deferred or floated
   -- elsewhere by the compiler.
+  let t0 ← IO.monoMsNow
   let proof ← IO.lazyPure fun _ => ShareCommon.shareCommon' proof
+  let t1 ← IO.monoMsNow
   let proof ← Vampire.Reconstruct.hoistClosed proof
+  let t2 ← IO.monoMsNow
   let value ← mkLambdaFVars locals proof
   let levels := (collectLevelParams (collectLevelParams {} type) value).params.toList
+  let t3 ← IO.monoMsNow
   let name ← mkAuxLemma levels type value
+  let t4 ← IO.monoMsNow
+  trace[vampire.timing] "the lemma: sharing {t1 - t0}ms, hoisting {t2 - t1}ms, \
+    closing it {t3 - t2}ms, adding it {t4 - t3}ms"
   -- A let-bound local is a `let` in the lemma, not an argument of it.
   let args ← locals.filterM fun x => return !(← x.fvarId!.getDecl).isLet
   return mkAppN (mkConst name (levels.map mkLevelParam)) args
