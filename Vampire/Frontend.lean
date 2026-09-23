@@ -225,10 +225,12 @@ private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withCont
   let locals := lctx.foldl (init := #[]) fun acc decl =>
     if used.fvarSet.contains decl.fvarId then acc.push decl.toExpr else acc
   let type ← mkForallFVars locals type
-  -- Shared as the elaborator shares a theorem's value before the kernel sees
-  -- it, the kernel's caches being by pointer; and shared first, so that what
-  -- is abstracted is the smaller term.
+  -- Shared first, so that what is abstracted is the smaller term and a
+  -- formula the proof uses in many places is one subterm; then each such is
+  -- let-bound once, since abstracting the locals makes each use a different
+  -- term, by how many of the proof's lets it is under.
   let proof ← IO.lazyPure fun _ => ShareCommon.shareCommon' proof
+  let proof ← Vampire.Reconstruct.hoistClosed proof
   let value ← mkLambdaFVars locals proof
   let levels := (collectLevelParams (collectLevelParams {} type) value).params.toList
   let name ← mkAuxLemma levels type value

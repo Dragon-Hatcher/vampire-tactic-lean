@@ -92,4 +92,89 @@ def bindLets (bound : Array Expr) (body : Expr) : ReconstructM Expr := do
     out := .letE decl.userName type value out (nondep := false)
   return out
 
+/-- What `hoistClosed` has bound so far, and what it made of each subterm. -/
+private structure Hoisted where
+  done : Std.HashMap Expr Expr := {}
+  locals : Array FVarId := #[]
+  types : Array Expr := #[]
+  values : Array Expr := #[]
+
+/--
+`e` with each of its subterms that mentions no bound variable -- a formula, a
+term, a proof from hypotheses alone -- replaced by a local standing for it,
+recorded with its type and value, each over the locals recorded before it.
+-/
+private partial def hoist (e : Expr) : StateRefT Hoisted MetaM Expr := do
+  match e with
+  | .bvar .. | .fvar .. | .mvar .. | .sort .. | .const .. | .lit .. => return e
+  | _ => pure ()
+  if let some done := (← get).done[e]? then return done
+  let rebuilt ← match e with
+    | .app .. => do
+      let args ← e.getAppArgs.mapM hoist
+      pure (mkAppN (← hoist e.getAppFn) args)
+    | .lam n t b bi => do pure (.lam n (← hoist t) (← hoist b) bi)
+    | .forallE n t b bi => do pure (.forallE n (← hoist t) (← hoist b) bi)
+    | .letE n t v b nondep => do pure (.letE n (← hoist t) (← hoist v) (← hoist b) nondep)
+    | .mdata d b => do pure (.mdata d (← hoist b))
+    | .proj s i b => do pure (.proj s i (← hoist b))
+    | _ => pure e
+  let result ← if e.hasLooseBVars then pure rebuilt else do
+    let type ← hoist (← inferType e)
+    let id ← mkFreshFVarId
+    modify fun s => { s with locals := s.locals.push id, types := s.types.push type,
+                             values := s.values.push rebuilt }
+    pure (.fvar id)
+  modify fun s => { s with done := s.done.insert e result }
+  return result
+
+/--
+`e` with the `j`th of `index` replaced by `bvar (depth - 1 - j)`, `depth` being
+how many of them are bound above where `e` sits, including the binders `e` is
+under; what is kept is by subterm and depth.
+-/
+private partial def abstractHoisted (index : Std.HashMap FVarId Nat) (e : Expr) (depth : Nat) :
+    StateM (Std.HashMap (Expr × Nat) Expr) Expr := do
+  if !e.hasFVar then return e
+  match e with
+  | .fvar id => return match index[id]? with
+    | some j => .bvar (depth - 1 - j)
+    | none => e
+  | _ => pure ()
+  if let some done := (← get)[(e, depth)]? then return done
+  let go := abstractHoisted index
+  let result ← match e with
+    | .app f a => do pure (e.updateApp! (← go f depth) (← go a depth))
+    | .lam _ t b _ => do pure (e.updateLambdaE! (← go t depth) (← go b (depth + 1)))
+    | .forallE _ t b _ => do pure (e.updateForallE! (← go t depth) (← go b (depth + 1)))
+    | .letE n t v b nondep => do
+      pure (.letE n (← go t depth) (← go v depth) (← go b (depth + 1)) nondep)
+    | .mdata _ b => do pure (e.updateMData! (← go b depth))
+    | .proj _ _ b => do pure (e.updateProj! (← go b depth))
+    | _ => pure e
+  modify (·.insert (e, depth) result)
+  return result
+
+/--
+`e`, a closed proof over the context's locals, with every one of its subterms
+that mentions no bound variable let-bound once, above the rest.
+
+The locals a replayed proof is over are abstracted when it is made a lemma, and
+a local is then a de Bruijn index that counts every let above where it is used:
+a formula used under a thousand steps' lets is a thousand different terms, and
+the kernel checks each. Bound above them all, it is one local, used by index.
+Wants `e` maximally shared, as what it keeps is by subterm.
+-/
+def hoistClosed (e : Expr) : MetaM Expr := do
+  let (body, s) ← (hoist e).run {}
+  let index := Std.HashMap.ofList s.locals.toList.zipIdx
+  let n := s.locals.size
+  let mut out := ((abstractHoisted index body n).run {}).1
+  for k in [0 : n] do
+    let j := n - 1 - k
+    let ((type, value), _) := (do
+      pure (← abstractHoisted index s.types[j]! j, ← abstractHoisted index s.values[j]! j)).run {}
+    out := .letE `h type value out (nondep := false)
+  return out
+
 end Vampire.Reconstruct
