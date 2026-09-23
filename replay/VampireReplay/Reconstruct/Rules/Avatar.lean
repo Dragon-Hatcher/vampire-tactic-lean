@@ -218,7 +218,7 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
         | throwError "literal {j} of a propositional premise is not false"
       contradicts (mkConst ``False) says refuting h negated)
       proof (motive? := some (mkConst ``False))
-    mkLetFVars bound contradiction (usedLetOnly := false)
+    bindLets bound contradiction
   else
     -- More than one literal left, so the premise would be a case split rather
     -- than a propagation. The solver's derivations are propagations, each
@@ -288,7 +288,7 @@ private partial def satBound (origins : Std.HashMap UInt32 (Expr × Expr))
       | throwError "a propositional refutation without a clause"
     let some proof := proved[root.index]?
       | throwError "the refuting clause was not proved"
-    mkLetFVars bound proof (usedLetOnly := false)
+    bindLets bound proof
 
 /--
 `avatar_split_clause`: a clause holds only if one of its components does.
