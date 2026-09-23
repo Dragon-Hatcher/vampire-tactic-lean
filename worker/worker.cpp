@@ -1478,8 +1478,17 @@ long g_setupMs = 0;
 /** When this process began, for `g_setupMs`. */
 std::chrono::steady_clock::time_point g_startedAt;
 
-/** Encodes whatever proof this process has, if any, and writes it out. */
-void emitProof()
+/**
+ * Where a portfolio slice writes, beside `g_outPath`: several may run at once
+ * and more than one succeed, and only the schedule knows which it settled on.
+ */
+std::string slicePath(pid_t slice)
+{
+  return g_outPath + "." + std::to_string(slice);
+}
+
+/** Encodes whatever proof this process has, if any, and writes it to `path`. */
+void emitProofTo(const std::string& path)
 {
   Encoder enc;
   enc.encodeSignature();
@@ -1502,9 +1511,13 @@ void emitProof()
     InferenceStore::instance()->outputProof(proof, r);
     enc.proofText = proof.str();
   }
-  write(g_outPath, enc,
+  write(path, enc,
         static_cast<uint32_t>(env.statistics->terminationReason), refutation);
 }
+
+void emitProof() { emitProofTo(g_outPath); }
+
+void emitSliceProof() { emitProofTo(slicePath(getpid())); }
 
 bool isPortfolioMode(Options::Mode mode)
 {
@@ -1565,13 +1578,18 @@ int main(int argc, char** argv)
     if (isPortfolioMode(env.options->mode())) {
       // The slice that succeeds runs in a child of this process and exits
       // there, so it has to do the encoding itself; the parent never sees its
-      // refutation. Portfolio mode preprocesses per slice, so not here.
-      UIHelper::onProofFound = &emitProof;
+      // refutation. It writes to a file of its own, since with several slices
+      // running more than one may succeed, and the schedule then says which
+      // is kept. Portfolio mode preprocesses per slice, so not here.
+      UIHelper::onProofFound = &emitSliceProof;
       // Starting up and parsing are behind us, and a run that names the
       // strategy pays for both of them too.
       g_setupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - g_startedAt).count();
       CASC::PortfolioMode::perform(prb);
+      if (pid_t winner = CASC::PortfolioMode::winner)
+        if (std::rename(slicePath(winner).c_str(), g_outPath.c_str()) != 0)
+          throw UserErrorException("cannot rename the winning slice's proof");
     } else {
       env.options->setForcedOptionValues();
       env.options->checkGlobalOptionConstraints();

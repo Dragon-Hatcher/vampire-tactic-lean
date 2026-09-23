@@ -30,6 +30,14 @@ structure Config where
   /-- The strategy schedule `portfolio` mode follows. -/
   schedule : String := "casc"
   /--
+  How many of the schedule's strategies to run at once.
+
+  The proof is the one the earliest strategy of the schedule to succeed finds,
+  each given what it would be given running alone, so this decides only how
+  soon it comes: the same proof, whatever the number.
+  -/
+  cores : Nat := 4
+  /--
   One strategy to run instead of the schedule, as the tactic reports it.
 
   The schedule is a few hundred strategies and only the one that succeeds is
@@ -70,7 +78,7 @@ namespace Config
 
 def toArgs (cfg : Config) : Array String :=
   #[s!"time_limit={cfg.timeout}", s!"mode={cfg.mode}", s!"schedule={cfg.schedule}",
-    s!"heartbeats={cfg.heartbeats}", s!"wall_limit={cfg.wallLimit}"]
+    s!"heartbeats={cfg.heartbeats}", s!"wall_limit={cfg.wallLimit}", s!"cores={cfg.cores}"]
     ++ (if cfg.strategy.isEmpty then #[] else #[s!"strategy={cfg.strategy}"])
     ++ (if cfg.forced.isEmpty then #[] else
       #[s!"forced_options={String.intercalate ":" (cfg.forced.map
