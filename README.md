@@ -119,8 +119,9 @@ theorem real_lin' (x y : ℝ) (h : x + y = 6) (h₂ : x - y = 2) : x = 4 := by
 
 The search is reproducible. Vampire's limits are measured in beats, steps it
 counts as it searches, rather than on the clock, so the same goal gives the same
-proof on a slow machine and a fast one, whatever `cores` is. `wallLimit` is the
-one exception, and a run that reaches it says so.
+proof on a slow machine and a fast one. How many strategies run at once does not
+change the proof a strategy finds, only how far the search gets within
+`timeout`. `wallLimit` is the one exception, and a run that reaches it says so.
 
 ## Options
 
@@ -128,10 +129,10 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 
 | option | default | what it does |
 | --- | --- | --- |
-| `timeout` | 30 | seconds the prover may search, measured in beats |
+| `timeout` | 30 | seconds the prover may search, measured in beats, for each of `cores` |
 | `heartbeats` | 500 | beats per millisecond of `timeout`; 0 uses the clock |
 | `wallLimit` | 60 | real-time limit in seconds, whatever the beats say; 0 for none |
-| `cores` | 4 | strategies run at once; the proof does not depend on it |
+| `cores` | 4 | strategies of the schedule run at once |
 | `schedule` | `casc` | the strategy schedule to work through |
 | `strategy` | — | run only this strategy, as the tactic suggests it |
 | `options` | — | extra vampire options, as `#[("name", "value")]` |

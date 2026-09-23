@@ -7,8 +7,11 @@ namespace Vampire
 /-- How to run vampire. Options are passed to the worker as `name=value`. -/
 structure Config where
   /--
-  Time limit for the search in seconds. It is measured in beats (see
-  `heartbeats`), not on the clock.
+  Time limit for the search in seconds, for each of the `cores` strategies
+  running at once. It is measured in beats (see `heartbeats`), not on the clock:
+  the schedule is given `timeout × cores` seconds' worth, which the strategies
+  running at once share, so the search takes about `timeout` seconds of real
+  time.
   -/
   timeout : Nat := 30
   /--
@@ -29,9 +32,10 @@ structure Config where
   /-- The strategy schedule `portfolio` mode follows. -/
   schedule : String := "casc"
   /--
-  How many strategies of the schedule run at once. The proof does not depend on
-  it: the earliest successful strategy of the schedule wins, with the budget it
-  would get running alone.
+  How many strategies of the schedule run at once. Among the strategies the
+  search reaches, the earliest in the schedule that succeeds wins, with the
+  budget it would get running alone, so how many run at once does not change
+  which proof a strategy finds; more of them reach further within `timeout`.
   -/
   cores : Nat := 4
   /--
@@ -73,7 +77,8 @@ deriving Inhabited
 namespace Config
 
 def toArgs (cfg : Config) : Array String :=
-  #[s!"time_limit={cfg.timeout}", s!"mode={cfg.mode}", s!"schedule={cfg.schedule}",
+  #[s!"time_limit={cfg.timeout * max 1 cfg.cores}", s!"mode={cfg.mode}",
+    s!"schedule={cfg.schedule}",
     s!"heartbeats={cfg.heartbeats}", s!"wall_limit={cfg.wallLimit}", s!"cores={cfg.cores}"]
     ++ (if cfg.strategy.isEmpty then #[] else #[s!"strategy={cfg.strategy}"])
     ++ (if cfg.forced.isEmpty then #[] else
