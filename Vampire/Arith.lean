@@ -381,6 +381,12 @@ def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
     | none => pure fact
   let (facts, claim, back) ← substituted facts claim
   let facts := facts ++ (← congruences facts claim)
+  -- Two facts that deny each other settle anything, and over a sort that is
+  -- not numbers no procedure could be asked to see it.
+  if let some absurdity ← denying facts then
+    return ← back (← match claim with
+      | none => pure absurdity
+      | some c => pure (mkApp2 (mkConst ``False.elim [.zero]) c absurdity))
   back <| ← match claim with
   | none => VampireReplay.Abstract.abstracting askAbout facts none
   | some c => do
@@ -397,6 +403,13 @@ def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
       let proof ← VampireReplay.Abstract.abstracting askAbout facts (some r.expr)
       mkEqMPR (← r.getProof) proof
 where
+  /-- `False` from a fact and one that denies it, or `none`. -/
+  denying (facts : Array Expr) : MetaM (Option Expr) := do
+    for negative in facts do
+      let some denied := (← instantiateMVars (← inferType negative)).not? | continue
+      if let some positive ← stating facts denied then
+        return some (mkApp negative positive)
+    return none
   /-- A fact that states the claim, once both are written the one way: then
   there is nothing to ask, and over a sort that is not numbers no procedure
   could be asked. An equation states it either way round, since vampire
