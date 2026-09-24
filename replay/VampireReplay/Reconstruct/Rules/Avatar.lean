@@ -124,6 +124,18 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
     #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
 
 /--
+What the propositional clauses met so far say, by their index, and what
+proves each.
+
+Persistent: a refutation binds each clause under the ones before it, and a map
+that copied itself on every insert would be kept, a copy at each binder, for as
+long as the binders are open -- one per clause of tens of thousands.
+-/
+private abbrev Stated := Lean.PersistentHashMap UInt32 (Array Expr × Expr)
+@[inherit_doc Stated]
+private abbrev Proved := Lean.PersistentHashMap UInt32 Expr
+
+/--
 That the literals `parts` are not all false: `¬l₁ → … → ¬lₙ → False`.
 
 This is how a propositional clause is stated here, rather than as the
@@ -207,21 +219,21 @@ holds, and the last of them has none left.
 leaves is bound rather than written out, so a literal a dozen later premises
 are false by is proved once.
 -/
-private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
-    (proved : Std.HashMap UInt32 Expr)
-    (refuted : Std.HashMap String Expr) (premises : Array SatClause)
+private partial def propagate (states : Stated)
+    (proved : Proved)
+    (refuted : Lean.PersistentHashMap String Expr) (premises : Array SatClause)
     (i : Nat) (bound : Array Expr) : ReconstructM Expr := do
   let some premise := premises[i]?
     | throwError "unit propagation through the recorded premises ended without \
       a contradiction"
   let names := premise.literals
-  let some proof := proved[premise.index]?
+  let some proof := proved.find? (premise.index)
     | throwError "a propositional clause used before it was proved"
-  let some (parts, _) := states[premise.index]?
+  let some (parts, _) := states.find? (premise.index)
     | throwError "a propositional clause used before it was stated"
   let unassigned := names.zipIdx.filterMap fun (name, j) =>
-    if (refuted[name]?).isNone then some j else none
-  let refutation (j : Nat) : Expr := (refuted[names[j]!]?).getD (.bvar 0)
+    if (refuted.find? (name)).isNone then some j else none
+  let refutation (j : Nat) : Expr := (refuted.find? names[j]!).getD (.bvar 0)
   if let #[u] := unassigned then
     -- `¬¬q` for the one literal `q` left, and so the flip of `q` is false.
     let some says := parts[u]? | throwError "missing literal"
@@ -254,11 +266,11 @@ and then it follows from the clauses it was derived from by unit propagation:
 supposing its own literals false, each clause in turn has all but one of its
 literals false, so that one holds -- and the last has none left.
 -/
-private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
-    (proved : Std.HashMap UInt32 Expr)
+private def satClause (states : Stated)
+    (proved : Proved)
     (origins : Std.HashMap UInt32 (Expr × Expr)) (c : SatClause) :
     ReconstructM Expr := do
-  let some (parts, _) := states[c.index]?
+  let some (parts, _) := states.find? (c.index)
     | throwError "a propositional clause proved before it was stated"
   let decls := parts.mapIdx fun i l =>
     (Name.mkSimple s!"h{i}", fun (_ : Array Expr) => pure (mkApp (mkConst ``Not) l))
@@ -279,105 +291,6 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
     let refuted := c.literals.zipIdx.foldl (init := {})
       fun m (name, i) => m.insert name refutations[i]!
     mkLambdaFVars refutations (← propagate states proved refuted c.premises 0 #[])
-
-/--
-A proof of what a derived propositional clause says, as a lemma of its own:
-the clause over propositional atoms, one for each name it and its premises
-speak of, from the premises over the same atoms, applied to what the names
-stand for and to the premises' proofs.
-
-The solver's derivations are propositional, and what a name stands for is a
-whole first-order formula only the leaves need to see. Built in the proof,
-every derivation sat under the ones before it, and each formula it used was a
-different term at each depth; as a lemma each is a small closed term the
-kernel checks alone. And one derivation's lemma is every derivation's that
-has its shape, which a solver's many small learnt clauses often do.
--/
-private def derivedAsLemma (proved : Std.HashMap UInt32 Expr)
-    (origins : Std.HashMap UInt32 (Expr × Expr)) (c : SatClause) :
-    ReconstructM Expr := do
-  -- The names, in the order they are met, so two derivations of one shape
-  -- state one lemma.
-  let mut keys : Array String := #[]
-  let mut premises : Array SatClause := #[]
-  for name in c.literals do
-    let key := (splitName name).2
-    unless keys.contains key do keys := keys.push key
-  for p in c.premises do
-    unless premises.any (·.index == p.index) do premises := premises.push p
-    for name in p.literals do
-      let key := (splitName name).2
-      unless keys.contains key do keys := keys.push key
-  let saved := (← get).named
-  let mut bodies := #[]
-  for key in keys do
-    let some body := saved[key]? | throwIntroduced "the named subformula" key
-    bodies := bodies.push body
-  let atomDecls := keys.mapIdx fun i _ =>
-    (Name.mkSimple s!"A{i}", fun (_ : Array Expr) => pure (mkSort .zero))
-  let (type, value) ← withLocalDeclsD atomDecls fun atoms => do
-    let rebound := keys.zipIdx.foldl (fun m (key, i) => m.insert key atoms[i]!) saved
-    modify fun s => { s with named := rebound }
-    try
-      let stated ← premises.mapM satClauseParts
-      let hypDecls := stated.mapIdx fun i (_, says) =>
-        (Name.mkSimple s!"p{i}", fun (_ : Array Expr) => pure says)
-      withLocalDeclsD hypDecls fun hyps => do
-        let mut states : Std.HashMap UInt32 (Array Expr × Expr) := {}
-        let mut provedHere : Std.HashMap UInt32 Expr := {}
-        for (p, i) in premises.zipIdx do
-          states := states.insert p.index stated[i]!
-          provedHere := provedHere.insert p.index hyps[i]!
-        let (parts, target) ← satClauseParts c
-        states := states.insert c.index (parts, target)
-        let proof ← satClause states provedHere origins c
-        return (← mkForallFVars (atoms ++ hyps) target,
-          ← mkLambdaFVars (atoms ++ hyps) proof)
-    finally
-      modify fun s => { s with named := saved }
-  -- Added directly, and looked up by what it states before that: a lemma of
-  -- replay's own is closed, propositional and safe, so the checks and the
-  -- environment-wide cache `mkAuxLemma` goes through are for nothing here.
-  let name ← match (← get).lemmas[type]? with
-    | some name => pure name
-    | none => do
-      let name ← mkAuxDeclName `_satClause
-      addDecl (.thmDecl { name, levelParams := [], type, value })
-      modify fun s => { s with lemmas := s.lemmas.insert type name }
-      pure name
-  let mut args := bodies
-  for p in premises do
-    let some h := proved[p.index]? | throwError "a propositional clause used before it was proved"
-    args := args.push h
-  return mkAppN (mkConst name) args
-
-/--
-The refutation, with every clause it rests on bound to what proves it.
-
-Bound rather than written out: a clause a dozen derivations use would otherwise
-be proved into each of them, and every binder of the proof being built would
-have to be put through the whole of what it already holds.
--/
-private partial def satBound (origins : Std.HashMap UInt32 (Expr × Expr))
-    (order : Array SatClause) (i : Nat)
-    (states : Std.HashMap UInt32 (Array Expr × Expr))
-    (proved : Std.HashMap UInt32 Expr)
-    (bound : Array Expr) : ReconstructM Expr := do
-  if h : i < order.size then
-    let c := order[i]
-    let (parts, stated) ← satClauseParts c
-    let states := states.insert c.index (parts, stated)
-    let value ← if c.origin?.isSome then satClause states proved origins c
-      else derivedAsLemma proved origins c
-    withLetDecl (Name.mkSimple s!"c{i}") stated value fun s =>
-      satBound origins order (i + 1) states (proved.insert c.index s)
-        (bound.push s)
-  else
-    let some root := order.back?
-      | throwError "a propositional refutation without a clause"
-    let some proof := proved[root.index]?
-      | throwError "the refuting clause was not proved"
-    bindLets bound proof
 
 /--
 `avatar_split_clause`: a clause holds only if one of its components does.
@@ -567,10 +480,119 @@ def splitClause (step : Step) : ReconstructM Expr := do
         ← mkLambdaFVars #[h] contradiction]
 
 /--
+How many consecutive derived clauses one lemma proves.
+
+A lemma states the premises it takes from outside itself, while the clauses it
+derives are stated once each, where they are proved: the more of a
+refutation's clauses one lemma derives, the fewer of their premises are
+stated again. But the kernel checks a lemma whole, sharing a copy of it and
+caching the type of each of its subterms as it goes, so what one check holds
+is several times the lemma: a refutation of tens of thousands of clauses in
+one lemma is more than a machine holds at once.
+-/
+private def batchSize : Nat := 4096
+
+/--
+A proof that a run of derived propositional clauses hold, as a lemma of its
+own: for propositional atoms, one for each name the clauses and their premises
+speak of, and the premises from outside the run, the conjunction of `exports`,
+the clauses of the run something after it uses. Gives the lemma applied to what the names stand for and to
+the outside premises' proofs.
+
+The solver's derivations are propositional, and what a name stands for is a
+whole first-order formula only the leaves need to see. Built in the proof,
+every derivation sat under the ones before it, and each formula it used was a
+different term at each depth; as a lemma each is a closed term the kernel
+checks alone. Inside it, each clause of the run is proved once, as a `let`
+over the ones before it.
+-/
+private partial def derivedAsLemma (proved : Proved)
+    (origins : Std.HashMap UInt32 (Expr × Expr)) (run exports : Array SatClause) :
+    ReconstructM Expr := do
+  -- The names, in the order they are met, and the premises from outside the
+  -- run, each once.
+  let inRun : Std.HashSet UInt32 := run.foldl (·.insert ·.index) {}
+  let mut keys : Array String := #[]
+  let mut seenKeys : Std.HashSet String := {}
+  let mut outside : Array SatClause := #[]
+  let mut seenOutside : Std.HashSet UInt32 := {}
+  for c in run do
+    for clause in #[c] ++ c.premises do
+      for name in clause.literals do
+        let key := (splitName name).2
+        unless seenKeys.contains key do
+          seenKeys := seenKeys.insert key
+          keys := keys.push key
+    for p in c.premises do
+      unless inRun.contains p.index || seenOutside.contains p.index do
+        seenOutside := seenOutside.insert p.index
+        outside := outside.push p
+  let saved := (← get).named
+  let mut bodies := #[]
+  for key in keys do
+    let some body := saved[key]? | throwIntroduced "the named subformula" key
+    bodies := bodies.push body
+  let atomDecls := keys.mapIdx fun i _ =>
+    (Name.mkSimple s!"A{i}", fun (_ : Array Expr) => pure (mkSort .zero))
+  let (type, value) ← withLocalDeclsD atomDecls fun atoms => do
+    let rebound := keys.zipIdx.foldl (fun m (key, i) => m.insert key atoms[i]!) saved
+    modify fun s => { s with named := rebound }
+    try
+      let outsideStated ← outside.mapM satClauseParts
+      let runHere ← run.mapM satClauseParts
+      let hypDecls := outsideStated.mapIdx fun i (_, says) =>
+        (Name.mkSimple s!"p{i}", fun (_ : Array Expr) => pure says)
+      withLocalDeclsD hypDecls fun hyps => do
+        let mut states : Stated := {}
+        let mut provedHere : Proved := {}
+        for (p, i) in outside.zipIdx do
+          states := states.insert p.index outsideStated[i]!
+          provedHere := provedHere.insert p.index hyps[i]!
+        for (c, i) in run.zipIdx do
+          states := states.insert c.index runHere[i]!
+        let exportStated ← exports.mapM satClauseParts
+        let says := exportStated.map (·.2)
+        let suffix := suffixJunctions ``And ``True says
+        -- Each clause of the run in turn, bound once and used by those after.
+        let rec derive (i : Nat) (provedHere : Proved)
+            (bound : List Expr) : ReconstructM Expr := do
+          let some c := run[i]?
+            | do
+              let proofs ← exports.mapM fun c => do
+                let some h := provedHere.find? (c.index)
+                  | throwError "a clause of the run was not proved"
+                pure h
+              bindLets bound.reverse.toArray (← introGiven says fun j => pure proofs[j]!)
+          let proof ← satClause states provedHere origins c
+          withLetDecl (Name.mkSimple s!"c{i}") runHere[i]!.2 proof fun h =>
+            derive (i + 1) (provedHere.insert c.index h) (h :: bound)
+        let body ← derive 0 provedHere []
+        return (← mkForallFVars (atoms ++ hyps) suffix[0]!,
+          ← mkLambdaFVars (atoms ++ hyps) body)
+    finally
+      modify fun s => { s with named := saved }
+  -- Added directly: a lemma of replay's own is closed, propositional and safe,
+  -- so the checks and the environment-wide cache `mkAuxLemma` goes through are
+  -- for nothing here.
+  let name ← mkAuxDeclName `_satClauses
+  addDecl (.thmDecl { name, levelParams := [], type, value })
+  let mut args := bodies
+  for p in outside do
+    let some h := proved.find? (p.index)
+      | throwError "a propositional clause used before it was proved"
+    args := args.push h
+  return mkAppN (mkConst name) args
+
+/--
 `avatar_refutation`: the propositional problem the names were handed to has no
 model, so what they stand for cannot all hold.
+
+The clauses that stand for first-order ones are proved first, from what proves
+those; the solver's derived clauses then come in runs of `batchSize`, each run
+from a lemma proving their conjunction, which is taken apart a conjunct at a
+time. All of them are bound once, and the last, the empty clause, is `False`.
 -/
-def refutation (step : Step) : ReconstructM Expr := do
+partial def refutation (step : Step) : ReconstructM Expr := do
   let some root := step.unit.satPremise?
     | throwError "an avatar refutation without the propositional clause it \
       stands on"
@@ -578,6 +600,57 @@ def refutation (step : Step) : ReconstructM Expr := do
   for (parent, premise) in step.unit.parents.zip step.premises do
     origins := origins.insert parent.number premise
   let (_, order) := ((satOrder root).run ({}, #[])).2
-  satBound origins order 0 {} {} #[]
+  let shadows := order.filter (·.origin?.isSome)
+  let derived := order.filter (·.origin?.isNone)
+  -- The last run using each derived clause, the refuting one being used after
+  -- all of them: a run proves the clauses used after it, and the rest of its
+  -- clauses stay inside its lemma.
+  let mut lastUse : Std.HashMap UInt32 Nat := {}
+  for (c, p) in derived.zipIdx do
+    for q in c.premises do
+      lastUse := lastUse.insert q.index (max (lastUse.getD q.index 0) (p / batchSize))
+  lastUse := lastUse.insert root.index derived.size
+  -- The derived clauses, a run at a time.
+  let rec runs (i : Nat) (states : Stated)
+      (proved : Proved) (bound : List Expr) : ReconstructM Expr := do
+    if i ≥ derived.size then
+      let some proof := proved.find? (root.index)
+        | throwError "the refuting clause was not proved"
+      return ← bindLets bound.reverse.toArray proof
+    let run := derived.extract i (i + batchSize)
+    let exports := run.filter fun c => lastUse.getD c.index 0 > i / batchSize
+    let runStated ← exports.mapM satClauseParts
+    let conjunction ← derivedAsLemma proved origins run exports
+    let says := runStated.map (·.2)
+    let suffix := suffixJunctions ``And ``True says
+    -- `c₁` is the conjunction's left, and what is left of it its right, and
+    -- so on: a projection each, each bound, so no clause is reached through
+    -- the ones before it.
+    let rec split (k : Nat) (rest : Expr) (states : Stated)
+        (proved : Proved) (bound : List Expr) : ReconstructM Expr := do
+      let some c := exports[k]? | runs (i + run.size) states proved bound
+      let states := states.insert c.index runStated[k]!
+      if k + 1 == exports.size then
+        return ← withLetDecl (Name.mkSimple s!"c{i + k}") says[k]! rest fun h =>
+          split (k + 1) rest states (proved.insert c.index h) (h :: bound)
+      let left := mkApp3 (mkConst ``And.left) says[k]! suffix[k + 1]! rest
+      let right := mkApp3 (mkConst ``And.right) says[k]! suffix[k + 1]! rest
+      withLetDecl (Name.mkSimple s!"c{i + k}") says[k]! left fun h =>
+      withLetDecl (Name.mkSimple s!"r{i + k}") suffix[k + 1]! right fun r =>
+        split (k + 1) r states (proved.insert c.index h) (r :: h :: bound)
+    if exports.isEmpty then
+      return ← runs (i + run.size) states proved bound
+    withLetDecl (Name.mkSimple s!"r{i}") suffix[0]! conjunction fun r =>
+      split 0 r states proved (r :: bound)
+  -- The shadows of first-order clauses: none of them rests on a derived one.
+  let rec shadowing (i : Nat) (states : Stated)
+      (proved : Proved) (bound : List Expr) : ReconstructM Expr := do
+    let some c := shadows[i]? | runs 0 states proved bound
+    let (parts, stated) ← satClauseParts c
+    let states := states.insert c.index (parts, stated)
+    let value ← satClause states proved origins c
+    withLetDecl (Name.mkSimple s!"s{i}") stated value fun h =>
+      shadowing (i + 1) states (proved.insert c.index h) (h :: bound)
+  shadowing 0 {} {} []
 
 end Vampire.Reconstruct.Avatar

@@ -101,8 +101,6 @@ structure State where
   introduced : Std.HashMap String Expr := {}
   /-- Formulas an `avatar_definition` step named, kept under the positive name. -/
   named : Std.HashMap String Expr := {}
-  /-- The lemmas replay has added, by what they state. -/
-  lemmas : Std.HashMap Expr Name := {}
   /-- The proposition rebuilt for each step, by vampire's number for it. -/
   conclusions : Std.HashMap UInt32 Expr := {}
   /-- The one term standing for each shape a rebuilt term has taken. -/
