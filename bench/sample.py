@@ -9,7 +9,8 @@ The population is every problem that is provable and can be stated in Lean:
   converter nor the vampire tactic reads);
 * SMT-LIB: `unsat` benchmarks of the indexed logics.
 A problem is drawn, converted, and kept if the converter can state it within its size
-cap and Lean elaborates the statement; otherwise the next one is drawn. Problems in this repository's corpus, and in any
+cap and Lean elaborates the statement; otherwise the next one is drawn. A draw
+that was interrupted is finished by running the same command again. Problems in this repository's corpus, and in any
 suite already under `<data-dir>/suites/`, are never drawn: those have been looked at.
 
 Each problem gets a directory with the original input, the statement (`stmt.lean`,
@@ -87,12 +88,25 @@ def extract(entries: list[dict], dest: Path, zst: bool) -> dict[str, Path]:
     return got
 
 
+def resume(suite: Path, prefix: str) -> int:
+    """How many problems of a half an interrupted draw already kept. One it was
+    in the middle of has no `meta.json` yet, and is removed to be drawn again."""
+    shutil.rmtree(suite / ".staging", ignore_errors=True)
+    for d in suite.glob(f"{prefix}-*"):
+        if not (d / "meta.json").exists():
+            shutil.rmtree(d)
+    return len(list(suite.glob(f"{prefix}-*")))
+
+
 def sample_tptp(data: Path, suite: Path, rng: random.Random, n: int, avoid: set[str]):
     index = [e for e in json.loads((data / "tptp-index.json").read_text())
-             if e["status"] in PROVABLE and e["stem"] not in avoid]
+             if e["status"] in PROVABLE]
     rng.shuffle(index)
+    # Shuffled before the problems already seen are taken out, so that the
+    # order is the seed's alone and a resumed draw goes on where it stopped.
+    index = [e for e in index if e["stem"] not in avoid]
     root = next((data / "TPTP").glob("TPTP-v*"))
-    kept, i = 0, 0
+    kept, i = resume(suite, "tptp"), 0
     staging = suite / ".staging"
     while kept < n and i < len(index):
         batch = index[i:i + 4 * (n - kept)]
@@ -134,9 +148,9 @@ def sample_smt(data: Path, suite: Path, rng: random.Random, n: int, avoid: set[s
              if e["status"] == "unsat"]
     for e in index:
         e["stem"] = e["logic"] + "_" + re.sub(r"[^A-Za-z0-9]", "_", Path(e["member"]).stem)
-    index = [e for e in index if e["stem"] not in avoid]
     rng.shuffle(index)
-    kept, i = 0, 0
+    index = [e for e in index if e["stem"] not in avoid]
+    kept, i = resume(suite, "smt"), 0
     staging = suite / ".staging"
     while kept < n and i < len(index):
         batch = index[i:i + 4 * (n - kept)]
@@ -183,15 +197,12 @@ def main() -> None:
     suite = args.data / "suites" / args.name
     avoid = seen(args.data)
     suite.mkdir(parents=True, exist_ok=True)
-    # Each half is drawn once, from its own generator, so drawing the SMT half later
-    # draws the same problems as drawing both at once.
+    # Each half is drawn from its own generator, so drawing the SMT half later
+    # draws the same problems as drawing both at once; and a half an interrupted
+    # draw left short is finished rather than started again.
     if args.tptp:
-        if any(suite.glob("tptp-*")):
-            sys.exit(f"{suite} already has its TPTP problems")
         sample_tptp(args.data, suite, random.Random(f"{args.seed}-tptp"), args.tptp, avoid)
     if args.smt:
-        if any(suite.glob("smt-*")):
-            sys.exit(f"{suite} already has its SMT problems")
         sample_smt(args.data, suite, random.Random(f"{args.seed}-smt"), args.smt, avoid)
 
 
