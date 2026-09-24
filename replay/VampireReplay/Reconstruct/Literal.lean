@@ -136,20 +136,21 @@ def findPart? (parts : Array Expr) (stated : Expr) (start : Nat := 0) :
   return none
 
 /--
-A proof of `target` from one of its literals, found by lookup, or `none` where
-the literal is not among them in any of the ways it can be stated.
+A proof of a clause from one of its literals `parts`, found by lookup, or
+`none` where the literal is not among them in any of the ways it can be stated.
+`inject i h` proves the clause from a proof `h` of its `i`th literal.
 
 A simplifying or generating inference carries every literal it did not act on
 into the conclusion unchanged, so where the literal lands is not searched for.
 -/
-def placeLiteral? (target : Expr) (h : Expr) : ReconstructM (Option Expr) := do
-  let parts := junctionParts ``Or target
+def placeAmong? (parts : Array Expr) (inject : Nat → Expr → ReconstructM Expr)
+    (h : Expr) : ReconstructM (Option Expr) := do
   -- The literal is looked for as it stands before the other ways of stating it
   -- are built, for the same reason `findPart?` compares before it unifies.
   let place (candidate : Expr) : ReconstructM (Option Expr) := do
     let some i ← findPart? parts (← instantiateMVars (← inferType candidate))
       | return none
-    return some (← injectPart ``Or target i candidate)
+    return some (← inject i candidate)
   if let some placed ← place h then
     return placed
   if let some flipped ← flipEquality h then
@@ -159,6 +160,17 @@ def placeLiteral? (target : Expr) (h : Expr) : ReconstructM (Option Expr) := do
     if let some placed ← place candidate then
       return placed
   return none
+
+/--
+`placeAmong?` for `target`, its literals read off its shape.
+
+That shape is the clause's only where no literal of it is itself a disjunction;
+a literal naming a subformula stands for that formula, and one that is a
+disjunction is taken apart with the rest. `Into.place?` places by the clause's
+own count of literals, for a caller that knows it.
+-/
+def placeLiteral? (target : Expr) (h : Expr) : ReconstructM (Option Expr) :=
+  placeAmong? (junctionParts ``Or target) (injectPart ``Or target) h
 
 /-- `placeLiteral?`, for a caller that cannot go on without the literal placed. -/
 def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
@@ -217,7 +229,7 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     let stated ← instantiateMVars (← inferType fact)
     if stated.isAppOfArity ``And 2 then
       let rest := facts.eraseIdx! i
-      let parts := junctionParts ``And stated
+      let parts := spineParts ``And stated
       let suffix := suffixJunctions ``And ``True parts
       let mut extended := rest
       for j in [0 : parts.size] do
@@ -225,12 +237,12 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
       return ← byArithmetic extended goal fuel
     if stated.isAppOfArity ``Or 2 then
       let rest := facts.eraseIdx! i
-      return ← elimGiven (junctionParts ``Or stated)
+      return ← elimGiven (spineParts ``Or stated)
         (fun _ h => do byArithmetic (rest.push (← plainly h)) goal fuel) fact
   -- What is asked for says two things, or either of two, or that something
   -- cannot be: each is a step away from something the numbers settle.
   if goal.isAppOfArity ``And 2 then
-    let parts := junctionParts ``And goal
+    let parts := spineParts ``And goal
     return ← introGiven parts fun i => byArithmetic facts parts[i]! fuel
   if let some inner := goal.not? then
     return ← withLocalDeclD `h inner fun h => do
@@ -243,7 +255,7 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
       mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) p fuel)
     return ← mkAppM ``Iff.intro #[forward, backward]
   if goal.isAppOfArity ``Or 2 then
-    let parts := junctionParts ``Or goal
+    let parts := spineParts ``Or goal
     -- A step of this kind acts on one literal and carries the rest, so most of
     -- what is asked for is a fact already in hand. Looking for it costs a
     -- comparison, where asking the numbers costs a decision procedure a

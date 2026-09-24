@@ -453,6 +453,22 @@ partial def formula (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formul
   (·.1) <$> formulaGround sorts vars f
 
 /--
+The parts of a junction along its right spine: `a` and `b ∘ c` for
+`a ∘ (b ∘ c)`, and `a ∘ b` kept whole for `(a ∘ b) ∘ c`.
+
+These are what `suffixJunctions` rebuilds the junction from, so taking a
+junction apart and putting it back together with the two gives back the very
+junction: `junctionParts` flattens the left side too, which that does not undo.
+-/
+def spineParts (fn : Name) (e : Expr) : Array Expr := Id.run do
+  let mut parts := #[]
+  let mut rest := e
+  while rest.isAppOfArity fn 2 do
+    parts := parts.push rest.appFn!.appArg!
+    rest := rest.appArg!
+  return parts.push rest
+
+/--
 The arguments of an n-ary junction, however it was nested.
 
 Both sides are descended into, not just the right: flattening is what merges a

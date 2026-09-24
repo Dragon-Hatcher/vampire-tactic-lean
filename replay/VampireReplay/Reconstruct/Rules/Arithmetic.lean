@@ -145,7 +145,7 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
         catch _ => throw e
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
-    let targetParts := junctionParts ``Or target
+    let targetParts := clauseLiterals target step.unit.clauseSize?
     let suffix := suffixJunctions ``Or ``False targetParts
     -- Each premise holds, so one of its literals does, which is a case; every
     -- case has to make the conclusion. A literal the step carried over is one
@@ -156,7 +156,8 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
       let some (proof, stated) := premises[i]?
         | return ← byArithmetic facts target
-      elimGiven (junctionParts ``Or stated) (motive? := some target)
+      let count := (step.unit.parents[i]?).bind (·.clauseSize?)
+      elimGiven (clauseLiterals stated count) (motive? := some target)
         (fun _ h => do
           let says ← instantiateMVars (← inferType h)
           if let some j := targetParts.findIdx? (· == says) then

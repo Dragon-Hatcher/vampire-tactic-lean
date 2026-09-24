@@ -263,11 +263,12 @@ def superposition (step : Step) : ReconstructM Expr := do
     -- conclusion, as are the ones the rewritten premise keeps.
     let into := step.into target
     let body ← carryPast mainType target mainAt
-      (placed := step.placedAt 0) (into := into)
+      (placed := step.placedAt 0) (into := into) (sourceCount := mainParent.clauseSize?)
       (fun i => i == rw.literal || rw.wholePremise)
       (fun i h rest at_ =>
         carryPast sideType rest sideAt (· == equationLiteral.toNat)
           (placed := step.placedAt 1) (into := into.from at_)
+          (sourceCount := sideParent.clauseSize?)
           (fun _ hSide inner _ => do
             let («from», to, heq) ←
               orientedEquation sideParent sideUse hSide (← inferType hSide)

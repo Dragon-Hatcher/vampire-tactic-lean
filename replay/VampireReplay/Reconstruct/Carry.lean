@@ -33,6 +33,17 @@ def Into.of (target : Expr) (count : Nat) : Into :=
     return parts.push rest
   { parts, suffix := suffixJunctions ``Or ``False parts }
 
+/--
+The literals of `stated`, which says what a clause of `count` literals does,
+or a formula where `count` is `none`: a clause's by its count, since a literal
+naming a subformula stands for that formula and can be a disjunction, and a
+formula's by its shape, which is what it says.
+-/
+def clauseLiterals (stated : Expr) (count : Option Nat) : Array Expr :=
+  match count with
+  | some n => (Into.of stated n).parts
+  | none => junctionParts ``Or stated
+
 /-- The same conclusion, from its `offset`th literal on. -/
 def Into.from (into : Into) (offset : Nat) : Into := { into with offset }
 
@@ -50,6 +61,63 @@ def Into.inject (into : Into) (start k : Nat) (h : Expr) : Option Expr := do
     let j := k - 1 - d
     acc := mkApp3 (mkConst ``Or.inr) into.parts[j]! into.suffix[j + 1]! acc
   return acc
+
+/--
+A proof of the conclusion from one of its literals, found among them, or
+`none` where it is not among them in any of the ways it can be stated.
+
+Found among the conclusion's literals as it counts them, not as its shape
+has them: a literal naming a subformula stands for that formula, and where the
+formula is a disjunction, the shape splits it into disjuncts that are not
+literals of the clause.
+-/
+def Into.place? (into : Into) (h : Expr) : ReconstructM (Option Expr) :=
+  placeAmong? (into.parts.extract into.offset) (fun k h => do
+    let some placed := into.inject into.offset (into.offset + k) h
+      | throwError "the conclusion has no literal {into.offset + k}"
+    return placed) h
+
+/-- `Into.place?`, for a caller that cannot go on without the literal placed. -/
+def Into.place (into : Into) (target h : Expr) : ReconstructM Expr := do
+  let some placed ← into.place? h
+    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
+        \nis not among{indentExpr target}"
+  return placed
+
+/--
+How many literals `into` has from its offset on: `none` where it has none to
+count, the target not having the shape its count says.
+-/
+def Into.left? (into : Into) : Option Nat :=
+  if into.parts.isEmpty then none else some (into.parts.size - into.offset)
+
+/--
+A proof of what is left of a conclusion, `rest`, from one of its literals:
+found among `into`'s literals, by the clause's count, where the caller has
+them, and among `rest`'s by its shape where it does not.
+-/
+def placeInto? (rest : Expr) (into : Option Into) (h : Expr) :
+    ReconstructM (Option Expr) :=
+  match into with
+  | some into => if into.parts.isEmpty then placeLiteral? rest h else into.place? h
+  | none => placeLiteral? rest h
+
+/-- `placeInto?`, for a caller that cannot go on without the literal placed. -/
+def placeInto (rest : Expr) (into : Option Into) (h : Expr) : ReconstructM Expr := do
+  let some placed ← placeInto? rest into h
+    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
+        \nis not among{indentExpr rest}"
+  return placed
+
+/--
+A proof of `source → motive`, sending each of its `count` literals to
+`handler`, or each part its shape has where the count is not known.
+-/
+def elimLiterals (source : Expr) (count : Option Nat)
+    (handler : Nat → Expr → ReconstructM Expr) (h : Expr) : ReconstructM Expr :=
+  match count with
+  | some n => elimGiven (Into.of source n).parts handler h
+  | none => elimParts source 0 handler h
 
 /--
 A premise literal placed where the worker recorded, turned round if it was:
@@ -155,7 +223,8 @@ case is that nothing has to be done at all.
 -/
 def carryWith (source target proof : Expr)
     (carried : Nat → Expr → ReconstructM Expr)
-    (placed : Option Placement := none) (into : Option Into := none) :
+    (placed : Option Placement := none) (into : Option Into := none)
+    (sourceCount : Option Nat := none) :
     ReconstructM Expr := do
   let placedAt (i start : Nat) (h : Expr) : ReconstructM (Option Expr) := do
     let (some placed, some into) := (placed, into) | return none
@@ -185,14 +254,15 @@ def carryWith (source target proof : Expr)
   let whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j a rest => do
     let some given ← attempt (carried i a) | return none
     if let some placed ← placedAt i j given then return some placed
-    placeLiteral? rest given
-  match ← carrying source target 0 0 inStep whole with
+    placeInto? rest (into.map fun into => into.from (into.offset + j)) given
+  match ← carrying source target 0 0 inStep whole sourceCount
+      (into.bind (·.left?)) with
   | some f => return mkApp f proof
   | none =>
-    elimParts source 0 (fun i h => do
+    elimLiterals source sourceCount (fun i h => do
       let given ← carried i h
       if let some placed ← placedAt i 0 given then return placed
-      placeLiteral target given) proof
+      placeInto target into given) proof
 
 /--
 `target` from a proof of `source`, where the step acted on some of its
@@ -202,11 +272,17 @@ literals and carried the rest.
 that is left, which starts at the conclusion's `at`th literal; `onKept i h`
 says what one it carried gives. Where `placed` says where a carried literal
 went among `into`'s literals, it is put there.
+
+@b sourceCount is how many literals `source` has, where it is a clause: a
+literal naming a subformula stands for that formula, and where the formula is a
+disjunction, the shape of `source` does not say where the clause's literals
+end. `into` does the same for `target`.
 -/
 def carryPast (source target proof : Expr) (special : Nat → Bool)
     (onSpecial : Nat → Expr → Expr → Nat → ReconstructM Expr)
     (onKept : Nat → Expr → ReconstructM Expr := fun _ h => pure h)
-    (placed : Option Placement := none) (into : Option Into := none) :
+    (placed : Option Placement := none) (into : Option Into := none)
+    (sourceCount : Option Nat := none) :
     ReconstructM Expr := do
   let offset := (into.map (·.offset)).getD 0
   let placedAt (i start : Nat) (h : Expr) : ReconstructM (Option Expr) := do
@@ -227,16 +303,17 @@ def carryPast (source target proof : Expr) (special : Nat → Bool)
       return ← attempt (onSpecial i a rest (offset + j))
     let some given ← attempt (onKept i a) | return none
     if let some placed ← placedAt i j given then return some placed
-    placeLiteral? rest given
-  match ← carrying source target 0 0 inStep whole with
+    placeInto? rest (into.map fun into => into.from (offset + j)) given
+  match ← carrying source target 0 0 inStep whole sourceCount
+      (into.bind (·.left?)) with
   | some f => return mkApp f proof
   | none =>
-    elimParts source 0 (fun i h => do
+    elimLiterals source sourceCount (fun i h => do
       if special i then onSpecial i h target offset
       else
         let given ← onKept i h
         if let some placed ← placedAt i 0 given then return placed
-        placeLiteral target given) proof
+        placeInto target into given) proof
 
 /--
 `s → t` for one literal a step carried, or `none` if it did not carry it

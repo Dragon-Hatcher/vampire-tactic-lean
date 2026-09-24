@@ -912,6 +912,12 @@ def isClause (u : Unit) : Bool := u.field 3 &&& 1 != 0
 def clause? (u : Unit) : Option Clause :=
   if u.isClause then some ⟨u.proof, u.idx⟩ else none
 
+/--
+How many literals the step's clause has, when it is one. What its statement's
+shape says can be more: a literal naming a subformula stands for that formula.
+-/
+def clauseSize? (u : Unit) : Option Nat := u.clause?.map (·.size)
+
 /-- The formula, when this step has not been clausified. -/
 def formula? (u : Unit) : Option Formula :=
   if u.isClause then none else some ⟨u.proof, u.field 4⟩

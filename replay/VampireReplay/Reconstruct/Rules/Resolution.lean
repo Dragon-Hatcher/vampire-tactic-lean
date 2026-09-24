@@ -45,8 +45,9 @@ def resolution (step : Step) : ReconstructM Expr := do
     let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
       (fun _ h₁ rest at_ => carryPast t₂ rest p₂ (· == resolved₂.toNat)
         (fun _ h₂ inner _ => closeComplementary inner h₁ h₂)
-        (placed := step.placedAt 1) (into := into.from at_))
-      (placed := step.placedAt 0) (into := into)
+        (placed := step.placedAt 1) (into := into.from at_)
+        (sourceCount := parent₂.clauseSize?))
+      (placed := step.placedAt 0) (into := into) (sourceCount := parent₁.clauseSize?)
     pure body
 
 /--
@@ -88,8 +89,9 @@ def unitResulting (step : Step) : ReconstructM Expr := do
         let some (unitAt, unitType) := units[i]?
           | throwError "no unit resolved literal {i} away"
         carryPast unitType rest unitAt (fun _ => true)
-          (fun _ hu inner _ => closeComplementary inner h hu))
+          (fun _ hu inner _ => closeComplementary inner h hu) (sourceCount := some 1))
       (placed := step.placedAt 0) (into := step.into target)
+      (sourceCount := main.clauseSize?)
     pure body
 
 /--
@@ -168,6 +170,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
       instantiateAt parent use vars premiseProof premiseStated
     let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
       (placed := step.placedAt 0) (into := step.into target)
+      (sourceCount := parent.clauseSize?)
       (fun _ h rest _ => do
         -- The binding is what makes the two sides of the inequality one term,
         -- unless the unifier abstracted: then what it could not unify it left
@@ -230,6 +233,7 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
     let (fLHS, fRHS) := if sideLeft then (fa, fb) else (fb, fa)
     let body ← carryPast premiseType target premiseAt (· == selectedIdx.toNat)
       (placed := step.placedAt 0) (into := step.into target)
+      (sourceCount := parent.clauseSize?)
       (fun _ h rest _ => do
         let stated ← instantiateMVars (← inferType h)
         let some (α, sa, sb) := stated.eq?

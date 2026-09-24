@@ -61,10 +61,11 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
       | some placed => (placed[k]?.join).isNone
       | none => true
     let body ← carryPast mainType target mainAt (· == resolved.toNat)
-      (placed := step.placedAt 0) (into := into)
+      (placed := step.placedAt 0) (into := into) (sourceCount := mainParent.clauseSize?)
       (fun _ h rest at_ =>
         carryPast sideType rest sideAt unplaced
           (placed := sidePlaced) (into := into.from at_)
+          (sourceCount := sideParent.clauseSize?)
           (fun _ hSide inner _ => do
             let removed ← instantiateMVars (← inferType h)
             -- The one literal of the side premise the substitution makes

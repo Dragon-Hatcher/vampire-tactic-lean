@@ -623,7 +623,7 @@ began at was stated in.
 -/
 private partial def descend (sorts : Array (UInt32 × String))
     (choices : Std.HashMap UInt32 UInt32) (vars : Vars) (f : Formula)
-    (stated : Expr) (target : Expr) : ReconstructM Expr := do
+    (stated : Expr) (target : Expr) (into : Into) : ReconstructM Expr := do
   match ← connectiveOf f with
   | .«forall» =>
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
@@ -641,7 +641,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       vars := vars.insert v arg
       args := args.push arg
     let rest ← descend sorts choices vars body
-      (← instantiateForall stated args) target
+      (← instantiateForall stated args) target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
   | .and =>
@@ -654,7 +654,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       | throwError "a clause came from conjunct {argument}, which is not there"
     let some part := parts[argument.toNat]?
       | throwError "a clause came from conjunct {argument}, which is not there"
-    let rest ← descend sorts choices vars conjunct part target
+    let rest ← descend sorts choices vars conjunct part target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (← projectGiven parts argument.toNat h))
   | .or =>
@@ -669,7 +669,7 @@ private partial def descend (sorts : Array (UInt32 × String))
         mkLambdaFVars #[h] (← carryAll stated target h)
     let branches ← f.subformulas.zipIdx.mapM fun (g, i) => do
       let some part := parts[i]? | throwError "a missing disjunct"
-      descend sorts choices vars g part target
+      descend sorts choices vars g part target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h]
         (← elimGiven parts (fun i hi => do
@@ -681,7 +681,7 @@ private partial def descend (sorts : Array (UInt32 × String))
   | _ =>
     -- A literal, which the clause has to contain.
     withLocalDeclD `h stated fun h => do
-      mkLambdaFVars #[h] (← placeLiteral target h)
+      mkLambdaFVars #[h] (← into.place target h)
 
 /-- `clausify`: one clause of a formula's conjunctive normal form. -/
 def clausify (step : Step) : ReconstructM Expr := do
@@ -711,6 +711,6 @@ def clausify (step : Step) : ReconstructM Expr := do
       let implication ← descend sorts
         (Std.HashMap.ofList (step.unit.conjunctChoices.toList.map fun (f, i) => (f.index, i)))
         vars premise
-        (← instantiateMVars premiseStated) target
+        (← instantiateMVars premiseStated) target (step.into target)
       mkLambdaFVars xs (mkApp implication premiseProof)
 end Vampire.Reconstruct.Clausify

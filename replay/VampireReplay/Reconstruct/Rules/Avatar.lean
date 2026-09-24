@@ -1,4 +1,5 @@
 import VampireReplay.Reconstruct.Basic
+import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Splitting.
@@ -91,7 +92,11 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
   let some parent := step.unit.parents[0]?
     | throwError "an avatar contradiction clause should have one premise, got none"
   let target ← step.conclusion
-  let parts := junctionParts ``Or target
+  -- One disjunct per name the premise held under, whatever the formula each
+  -- stands for is: the conclusion is a formula, not a clause with a count of
+  -- its own, and a name's formula can itself be a disjunction.
+  let into := Into.of target parent.splits.size
+  let parts := into.parts
   -- Were every one of those names to fail, nothing would follow from the
   -- premise; so suppose the disjunction fails and read each name off that.
   let contradiction ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
@@ -106,8 +111,9 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
       let some i := found
         | throwError "the negation of `{name}`{indentExpr flipped}\nis not \
           among{indentExpr target}"
-      let refuted : Expr := .lam `d flipped
-        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default
+      let some injected := into.inject 0 i (.bvar 0)
+        | throwError "the conclusion has no literal {i}"
+      let refuted : Expr := .lam `d flipped (mkApp h injected) .default
       let body ← namedFormula name
       proof := mkApp proof
         (← mkAppM ``Iff.mp
@@ -445,10 +451,13 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- and it is the components that have a renaming recorded against them.
       continue
     definitions := definitions.insert name (parent, uses, position)
+  -- One disjunct per name, whatever the formula each stands for is.
+  let into := Into.of target disjuncts.size
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
     let refuted (i : Nat) (of : Expr) : ReconstructM Expr := do
-      pure (.lam `d of
-        (mkApp h (← injectPart ``Or target i (.bvar 0))) .default)
+      let some injected := into.inject 0 i (.bvar 0)
+        | throwError "the conclusion has no disjunct {i}"
+      pure (.lam `d of (mkApp h injected) .default)
     -- What the clause held under: the disjunct for each of those names is its
     -- negation, so failing means the name holds and the clause can be used.
     let mut proof := clauseProof
@@ -532,12 +541,15 @@ def splitClause (step : Step) : ReconstructM Expr := do
             if (← connectiveOf component) matches .or then component.subformulas
             else #[component]
           literals.mapM (Reconstruct.formula definition.varSorts componentVars)
-      let disjunction := junction ``Or ``False parts
+      -- Injected by the count of the component's literals, which can
+      -- themselves be disjunctions.
+      let components := Into.of (junction ``Or ``False parts) parts.size
       let placed := if isNegatedName name then none
         else step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
-        let negation : Expr := .lam `l part
-          (mkApp against (← injectPart ``Or disjunction j (.bvar 0))) .default
+        let some injected := components.inject 0 j (.bvar 0)
+          | throwError "the component of `{name}` has no literal {j}"
+        let negation : Expr := .lam `l part (mkApp against injected) .default
         negations := negations.push (part, negation)
         if let some placed := placed then
           if let some (some (k, flipped)) := placed[j]? then
@@ -546,7 +558,12 @@ def splitClause (step : Step) : ReconstructM Expr := do
     let arguments' ← argsFor parent arguments
     let instance_ := mkAppN proof arguments'
     let instantiated ← instantiateForall stated arguments'
-    let contradiction ← elimParts instantiated 0 (fun i hl => do
+    -- Its literals by the clause's count of them, not its shape: a literal
+    -- naming a subformula stands for that formula, which can be a disjunction.
+    let some clause := parent.clause?
+      | throwError "an avatar split clause splits {parent}, which is not a clause"
+    let clauseParts ← Clause.partsOf ``Or instantiated clause.size
+    let contradiction ← elimGiven clauseParts (fun i hl => do
       if let some (part, negation, flipped) := negationAt[i]? then
         -- The worker recorded the component's literal as the clause's, turned
         -- round where it said so.
