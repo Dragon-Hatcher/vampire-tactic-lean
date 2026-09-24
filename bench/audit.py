@@ -6,7 +6,8 @@
   replayed  vampire found a proof and it was replayed
   no-proof  vampire found none within the timeout (or found a model)
   failed    vampire found a proof and replaying it failed -- the bugs
-  killed    the run went past the hard limit, which a replay stuck on a step does
+  killed    the run went past the hard time limit, or held more memory than
+            `BENCH_MEMORY_KB` (6 GB by default), as a proof too large to replay does
 
 Unlike `run.py` this measures nothing, so problems run side by side. A problem
 already in the results file is skipped, so a run can be resumed. The failures are

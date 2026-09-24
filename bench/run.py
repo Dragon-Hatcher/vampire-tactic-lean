@@ -29,6 +29,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -70,19 +71,41 @@ def benchEnd : IO Unit := do IO.println s!"BENCH end {{← IO.monoNanosNow}}"
 FOOTER = "\n#eval benchEnd\n"
 
 
+# What a run may hold in memory, all its processes together, before it is
+# killed: a proof too large to replay otherwise takes the machine down with it.
+MEMORY_LIMIT_KB = int(os.environ.get("BENCH_MEMORY_KB", 6_000_000))
+
+
+def group_rss_kb(pgid: int) -> int:
+    """The resident memory of every process in the group, in kilobytes."""
+    out = subprocess.run(["ps", "-A", "-o", "pgid=,rss="], capture_output=True,
+                         text=True).stdout
+    return sum(int(rss) for g, rss in (line.split() for line in out.splitlines())
+               if int(g) == pgid)
+
+
 def run_group(cmd: list[str], cwd, limit: float) -> tuple[str, bool]:
-    """Output of `cmd`, and whether it ran past `limit` seconds and was killed --
-    with everything it started: `lake` runs `lean` as a child, and killing only
-    `lake` leaves `lean` running on, taking the machine from the runs after it."""
+    """Output of `cmd`, and whether it ran past `limit` seconds or
+    `MEMORY_LIMIT_KB` and was killed -- with everything it started: `lake` runs
+    `lean` as a child, and killing only `lake` leaves `lean` running on, taking
+    the machine from the runs after it."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
-    try:
-        out, _ = proc.communicate(timeout=limit)
-        return out, False
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
-        return out or "", True
+    chunks: list[str] = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()))
+    reader.start()
+    started = time.monotonic()
+    killed = False
+    while proc.poll() is None:
+        if (time.monotonic() - started > limit
+                or group_rss_kb(proc.pid) > MEMORY_LIMIT_KB):
+            os.killpg(proc.pid, signal.SIGKILL)
+            killed = True
+            break
+        time.sleep(1)
+    proc.wait()
+    reader.join()
+    return "".join(chunks), killed
 
 
 def lean_run(project: Path, name: str, imports: str, stmt: str, tactic: str,
