@@ -153,11 +153,21 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     -- substitution, and its literals rebuilt as the conclusion's are -- so
     -- that case is closed by finding it there. What is left is the literals
     -- the step acted on, and those are what the numbers settle.
+    let premiseParts := premises.zipIdx.map fun ((_, stated), i) =>
+      clauseLiterals stated ((step.unit.parents[i]?).bind (·.clauseSize?))
+    -- Where every literal of the conclusion is one the step carried over, the
+    -- ones it acted on are not in it: evaluating them found them false, so the
+    -- numbers refute them without the conclusion being asked for -- which, a
+    -- literal naming a subformula being that whole formula, can be far more
+    -- than a decision procedure should be handed.
+    let deleted := targetParts.all fun t => premiseParts.any (·.contains t)
     let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
-      let some (proof, stated) := premises[i]?
-        | return ← byArithmetic facts target
-      let count := (step.unit.parents[i]?).bind (·.clauseSize?)
-      elimGiven (clauseLiterals stated count) (motive? := some target)
+      let some (proof, _) := premises[i]?
+        | if deleted then
+            return mkApp2 (mkConst ``False.elim [.zero]) target
+              (← byArithmetic facts (mkConst ``False))
+          return ← byArithmetic facts target
+      elimGiven premiseParts[i]! (motive? := some target)
         (fun _ h => do
           let says ← instantiateMVars (← inferType h)
           if let some j := targetParts.findIdx? (· == says) then
