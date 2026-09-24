@@ -180,19 +180,58 @@ symbols too -- with the atoms numbered by `state`. -/
 def ringNormal (state : IO.Ref AtomM.State) (e : Expr) : MetaM Simp.Result :=
   AtomM.recurse state {} true RingNF.evalExpr (RingNF.cleanup {}) e
 
-/--
-`a = b` for two terms, or two statements, that are one up to the identities
-of a commutative ring: both are put into ring normal form, the atoms numbered
-alike, and have to come out as one term. What certifies a rewrite a port of
-vampire's has already decided on, never what decides it.
--/
-def ringEq (a b : Expr) : MetaM (Option Expr) := do
-  if a == b then return some (← mkEqRefl a)
+/-- `a = b` by putting both into ring normal form, the atoms numbered alike. -/
+private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
   let state ← IO.mkRef {}
   let ra ← ringNormal state a
   let rb ← ringNormal state b
   unless ra.expr == rb.expr do return none
   return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
+
+/-- The symbols vampire introduced that `e` mentions, marked, each once; what
+is under one is part of it. -/
+private partial def introducedIn (e : Expr) : Array Expr :=
+  (go e).run ({}, #[]) |>.2.2
+where
+  go (t : Expr) : StateM (Std.HashSet Expr × Array Expr) PUnit := do
+    if (← get).1.contains t then return
+    modify fun (seen, found) => (seen.insert t, found)
+    if Vampire.Reconstruct.isMarkedIntroduced t then
+      modify fun (seen, found) => (seen, found.push t)
+      return
+    match t with
+    | .app f a => do go f; go a
+    | .lam _ d b _ | .forallE _ d b _ => do go d; go b
+    | .letE _ τ v b _ => do go τ; go v; go b
+    | .mdata _ b | .proj _ _ b => go b
+    | _ => pure ()
+
+/--
+`a = b` for two terms, or two statements, that are one up to the identities
+of a commutative ring: both are put into ring normal form, the atoms numbered
+alike, and have to come out as one term. What certifies a rewrite a port of
+vampire's has already decided on, never what decides it.
+
+A symbol vampire introduced is stated as the definition it stands for -- a
+skolem as a choice over the formula it came from -- which the normal form
+would compare as it numbers atoms; it is a symbol here as it is to vampire, a
+local for each, and the equation is instantiated at them after.
+-/
+def ringEq (a b : Expr) : MetaM (Option Expr) := do
+  if a == b then return some (← mkEqRefl a)
+  let inA := introducedIn a
+  let symbols := inA ++ (introducedIn b).filter fun t => !inA.contains t
+  if symbols.isEmpty then return ← ringEqNormal a b
+  let decls ← symbols.mapIdxM fun i t => do
+    let τ ← inferType t
+    return (Name.mkSimple s!"v{i}", fun (_ : Array Expr) => pure τ)
+  withLocalDeclsD decls fun locals => do
+    let abstract (e : Expr) : Expr := e.replace fun t =>
+      match symbols.idxOf? t with
+      | some i => some locals[i]!
+      | none => none
+    let some h ← ringEqNormal (abstract a) (abstract b) | return none
+    return some (mkAppN (← mkLambdaFVars locals h) symbols)
 
 /-- `ringEq`, failing where the two are not one. -/
 def ringEq! (a b : Expr) : MetaM Expr := do
@@ -214,42 +253,65 @@ def castEq (zCast e : Expr) : MetaM Expr := do
   let pushed ← Mathlib.Meta.NormNum.deriveSimp ctx (useSimp := true) zCast
   mkEqTrans (← pushed.getProof) (← ringEq! pushed.expr e)
 
+/-- `f a₁ … aₙ = f b₁ … bₙ`, from what each argument was rewritten into, `none`
+where none of them was. -/
+def congrArgs (fn : Expr) (args : Array Expr) (rewritten : Array Simp.Result) :
+    MetaM (Expr × Option Expr) := do
+  let mut current := fn
+  let mut rebuilt := fn
+  let mut proof? : Option Expr := none
+  for (arg, r) in args.zip rewritten do
+    proof? ← match proof?, r.proof? with
+      | none, none => pure none
+      | some hf, none => some <$> mkCongrFun hf arg
+      | none, some ha => some <$> mkCongrArg current ha
+      | some hf, some ha => some <$> mkCongr hf ha
+    current := mkApp current arg
+    rebuilt := mkApp rebuilt r.expr
+  return (rebuilt, proof?)
+
+/-- `bottomUp`'s walk, each subterm's result kept in `seen`. -/
+private partial def visit (step : Expr → MetaM (Option (Expr × Expr)))
+    (seen : IO.Ref (Std.HashMap Expr Simp.Result)) (t : Expr) : MetaM Simp.Result := do
+  if let some r := (← seen.get)[t]? then return r
+  let r ← do
+    if Vampire.Reconstruct.isMarkedIntroduced t then pure { expr := t }
+    else
+      -- The subterms first: a term's arguments, never its head.
+      let inner : Simp.Result ← match t with
+        | .app .. => do
+          let args := t.getAppArgs
+          let rewritten ← args.mapM (visit step seen)
+          let (rebuilt, proof?) ← congrArgs t.getAppFn args rewritten
+          pure { expr := rebuilt, proof? }
+        | .mdata d e => do
+          let r ← visit step seen e
+          pure { r with expr := .mdata d r.expr }
+        | _ => pure { expr := t }
+      match ← step inner.expr with
+      | some (t', h) =>
+        pure { expr := t', proof? := some (← match inner.proof? with
+          | some p => mkEqTrans p h
+          | none => pure h) }
+      | none => pure inner
+  seen.modify (·.insert t r)
+  return r
+
 /--
 `e` rewritten bottom-up by `step`, which is asked about each subterm once the
 subterms under it have been rewritten, and never about what it rewrote a
 subterm into -- which is how vampire's `BottomUpTermTransformer` visits a term.
-Nothing else is rewritten.
+Nothing else is rewritten, and nothing under a binder: a literal has none.
 
-A name applied to its arguments -- a named formula, an equality proxy, which
-replay states as what it stands for applied -- is a symbol to vampire, and is
-rewritten in its arguments and never in what it stands for.
+A term is rewritten in its arguments and never in its head. For a symbol
+vampire introduced -- a named formula, an equality proxy, a defined function,
+which replay states as the definition it stands for, marked
+(`markedIntroduced`), or as a definition applied -- that is what makes it a
+symbol, as it is to vampire.
 -/
 def bottomUp (step : Expr → MetaM (Option (Expr × Expr))) (e : Expr) :
     MetaM Simp.Result := do
-  let ctx ← Simp.mkContext
-    { beta := false, eta := false, etaStruct := .none, proj := false, zeta := false,
-      iota := false, decide := false, arith := false, dsimp := false, ground := false,
-      autoUnfold := false, zetaDelta := false, unfoldPartialApp := false }
-  let pre (t : Expr) : SimpM Simp.Step := do
-    unless t.isApp && t.getAppFn.isLambda do return .continue
-    let mut current := t.getAppFn
-    let mut rebuilt := t.getAppFn
-    let mut proof? : Option Expr := none
-    for arg in t.getAppArgs do
-      let r ← Simp.simp arg
-      proof? ← match proof?, r.proof? with
-        | none, none => pure none
-        | some hf, none => some <$> mkCongrFun hf arg
-        | none, some ha => some <$> mkCongrArg current ha
-        | some hf, some ha => some <$> mkCongr hf ha
-      current := mkApp current arg
-      rebuilt := mkApp rebuilt r.expr
-    return .done { expr := rebuilt, proof? }
-  let post (t : Expr) : SimpM Simp.Step := do
-    match ← step t with
-    | some (t', h) => return .done { expr := t', proof? := some h }
-    | none => return .done { expr := t }
-  return (← Simp.main e ctx (methods := { pre, post })).1
+  visit step (← IO.mkRef {}) e
 
 /--
 `p ↔ q` where `p` is what a port made of a literal and `q` the literal vampire

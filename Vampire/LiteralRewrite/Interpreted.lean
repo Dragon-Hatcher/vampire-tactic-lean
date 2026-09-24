@@ -302,19 +302,11 @@ partial def pushMinus (negate : Bool) (t : Expr) : MetaM (Expr × Option Expr) :
       let parts ← mkCongr (← mkCongrArg add ha) hb
       return (mkApp2 add ra rb, some (← mkEqTrans (← mkAppM ``neg_add #[a, b]) parts))
   -- Anything else: its arguments, and the minus kept outside it.
-  let fn := t.getAppFn
-  let mut current := fn
-  let mut rebuilt := fn
-  let mut proof? : Option Expr := none
-  for arg in t.getAppArgs do
+  let args := t.getAppArgs
+  let rewritten ← args.mapM fun arg => do
     let (r, h?) ← pushMinus false arg
-    proof? ← match proof?, h? with
-      | none, none => pure none
-      | some hf, none => some <$> mkCongrFun hf arg
-      | none, some ha => some <$> mkCongrArg current ha
-      | some hf, some ha => some <$> mkCongr hf ha
-    current := mkApp current arg
-    rebuilt := mkApp rebuilt r
+    return ({ expr := r, proof? := h? } : Simp.Result)
+  let (rebuilt, proof?) ← congrArgs t.getAppFn args rewritten
   if negate then
     let neg ← mkAppM ``Neg.neg #[t]
     let negated? ← proof?.mapM fun h => mkCongrArg neg.appFn! h

@@ -226,7 +226,11 @@ a definition gave it.
 def applySymbol (name : String) (args : Array Expr) : ReconstructM Expr := do
   match ← interpreted name args with
   | some e => return e
-  | none => return mkAppN (← symbolExpr name) args
+  | none =>
+    let head ← symbolExpr name
+    if (← read).markIntroduced && !(← isGoalSymbol name) then
+      return mkAppN (markedIntroduced name head) args
+    return mkAppN head args
 
 /--
 `sym before = sym after`, from a proof that each argument of the one is the
@@ -259,8 +263,11 @@ private partial def termGround (vars : Vars) (t : Term) :
     let some x := vars[t.var]?
       | throwError "variable X{t.var} is not bound here"
     return (x, false)
-  if let some e := (← get).groundTerms[t.index]? then
-    return (e, true)
+  -- Kept terms are stated unmarked, so marking states afresh.
+  let keep := !(← read).markIntroduced
+  if keep then
+    if let some e := (← get).groundTerms[t.index]? then
+      return (e, true)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
   let mut args := #[]
@@ -269,8 +276,11 @@ private partial def termGround (vars : Vars) (t : Term) :
     let (e, argGround) ← termGround vars arg
     args := args.push e
     ground := ground && argGround
-  let built ← shared (← applySymbol symbol.name args)
-  if ground then
+  -- Shared terms are compared without their metadata, so a marked one is
+  -- not shared: it would come back as the unmarked term kept before it.
+  let applied ← applySymbol symbol.name args
+  let built ← if keep then shared applied else pure applied
+  if ground && keep then
     modify fun s => { s with groundTerms := s.groundTerms.insert t.index built }
   return (built, ground)
 
@@ -312,7 +322,8 @@ private def literalGround (vars : Vars) (l : Literal) :
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       applySymbol symbol.name args
-  return (← shared (if polarity then atom else mkApp (mkConst ``Not) atom), ground)
+  let stated := if polarity then atom else mkApp (mkConst ``Not) atom
+  return (← if (← read).markIntroduced then pure stated else shared stated, ground)
 
 /-- Rebuilds a vampire literal as a Lean proposition. -/
 def literal (vars : Vars) (l : Literal) : ReconstructM Expr :=

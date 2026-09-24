@@ -1040,8 +1040,19 @@ struct Encoder {
     satSeen.emplace(cl, idx);
 
     uint32_t firstLit = static_cast<uint32_t>(satLits.size());
-    for (SATLiteral l : iterTraits(cl->iter()))
+    std::vector<SATLiteral> lits;
+    for (SATLiteral l : iterTraits(cl->iter())) {
+      lits.push_back(l);
       satLits.push_back(addString(Splitter::getFormulaStringFromLiteral(l)));
+    }
+    // What each name stands for: a component split off in the proof has its
+    // definition among the units leading to it, but one named only as a
+    // theory conflict was converted has not, and replay needs every name's.
+    for (SATLiteral l : lits) {
+      std::string name = Splitter::getFormulaStringFromLiteral(l.positive() ? l : l.opposite());
+      if (Unit* definition = InferenceStore::instance()->splitDefinition(name))
+        encodeUnit(definition);
+    }
     uint32_t numLits = static_cast<uint32_t>(cl->length());
 
     uint32_t origin = NONE;

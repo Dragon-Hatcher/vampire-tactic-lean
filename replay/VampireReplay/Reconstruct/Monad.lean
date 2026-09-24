@@ -62,6 +62,14 @@ structure Context where
   -/
   flipping : Bool := false
   /--
+  Whether a symbol vampire introduced is stated marked (`markedIntroduced`)
+  rather than as the bare definition it stands for. Vampire treats such a
+  symbol as a symbol, while the definition it is stated as is whatever it
+  abbreviates; what ports vampire's rewriting of a literal needs to tell the
+  two apart, and asks for literals stated this way.
+  -/
+  markIntroduced : Bool := false
+  /--
   What the goal holds, for when something of a sort is needed and no instance
   says the sort is inhabited.
 
@@ -276,6 +284,22 @@ def throwUnknownSort (name : String) : ReconstructM α :=
 def sortType (name : String) : ReconstructM Expr := do
   let some τ ← sortType? name | throwUnknownSort name
   return τ
+
+/-- The key `markedIntroduced` annotates a symbol vampire introduced with. -/
+def introducedKey : Name := `vampire.introduced
+
+/--
+What a symbol vampire introduced is stated as, marked as that symbol: the
+annotation is metadata, so it is the definition as far as any check of a term
+goes, and it is there for what reads the term as vampire does.
+-/
+def markedIntroduced (name : String) (e : Expr) : Expr :=
+  .mdata (KVMap.empty.insert introducedKey (.ofString name)) e
+
+/-- Whether `e` is a symbol vampire introduced, marked as such. -/
+def isMarkedIntroduced : Expr → Bool
+  | .mdata d _ => (d.find introducedKey).isSome
+  | _ => false
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

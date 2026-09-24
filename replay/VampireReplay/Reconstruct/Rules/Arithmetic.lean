@@ -199,28 +199,39 @@ def literalwise (step : Step) : ReconstructM Expr := do
       throwError "step {step.unit.number} recorded {images.size} literals' \
         images for a premise of {parts.size}"
     let into := step.into target
-    -- A literal of no arguments -- a name, which replay states as what it
-    -- stands for -- has nothing in it any of the procedures rewrites.
-    let literals := (parent.clause?.map (·.literals)).getD #[]
-    let bare (i : Nat) : Bool :=
-      (literals[i]?.map fun l => l.arity == 0 && !l.isEquality).getD false
+    -- Each literal as the procedure reads it: a symbol vampire introduced
+    -- is a symbol to it, whatever definition replay states it as, so the
+    -- literals the ports are handed have those marked. The marks are
+    -- metadata, and the literals the ones the clauses state.
+    let premiseLiterals := (parent.clause?.map (·.literals)).getD #[]
+    let conclusionLiterals := (step.unit.clause?.map (·.literals)).getD #[]
+    let premiseVars ← coverVars parent vars
+    let marked (vars : Vars) (l : Vampire.Literal) (stated : Expr) : ReconstructM Expr := do
+      let e ← withReader ({ · with markIntroduced := true }) (literal vars l)
+      unless ← isDefEq e stated do
+        throwError "step {step.unit.number}: restating{indentExpr stated}\nwith the \
+          symbols vampire introduced marked gave{indentExpr e}"
+      return e
     elimGiven parts (motive? := some target) (fun i h => do
       let factor := (factors.bind (·[i]?)).getD (1, 1)
+      let some premiseLiteral := premiseLiterals[i]?
+        | throwError "step {step.unit.number} has no premise literal {i}"
+      let from_ ← marked premiseVars premiseLiteral parts[i]!
       match images[i]? with
       | some (some (j, _)) =>
         let some goal := into.parts[j]?
           | throwError "step {step.unit.number} has no literal {j}"
-        let iff ← if bare i then do
-            unless ← isDefEq parts[i]! goal do
-              throwError "{step.rule.name} rewrote{indentExpr parts[i]!}\ninto\
-                {indentExpr goal}\nbut it has no arguments to rewrite"
-            pure (mkApp (mkConst ``Iff.refl) parts[i]!)
-          else (← read).literalIff procedure parts[i]! goal factor
+        let some conclusionLiteral := conclusionLiterals[j]?
+          | throwError "step {step.unit.number} has no literal {j}"
+        let to ← marked vars conclusionLiteral goal
+        trace[vampire] "step {step.unit.number}: {repr procedure} rewrote{indentExpr from_}\ninto{indentExpr to}"
+        let iff ← (← read).literalIff procedure from_ to factor
+        let iff ← mkExpectedTypeHint iff (mkApp2 (mkConst ``Iff) parts[i]! goal)
         let some placed := into.inject 0 j (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
           | throwError "step {step.unit.number} has no literal {j}"
         return placed
       | _ =>
-        let refuted ← (← read).literalFalse procedure parts[i]! factor
+        let refuted ← (← read).literalFalse procedure from_ factor
         return mkApp2 (mkConst ``False.elim [.zero]) target (mkApp refuted h)) premise
 
 /-- `a * b`, whichever numbers those are. -/
