@@ -374,6 +374,15 @@ The terms the procedure cannot read are put aside by
 it here is the asking.
 -/
 def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  -- What a fact says, with any name applied to its arguments read as what it
+  -- stands for: a named formula is a function applied to them, and under the
+  -- application no procedure sees the equation or comparison it is.
+  let facts ← facts.mapM fun fact => do
+    let stated ← instantiateMVars (← inferType fact)
+    let reduced ← Core.betaReduce stated
+    if reduced == stated then return fact
+    mkExpectedTypeHint fact reduced
+  let claim ← claim.mapM fun c => do Core.betaReduce (← instantiateMVars c)
   let facts ← facts.mapM fun fact => do
     let stated ← instantiateMVars (← inferType fact)
     match ← subtractionsAsNegations stated with
