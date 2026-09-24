@@ -241,11 +241,14 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
             {indentExpr stated}"
         let sRHS := if selectedLeft then sb else sa
         let h ← if selectedLeft then pure h else mkEqSymm h
-        -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`.
-        let differ ← withLocalDeclD `h (← mkAppM ``Ne #[sRHS, fRHS]) fun hne => do
+        -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`:
+        -- the one where it is not stated as a clause states a disequality,
+        -- `¬a = b`, so that it is found among the conclusion's literals
+        -- either way round.
+        let equal ← mkAppOptM ``Eq #[some α, some sRHS, some fRHS]
+        let differ ← withLocalDeclD `h (mkApp (mkConst ``Not) equal) fun hne => do
           mkLambdaFVars #[hne] (← placeLiteral rest hne)
-        let agree ← withLocalDeclD `h (← mkAppOptM ``Eq #[some α, some sRHS, some fRHS])
-          fun he => do
+        let agree ← withLocalDeclD `h equal fun he => do
             let chain ← mkAppM ``Eq.trans #[h, he]
             let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
             mkLambdaFVars #[he] (← placeLiteral rest (← mkExpectedTypeHint chain stated))
