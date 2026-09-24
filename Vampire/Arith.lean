@@ -121,8 +121,8 @@ cases it is first.
 does not see. Over numbers that are ordered, `a ≠ b` is `a < b` or `b < a`,
 each of which it reads.
 -/
-private partial def linarithSplitting (facts : List Expr) (goal : Expr) :
-    MetaM Expr := do
+private partial def linarithSplitting (facts : List Expr) (goal : Expr)
+    (cfg : Mathlib.Tactic.Linarith.LinarithConfig := {}) : MetaM Expr := do
   let disequality (fact : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
     let stated ← instantiateMVars (← inferType fact)
     let some (τ, a, b) := stated.not? >>= Expr.eq? | return none
@@ -133,15 +133,15 @@ private partial def linarithSplitting (facts : List Expr) (goal : Expr) :
     return (← disequality fact).map (fact, ·)
   let some (fact, _, a, b) := found
     | let proof ← mkFreshExprMVar goal
-      Mathlib.Tactic.Linarith.linarith true facts {} proof.mvarId!
+      Mathlib.Tactic.Linarith.linarith true facts cfg proof.mvarId!
       return ← instantiateMVars proof
   let rest := facts.erase fact
   let below ← mkAppM ``LT.lt #[a, b]
   let above ← mkAppM ``LT.lt #[b, a]
   let whenBelow ← withLocalDeclD `h below fun h => do
-    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal)
+    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal cfg)
   let whenAbove ← withLocalDeclD `h above fun h => do
-    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal)
+    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal cfg)
   mkAppOptM ``Or.elim #[some below, some above, some goal,
     some (← mkAppM ``lt_or_gt_of_ne #[fact]), some whenBelow, some whenAbove]
 
@@ -175,14 +175,30 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
   -- like commutativity states.
   let byLinarith : MetaM Expr :=
     linarithSplitting facts.toList (claim.getD (mkConst ``False))
+  -- `nlinarith` also multiplies facts together, which is what a fact about
+  -- products needs -- a theory axiom saying two negatives multiply to a
+  -- positive -- and costs far more; so it is asked only where some product is
+  -- of two terms neither of which is a number, and after `linarith`.
+  let product (e : Expr) : Bool := (e.find? fun t =>
+    match t.getAppFnArgs with
+    | (``HMul.hMul, #[_, _, _, _, a, b]) =>
+      a.int?.isNone && b.int?.isNone
+    | _ => false).isSome
+  let nonlinear := claim.any product
+    || (← facts.anyM fun f => return product (← instantiateMVars (← inferType f)))
+  let byNlinarith : MetaM Expr :=
+    linarithSplitting facts.toList (claim.getD (mkConst ``False))
+      { preprocessors := ({} : Mathlib.Tactic.Linarith.LinarithConfig).preprocessors.concat
+          Mathlib.Tactic.Linarith.nlinarithExtras }
   -- Which procedures to ask, in order. `linarith` goes first where there is
   -- a claim, which it proves outright, or where the numbers are not integers,
   -- which is all it is asked about then; `omega` is the second opinion only
   -- where they are.
   let procedures : List (String × MetaM Expr) :=
-    if !discrete then [("linarith", byLinarith)]
-    else if claim.isSome then [("linarith", byLinarith), ("omega", byOmega)]
-    else [("omega", byOmega), ("linarith", byLinarith)]
+    (if !discrete then [("linarith", byLinarith)]
+      else if claim.isSome then [("linarith", byLinarith), ("omega", byOmega)]
+      else [("omega", byOmega), ("linarith", byLinarith)])
+    ++ (if nonlinear then [("nlinarith", byNlinarith)] else [])
   let rec firstAnswer (rest : List (String × MetaM Expr))
       (failures : Array (String × Exception)) : MetaM Expr := do
     match rest with
