@@ -258,12 +258,27 @@ def isArithmeticAtom (e : Expr) : MetaM Bool := do
   return (arithmeticSort (← whnf τ)).isSome
 
 /--
+Whether `e` computes with numbers somewhere: an operation of arithmetic, or a
+numeral, at one of the arithmetic sorts.
+-/
+def mentionsArithmetic (e : Expr) : Bool :=
+  (e.find? fun t =>
+    match t.getAppFnArgs with
+    | (``HAdd.hAdd, #[τ, _, _, _, _, _]) | (``HSub.hSub, #[τ, _, _, _, _, _])
+    | (``HMul.hMul, #[τ, _, _, _, _, _]) | (``HDiv.hDiv, #[τ, _, _, _, _, _])
+    | (``Neg.neg, #[τ, _, _]) | (``OfNat.ofNat, #[τ, _, _]) =>
+      (arithmeticSort τ).isSome
+    | _ => false).isSome
+
+/--
 `a ↔ b` when nothing in the shape of the two relates them.
 
 If they speak of numbers, what relates them is arithmetic: vampire's
 normalisation states a literal one way where the goal states it the other, and
 puts an equality between the two inequalities it stands between, neither of
-which is a congruence.
+which is a congruence. That goes for numbers inside an uninterpreted symbol's
+arguments too, which the normalisation rewrites -- `f (x + -y)` for
+`f (x - y)` -- and the decision procedure relates by congruence.
 
 Only reached where the two are atoms. A difference in shape -- a quantifier
 over another domain, a junction of another width -- is a difference in what the
@@ -272,7 +287,13 @@ them asks a decision procedure to prove a nested formula by cases, which for a
 formula of any depth is a question it cannot be asked.
 -/
 private def unrelated (a b : Expr) (why : MessageData) : ReconstructM Expr := do
-  unless (← isArithmeticAtom a) && (← isArithmeticAtom b) do
+  let speaksOfNumbers (e : Expr) : MetaM Bool := do
+    if ← isArithmeticAtom e then return true
+    -- An atom about an uninterpreted sort whose terms compute with numbers.
+    let atom := (e.not?).getD e
+    return !atom.isAppOfArity ``And 2 && !atom.isAppOfArity ``Or 2 &&
+      !atom.isForall && mentionsArithmetic atom
+  unless (← speaksOfNumbers a) && (← speaksOfNumbers b) do
     throwError "{why}"
   arithmeticIff a b
 

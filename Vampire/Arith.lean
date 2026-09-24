@@ -112,6 +112,39 @@ def rearranged (a b : Expr) : MetaM (Option Expr) := do
   if answer.hasExprMVar then return none
   return some answer
 
+/--
+`goal` by `linarith` from `facts`, each disequality among them taken as the two
+cases it is first.
+
+`linarith` reads no disequality: of `a ≠ b` it makes nothing, and a fact like
+`¬1 = 1 / 1` that evaluating a literal leaves behind is a contradiction it
+does not see. Over numbers that are ordered, `a ≠ b` is `a < b` or `b < a`,
+each of which it reads.
+-/
+private partial def linarithSplitting (facts : List Expr) (goal : Expr) :
+    MetaM Expr := do
+  let disequality (fact : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
+    let stated ← instantiateMVars (← inferType fact)
+    let some (τ, a, b) := stated.not? >>= Expr.eq? | return none
+    unless (τ.isConstOf ``Int || τ.isConstOf ``Rat || τ.isConstOf `Real) do
+      return none
+    return some (τ, a, b)
+  let found ← facts.findSomeM? fun fact => do
+    return (← disequality fact).map (fact, ·)
+  let some (fact, _, a, b) := found
+    | let proof ← mkFreshExprMVar goal
+      Mathlib.Tactic.Linarith.linarith true facts {} proof.mvarId!
+      return ← instantiateMVars proof
+  let rest := facts.erase fact
+  let below ← mkAppM ``LT.lt #[a, b]
+  let above ← mkAppM ``LT.lt #[b, a]
+  let whenBelow ← withLocalDeclD `h below fun h => do
+    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal)
+  let whenAbove ← withLocalDeclD `h above fun h => do
+    mkLambdaFVars #[h] (← linarithSplitting (rest ++ [h]) goal)
+  mkAppOptM ``Or.elim #[some below, some above, some goal,
+    some (← mkAppM ``lt_or_gt_of_ne #[fact]), some whenBelow, some whenAbove]
+
 /-- `False` or `claim`, asked of the facts as they stand. -/
 private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
   -- `omega` decides the integers and the naturals and nothing else, so asking
@@ -140,10 +173,8 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
       mkAppM ``Classical.byContradiction #[refuted]
   -- `linarith` proves a comparison outright, which is what a theory axiom
   -- like commutativity states.
-  let byLinarith : MetaM Expr := do
-    let goal ← mkFreshExprMVar (claim.getD (mkConst ``False))
-    Mathlib.Tactic.Linarith.linarith true facts.toList {} goal.mvarId!
-    instantiateMVars goal
+  let byLinarith : MetaM Expr :=
+    linarithSplitting facts.toList (claim.getD (mkConst ``False))
   -- Which procedures to ask, in order. `linarith` goes first where there is
   -- a claim, which it proves outright, or where the numbers are not integers,
   -- which is all it is asked about then; `omega` is the second opinion only
@@ -352,11 +383,16 @@ def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
 where
   /-- A fact that states the claim, once both are written the one way: then
   there is nothing to ask, and over a sort that is not numbers no procedure
-  could be asked. -/
+  could be asked. An equation states it either way round, since vampire
+  orients equations by its term order rather than as they were written. -/
   stating (facts : Array Expr) (claim : Expr) : MetaM (Option Expr) := do
     for fact in facts do
-      if ← withTransparency .instances (isDefEq (← inferType fact) claim) then
+      let stated ← instantiateMVars (← inferType fact)
+      if ← withTransparency .instances (isDefEq stated claim) then
         return some fact
+      if let (some (_, x, y), some (_, x', y')) := (claim.eq?, stated.eq?) then
+        if ← withTransparency .instances (isDefEq x y' <&&> isDefEq y x') then
+          return some (← mkEqSymm fact)
     return none
 
 end Vampire.Arith
