@@ -76,7 +76,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .purePredicateRemoval => Definition.purePredicateRemoval step
   | .reduceFalseTrue => Simplify.reduceFalseTrue step
   | .closure => Congruence.restated step
-  | .theoryNormalization => Arithmetic.theoryStep step
+  | .theoryNormalization => Arithmetic.literalwise step
   | .alascaIntegerTransformation => Arithmetic.theoryStep step
   -- A disequality whose sides unify dropped, the unifier only renaming what
   -- is left; the worker records it as equality resolution at that unifier.
@@ -86,11 +86,11 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaBwdDemodulation => Arithmetic.theoryStep step
   | .innerRewriting => Rewrite.innerRewriting step
   | .condensation => Clause.condensation step
-  | .evaluation => Arithmetic.theoryStep step
-  | .alascaNormalization => Arithmetic.theoryStep step
+  | .evaluation => Arithmetic.literalwise step
+  | .alascaNormalization => Arithmetic.literalwise step
   | .alascaAbstraction => Arithmetic.theoryStep step
   | .alascaFloorElimination => Arithmetic.theoryStep step
-  | .cancellation => Arithmetic.theoryStep step
+  | .cancellation => Arithmetic.literalwise step
   | .interpretedSimplification => Arithmetic.theoryStep step
   | .theoryFlattening => Arithmetic.theoryStep step
   -- A literal equating two numbers that are not equal, dropped.

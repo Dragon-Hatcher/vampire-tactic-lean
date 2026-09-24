@@ -236,7 +236,8 @@ step needs a name that was never bound, or cannot be replayed.
 -/
 def run (proof : Proof) (symbols : Symbols)
     (contradiction : Array Expr → Option Expr → MetaM Expr)
-    (rearranged : Expr → Expr → MetaM (Option Expr))
+    (literalIff : LiteralRewrite → Expr → Expr → Int × Nat → MetaM Expr)
+    (literalFalse : LiteralRewrite → Expr → Int × Nat → MetaM Expr)
     (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
     (checkSteps : Bool := false) :
     MetaM (Option Outcome) := do
@@ -258,7 +259,8 @@ def run (proof : Proof) (symbols : Symbols)
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, contradiction, rearranged, cancelling, checkSteps
+    (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse, cancelling,
+              checkSteps
               flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>
                 match sym.numeral? with

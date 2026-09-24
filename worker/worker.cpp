@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    43 words, see `write`:
+ *   header    44 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -35,6 +35,7 @@
  *                  against
  *              41  how many records `placements` holds, and 42
  *                  `placementEntries`
+ *              43  how many words `literalFactors` holds
  *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
@@ -67,7 +68,7 @@
  *              genState, firstChoice, numChoices, firstCongruence,
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
- *              splittingName}
+ *              splittingName, firstFactor, numFactors, procedure}
  *             `firstConstraint` and `numConstraints` say which of a clause's
  *             literals are the disequalities an abstracting unifier left
  *             behind: what it could not unify it defers into literals the
@@ -78,6 +79,15 @@
  *             literals they are.
  *             `genState` is the generalised clause a clause came out of, and
  *             the choices are the conjuncts its clausification went into.
+ *             `firstFactor` and `numFactors` are, for a literal-wise
+ *             simplification that scaled a literal -- ALASCA normalization
+ *             divides a comparison by the gcd of its coefficients -- one entry
+ *             of `literalFactors` per literal of its premise; `NONE` and zero
+ *             where nothing was scaled.
+ *             `procedure` is, for a literal-wise simplification, which
+ *             procedure rewrote it (`InferenceStore::LiteralProcedure`):
+ *             evaluation is whichever of three evaluators the options chose,
+ *             and they rewrite a literal differently. `NONE` otherwise.
  *             `splittingName` is, for a general splitting component, which
  *             of its literals is the name the splitting introduced, and
  *             `NONE` for anything else: the name is a fresh predicate like
@@ -187,7 +197,15 @@
  *             AVATAR split clause, the entries of a component's definition are
  *             for the component's literals, under the renaming recorded
  *             against it, and index the clause being split
- *   placementEntries words, the entries of `placements`
+ *   placementEntries words, the entries of `placements`. For a
+ *             literal-wise simplification -- evaluation, theory normalization,
+ *             ALASCA normalization, cancellation -- the entries for its
+ *             premise are instead what the rule recorded each literal became,
+ *             which it rewrote rather than carried, `NONE` for one it found
+ *             false and dropped
+ *   literalFactors string offsets of rationals, `n` or `n/d`: the number the
+ *             difference of a comparison's sides is its normal form's term
+ *             times, see `InferenceStore::LiteralImage`
  *   strings   NUL-terminated names, padded to a 4-byte boundary
  *   proofText vampire's own rendering of the proof, padded likewise
  */
@@ -246,9 +264,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 25;
+const uint32_t VERSION = 27;
 /** Words per unit record. */
-const uint32_t UNIT_WIDTH = 31;
+const uint32_t UNIT_WIDTH = 34;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /**
@@ -616,6 +634,7 @@ void subsumptionEqualityResolution(Unit* u)
   store->recordPremiseUse(u, premise, removed, TermList::empty(), 0, bindings);
 }
 
+
 /**
  * `inner_rewriting` takes a disequality `l != r` of a clause and rewrites `l`
  * to `r` in every other literal. Which disequality and which way round is
@@ -668,12 +687,44 @@ void innerRewriting(Unit* u)
 
 }  // namespace recovered
 
+/**
+ * What each of @b premise's literals became in the literal-wise simplification
+ * @b u, in the order the premise's literals are in now, or empty where @b u
+ * recorded nothing for this premise.
+ *
+ * The rule recorded literals rather than positions, since literal selection
+ * reorders a clause after it is made; each record is taken once, so a literal
+ * the premise holds twice is matched to its records in turn.
+ */
+std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause* premise)
+{
+  std::vector<const InferenceStore::LiteralImage*> out;
+  const InferenceStore::LiteralRewriting* rewriting =
+    InferenceStore::instance()->literalImages(u);
+  if (!rewriting || rewriting->images.size() != premise->length())
+    return out;
+  const Stack<InferenceStore::LiteralImage>* images = &rewriting->images;
+  std::vector<bool> taken(images->size(), false);
+  for (unsigned i = 0; i < premise->length(); i++) {
+    const InferenceStore::LiteralImage* found = nullptr;
+    for (unsigned k = 0; k < images->size() && !found; k++)
+      if (!taken[k] && (*images)[k].from == (*premise)[i]) {
+        taken[k] = true;
+        found = &(*images)[k];
+      }
+    if (!found)
+      return {};
+    out.push_back(found);
+  }
+  return out;
+}
+
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
-      placementEntries;
+      placementEntries, literalFactors;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -1274,6 +1325,30 @@ struct Encoder {
         for (const auto& [var, term] : *useBindings)
           bound.map.set(var, term);
       uint32_t first = static_cast<uint32_t>(placementEntries.size());
+      // A literal-wise simplification rewrote its literals rather than carried
+      // them, and recorded what each became.
+      std::vector<const InferenceStore::LiteralImage*> images;
+      if (position == 0 && u->isClause()) {
+        Inference::Iterator it = inference.iterator();
+        Unit* first = inference.hasNext(it) ? inference.next(it) : nullptr;
+        if (first && first->isClause())
+          images = literalImagesOf(u, first->asClause());
+      }
+      if (!images.empty()) {
+        for (const auto* image : images) {
+          uint32_t entry = NONE;
+          for (unsigned j = 0; image->to && j < into->length() && entry == NONE; j++)
+            if ((*into)[j] == image->to)
+              entry = j;
+          placementEntries.push_back(entry);
+        }
+        placements.push_back(position);
+        placements.push_back(useIndex);
+        placements.push_back(first);
+        placements.push_back(static_cast<uint32_t>(from.size()));
+        numPlacements++;
+        return;
+      }
       for (Literal* lit : from) {
         Literal* image = SubstHelper::apply(lit, bound);
         uint32_t entry = NONE;
@@ -1362,6 +1437,34 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 28] = numPlacements == 0 ? NONE : firstPlacement;
     units[UNIT_WIDTH * idx + 29] = numPlacements;
     units[UNIT_WIDTH * idx + 30] = NONE;
+    units[UNIT_WIDTH * idx + 31] = NONE;
+    units[UNIT_WIDTH * idx + 32] = 0;
+    units[UNIT_WIDTH * idx + 33] = NONE;
+    std::vector<const InferenceStore::LiteralImage*> images;
+    if (u->isClause()) {
+      Inference::Iterator it = inference.iterator();
+      Unit* first = inference.hasNext(it) ? inference.next(it) : nullptr;
+      if (first && first->isClause())
+        images = literalImagesOf(u, first->asClause());
+    }
+    if (!images.empty())
+      units[UNIT_WIDTH * idx + 33] = static_cast<uint32_t>(
+        InferenceStore::instance()->literalImages(u)->procedure);
+    {
+      bool scaled = false;
+      for (const auto* image : images)
+        scaled = scaled || image->factor != RationalConstantType(1);
+      if (scaled) {
+        units[UNIT_WIDTH * idx + 31] = static_cast<uint32_t>(literalFactors.size());
+        units[UNIT_WIDTH * idx + 32] = static_cast<uint32_t>(images.size());
+        for (const auto* image : images)
+        {
+          std::ostringstream text;
+          text << image->factor.numerator() << "/" << image->factor.denominator();
+          literalFactors.push_back(addString(text.str()));
+        }
+      }
+    }
     if (u->isClause() && inference.rule() == InferenceRule::GENERAL_SPLITTING_COMPONENT) {
       Clause* cl = static_cast<Clause*>(u);
       if (Literal* name = InferenceStore::instance()->splittingNameLiteral(u))
@@ -1484,6 +1587,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, VAMPIRE_RULE_FINGERPRINT);
   putWord(buf, static_cast<uint32_t>(enc.placements.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
+  putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1514,6 +1618,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.congruenceArgs);
   putWords(buf, enc.placements);
   putWords(buf, enc.placementEntries);
+  putWords(buf, enc.literalFactors);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

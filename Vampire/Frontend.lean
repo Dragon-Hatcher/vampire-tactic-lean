@@ -1,6 +1,7 @@
 import Lean
 import Auto.Tactic
 import Vampire.Arith
+import Vampire.LiteralRewrite
 import Vampire.Preprocess
 import VampireReplay.Reconstruct
 import Vampire.Worker
@@ -301,7 +302,8 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
     try
       query.preprocessed.goal.withContext
         (Reconstruct.run query.proof query.symbols Arith.contradiction
-          Arith.rearranged Arith.cancelling cfg.checkSteps)
+          LiteralRewrite.literalIff LiteralRewrite.literalFalse Arith.cancelling
+          cfg.checkSteps)
     catch e =>
       throwError "vampire refuted the goal but the proof could not be \
         replayed: {e.toMessageData}"

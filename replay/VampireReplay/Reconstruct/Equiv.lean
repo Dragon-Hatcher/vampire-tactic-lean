@@ -240,63 +240,6 @@ def standingFor (types values : Array Expr)
     mkLambdaFVars locals (← k locals)
   return mkAppN abstracted values
 
-/--
-Whether `e` is a comparison or an equation between numbers, or the denial of
-one: what vampire's normalisation rewrites, and so the only kind of atom an
-arithmetic fact can relate to another.
--/
-def isArithmeticAtom (e : Expr) : MetaM Bool := do
-  let e := (e.not?).getD e
-  let τ? := match_expr e with
-    | LT.lt τ _ _ _ => some τ
-    | LE.le τ _ _ _ => some τ
-    | GT.gt τ _ _ _ => some τ
-    | GE.ge τ _ _ _ => some τ
-    | Eq τ _ _ => some τ
-    | _ => none
-  let some τ := τ? | return false
-  return (arithmeticSort (← whnf τ)).isSome
-
-/--
-Whether `e` computes with numbers somewhere: an operation of arithmetic, or a
-numeral, at one of the arithmetic sorts.
--/
-def mentionsArithmetic (e : Expr) : Bool :=
-  (e.find? fun t =>
-    match t.getAppFnArgs with
-    | (``HAdd.hAdd, #[τ, _, _, _, _, _]) | (``HSub.hSub, #[τ, _, _, _, _, _])
-    | (``HMul.hMul, #[τ, _, _, _, _, _]) | (``HDiv.hDiv, #[τ, _, _, _, _, _])
-    | (``Neg.neg, #[τ, _, _]) | (``OfNat.ofNat, #[τ, _, _]) =>
-      (arithmeticSort τ).isSome
-    | _ => false).isSome
-
-/--
-`a ↔ b` when nothing in the shape of the two relates them.
-
-If they speak of numbers, what relates them is arithmetic: vampire's
-normalisation states a literal one way where the goal states it the other, and
-puts an equality between the two inequalities it stands between, neither of
-which is a congruence. That goes for numbers inside an uninterpreted symbol's
-arguments too, which the normalisation rewrites -- `f (x + -y)` for
-`f (x - y)` -- and the decision procedure relates by congruence.
-
-Only reached where the two are atoms. A difference in shape -- a quantifier
-over another domain, a junction of another width -- is a difference in what the
-two formulas say of their parts, and asking about the numbers in the whole of
-them asks a decision procedure to prove a nested formula by cases, which for a
-formula of any depth is a question it cannot be asked.
--/
-private def unrelated (a b : Expr) (why : MessageData) : ReconstructM Expr := do
-  let speaksOfNumbers (e : Expr) : MetaM Bool := do
-    if ← isArithmeticAtom e then return true
-    -- An atom about an uninterpreted sort whose terms compute with numbers.
-    let atom := (e.not?).getD e
-    return !atom.isAppOfArity ``And 2 && !atom.isAppOfArity ``Or 2 &&
-      !atom.isForall && mentionsArithmetic atom
-  unless (← speaksOfNumbers a) && (← speaksOfNumbers b) do
-    throwError "{why}"
-  arithmeticIff a b
-
 /-- `a ↔ c` from `a ↔ b` and `b ↔ c`, written out: `mkAppM` would unify the
 formulas to find them, and assigning a whole formula is a walk over it, at
 every level of the formulas being related. -/
@@ -323,7 +266,8 @@ the translation writes them in the goal's order, so the parts of two junctions
 are paired in order: there is nothing to align, and were the two to disagree
 the step would fail rather than a pairing be guessed.
 -/
-partial def equivNormal (a b : Expr) : ReconstructM Expr := do
+partial def equivNormal (atoms : Expr → Expr → ReconstructM (Option Expr))
+    (a b : Expr) : ReconstructM Expr := do
   -- A hypothesis reaches here through elaboration, so its type can still be a
   -- metavariable; every recogniser below would miss it.
   let a ← instantiateMVars a
@@ -338,15 +282,15 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
   -- other carries none.
   if let some ia := a.not? then
     if let some iia := ia.not? then
-      return iffTrans a iia b (notNotIff iia) (← equivNormal iia b)
+      return iffTrans a iia b (notNotIff iia) (← equivNormal atoms iia b)
   if let some ib := b.not? then
     if let some iib := ib.not? then
-      return iffTrans a iib b (← equivNormal a iib) (iffSymm b iib (notNotIff iib))
+      return iffTrans a iib b (← equivNormal atoms a iib) (iffSymm b iib (notNotIff iib))
   if let (some ia, some ib) := (a.not?, b.not?) then
-    return mkApp3 (mkConst ``not_congr) ia ib (← equivNormal ia ib)
+    return mkApp3 (mkConst ``not_congr) ia ib (← equivNormal atoms ia ib)
   if let (some (a₁, a₂), some (b₁, b₂)) := (a.iff?, b.iff?) then
-    return mkApp6 (mkConst ``iff_congr) a₁ b₁ a₂ b₂ (← equivNormal a₁ b₁)
-      (← equivNormal a₂ b₂)
+    return mkApp6 (mkConst ``iff_congr) a₁ b₁ a₂ b₂ (← equivNormal atoms a₁ b₁)
+      (← equivNormal atoms a₂ b₂)
   -- Rectification drops a quantifier over a variable its body never mentions,
   -- so one side can carry a binder the other does not. Whether it can be
   -- dropped is settled by its own body and nothing else: were this to wait
@@ -359,7 +303,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         if !body.hasLooseBVars then
           let dropped ← mkAppOptM ``forall_const
             #[some body, some d, some (← nonempty d)]
-          let related ← if x == a then equivNormal body y else equivNormal y body
+          let related ← if x == a then equivNormal atoms body y else equivNormal atoms y body
           return if x == a then iffTrans x body y dropped related
             else iffTrans y body x related (iffSymm x body dropped)
     if x.isAppOfArity ``Exists 2 then
@@ -367,21 +311,21 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         unless body.hasLooseBVars do
           let dropped ← mkAppOptM ``exists_const
             #[some body, some d, some (← nonempty d)]
-          let related ← if x == a then equivNormal body y else equivNormal y body
+          let related ← if x == a then equivNormal atoms body y else equivNormal atoms y body
           return if x == a then iffTrans x body y dropped related
             else iffTrans y body x related (iffSymm x body dropped)
   match a, b with
   | .forallE _ ad ab _, .forallE _ bd bb _ =>
     if (← isProp ad) && (← isProp bd) && !ab.hasLooseBVars && !bb.hasLooseBVars then
       -- An arrow: its left side is negative, which is why this is an ↔.
-      return mkApp6 (mkConst ``imp_congr) ad ab bd bb (← equivNormal ad bd)
-        (← equivNormal ab bb)
+      return mkApp6 (mkConst ``imp_congr) ad ab bd bb (← equivNormal atoms ad bd)
+        (← equivNormal atoms ab bb)
     unless ← sameFormula ad bd do
       throwError "cannot relate{indentExpr a}\nto{indentExpr b}\n\
         their binders have different types"
     let u ← getLevel ad
     return ← withLocalDeclD `x ad fun x => do
-      let inner ← equivNormal (ab.instantiate1 x) (bb.instantiate1 x)
+      let inner ← equivNormal atoms (ab.instantiate1 x) (bb.instantiate1 x)
       return mkApp4 (mkConst ``forall_congr' [u]) ad (.lam `x ad ab .default)
         (.lam `x bd bb .default) (← mkLambdaFVars #[x] inner)
   | _, _ =>
@@ -390,7 +334,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
       | .lam _ ad abody _, .lam _ _ bbody _ =>
         let u ← getLevel ad
         return ← withLocalDeclD `x ad fun x => do
-          let inner ← equivNormal (abody.instantiate1 x) (bbody.instantiate1 x)
+          let inner ← equivNormal atoms (abody.instantiate1 x) (bbody.instantiate1 x)
           return mkApp4 (mkConst ``exists_congr [u]) ad a.appArg! b.appArg!
             (← mkLambdaFVars #[x] inner)
       | _, _ =>
@@ -424,15 +368,15 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
               | none => return mkApp (mkConst ``Iff.refl) p
             return some (junction fn unit (stripped parts), ← congrJunction congruence proofs)
           if let some (a', says) ← unwrap a ap then
-            return iffTrans a a' b says (← equivNormal a' b)
+            return iffTrans a a' b says (← equivNormal atoms a' b)
           if let some (b', says) ← unwrap b bp then
-            return iffTrans a b' b (← equivNormal a b') (iffSymm b b' says)
+            return iffTrans a b' b (← equivNormal atoms a b') (iffSymm b b' says)
           -- One side has a truth value the other has absorbed.
           if rightNested fn a ap && rightNested fn b bp then
             let (aKept, aSays) ← withoutUnits fn unit ap
             let (bKept, bSays) ← withoutUnits fn unit bp
             if aKept.size == bKept.size && !aKept.isEmpty then
-              let core ← equivNormal (junction fn unit aKept) (junction fn unit bKept)
+              let core ← equivNormal atoms (junction fn unit aKept) (junction fn unit bKept)
               return ← mkAppM ``Iff.trans
                 #[aSays, ← mkAppM ``Iff.trans
                   #[core, ← mkAppM ``Iff.symm #[bSays]]]
@@ -444,7 +388,7 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
         -- made about which part answers to which. The two sides may associate
         -- differently, which is what flattening changes, so the parts are
         -- reached by index rather than by following either shape.
-        let values ← ap.zipIdx.mapM fun (x, i) => equivNormal x bp[i]!
+        let values ← ap.zipIdx.mapM fun (x, i) => equivNormal atoms x bp[i]!
         -- Both sides right-nested over the same parts: the congruence follows
         -- their shape, one step per part. Taking them apart and putting them
         -- back together a part at a time would cost the square of their width,
@@ -484,7 +428,10 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
               mkLambdaFVars #[h] (← elimParts b 0 (fun i hi =>
                 injectPart fn a i (mpr i hi)) h)
             return mkApp4 (mkConst ``Iff.intro) a b forward backward
-    unrelated a b m!"cannot relate{indentExpr a}\nto{indentExpr b}"
+    -- Two atoms nothing in the shape relates: what the rule did to them, if
+    -- it is one that rewrites atoms, relates them.
+    if let some h ← atoms a b then return h
+    throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
 
 /--
 `e` with every comparison stated the way round vampire's normalisation states
@@ -527,9 +474,13 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr)
           ReconstructM (Option (Expr × Option Expr)) := do
         unless (arithmeticSort (← whnf τ)).isSome do return none
         return some (flipped, some (← mkAppOptM lemma_ #[some τ, none, some x, some y]))
+      -- `x > y` and `x ≥ y` are `y < x` and `y ≤ x` by definition, and the
+      -- goal may write either.
       let flipped? ← match_expr a with
         | LT.lt τ _ x y => flip τ `not_lt x y (← mkAppM ``LE.le #[y, x])
         | LE.le τ _ x y => flip τ `not_le x y (← mkAppM ``LT.lt #[y, x])
+        | GT.gt τ _ x y => flip τ `not_lt y x (← mkAppM ``LE.le #[x, y])
+        | GE.ge τ _ x y => flip τ `not_le y x (← mkAppM ``LT.lt #[x, y])
         | _ => pure none
       match flipped? with
       | some result => return result
@@ -569,8 +520,13 @@ private partial def sameWayRound (e : Expr) : ReconstructM (Expr × Option Expr)
       | _ => return (e, none)
     | _ => return (e, none)
 
-/-- `a ↔ b`, for two ways of writing one formula. -/
-def equiv (a b : Expr) : ReconstructM Expr := do
+/--
+`a ↔ b`, for two ways of writing one formula; `atoms` relates two atoms that
+differ, for a rule that rewrote them, and relates nothing otherwise.
+-/
+def equiv (a b : Expr)
+    (atoms : Expr → Expr → ReconstructM (Option Expr) := fun _ _ => pure none) :
+    ReconstructM Expr := do
   let a ← instantiateMVars a
   let b ← instantiateMVars b
   if ← sameFormula a b then
@@ -582,7 +538,7 @@ def equiv (a b : Expr) : ReconstructM Expr := do
   let (wb, qb) ← sameWayRound b
   let (na, pa) ← toNNF wa
   let (nb, pb) ← toNNF wb
-  let core ← equivNormal na nb
+  let core ← equivNormal atoms na nb
   let symm? (p? : Option Expr) : ReconstructM (Option Expr) :=
     p?.mapM fun p => mkAppM ``Iff.symm #[p]
   let toA ← iffTrans? qa pa
@@ -596,9 +552,11 @@ A proof of `conclusion` from `proof : stated`, where the two are one formula
 written two ways: the proof itself where they are the same, and otherwise the
 equivalence `equiv` finds between them.
 -/
-def restate (proof stated conclusion : Expr) : ReconstructM Expr := do
+def restate (proof stated conclusion : Expr)
+    (atoms : Expr → Expr → ReconstructM (Option Expr) := fun _ _ => pure none) :
+    ReconstructM Expr := do
   if ← sameFormula (← instantiateMVars stated) conclusion then
     return proof
-  mkAppM ``Iff.mp #[← equiv stated conclusion, proof]
+  mkAppM ``Iff.mp #[← equiv stated conclusion atoms, proof]
 
 end Vampire.Reconstruct

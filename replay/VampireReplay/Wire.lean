@@ -12,10 +12,10 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 43
+private def headerWords : Nat := 44
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 31
+private def unitWidth : Nat := 34
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -60,6 +60,7 @@ private structure Layout where
   congruenceArgs : Nat
   placements : Nat
   placementEntries : Nat
+  literalFactors : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -146,7 +147,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 25
+private def version : UInt32 := 27
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -204,6 +205,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let proofTextLen := word 33
   let numPlacements := word 41
   let numPlacementEntries := word 42
+  let numLiteralFactors := word 43
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -233,7 +235,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let congruenceArgs := congruences + numCongruences * 5 * 4
   let placements := congruenceArgs + numCongruenceArgs * 4
   let placementEntries := placements + numPlacements * 4 * 4
-  let strings := placementEntries + numPlacementEntries * 4
+  let literalFactors := placementEntries + numPlacementEntries * 4
+  let strings := literalFactors + numLiteralFactors * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -406,6 +409,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
         for j in [0:at_ placements 4 (u 28 + k) 3] do
           let entry := at_ placementEntries 1 (first + j) 0
           if entry != none then index "placed literal" (entry &&& 0x7FFFFFFF) into
+    -- A literal's factor, as a string.
+    if u 32 != 0 then
+      index "literal factors" (u 31 + u 32 - 1) numLiteralFactors
+      for k in [0:u 32] do
+        string "literal factor" (at_ literalFactors 1 (u 31 + k) 0)
   if raw hasRefutationWord != 0 then index "refutation" (word refutationWord) numUnits
   optionalString "strategy" (word strategyWord)
   let reason ← ofIndex
@@ -420,7 +428,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      strings, stringsLen, proofText, numFunctions,
+      literalFactors, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -1101,6 +1109,35 @@ def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
     let entry := readU32 p.data (p.layout.placementEntries + (firstEntry.toNat + j.val) * 4)
     if entry == none32 then none
     else some ((entry &&& 0x7FFFFFFF).toNat, entry &&& 0x80000000 != 0)
+
+/--
+For a literal-wise simplification that scaled a literal, one number per
+literal of its premise: the number the difference of the literal's sides is
+the term of what it became times, as `numerator / denominator`, the
+denominator positive. `none` where nothing was scaled.
+
+ALASCA normalization divides a comparison by the gcd of its coefficients,
+and turns an equation's sides round, which is a factor of `-1`; the factor
+depends on the order vampire keeps a polynomial's monomials in, which is
+nothing replay could reconstruct, so the worker records it.
+-/
+def literalFactors? (u : Unit) : Option (Array (Int × Nat)) := do
+  let first := u.field 31
+  let count := u.field 32
+  if count == 0 then none
+  let p := u.proof
+  (Array.range count.toNat).mapM fun k => do
+    let text := p.string (readU32 p.data (p.layout.literalFactors + (first.toNat + k) * 4))
+    let [num, den] := text.splitOn "/" | none
+    return (← num.toInt?, ← den.toNat?)
+
+/--
+For a literal-wise simplification, which procedure rewrote it, as the worker
+numbers them (`InferenceStore::LiteralProcedure`); `none` for anything else.
+-/
+def literalProcedure? (u : Unit) : Option Nat :=
+  let n := u.field 33
+  if n == none32 then none else some n.toNat
 
 /-- The generalised clause this clause came out of, if clausification made it. -/
 def genClause? (u : Unit) : Option GenClause :=

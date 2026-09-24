@@ -6,6 +6,40 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
+/--
+The procedures that rewrite a clause a literal at a time -- each literal
+becomes one literal of the conclusion or is found false and dropped. Which one
+rewrote a clause the worker records: the inference rule does not say, since
+evaluation is whichever of three evaluators the options chose.
+
+* `theoryNormalization` (`InterpretedNormalizer`).
+* `interpretedEvaluation` (`InterpretedEvaluation`), normalizing inequalities
+  or not.
+* `polynomialEvaluation` (`PolynomialEvaluationRule`).
+* `pushUnaryMinus` (`PushUnaryMinus`).
+* `alascaNormalization` (ALASCA's `InequalityNormalizer`).
+* `cancellation` (`Cancellation`).
+-/
+inductive LiteralRewrite
+  | theoryNormalization
+  | interpretedEvaluation (normalizing : Bool)
+  | polynomialEvaluation
+  | pushUnaryMinus
+  | alascaNormalization
+  | cancellation
+  deriving Inhabited, BEq, Repr
+
+/-- The procedure the worker recorded as the number `n`: `InferenceStore::LiteralProcedure`. -/
+def LiteralRewrite.ofRecorded? : Nat → Option LiteralRewrite
+  | 0 => some .theoryNormalization
+  | 1 => some (.interpretedEvaluation false)
+  | 2 => some (.interpretedEvaluation true)
+  | 3 => some .polynomialEvaluation
+  | 4 => some .pushUnaryMinus
+  | 5 => some .alascaNormalization
+  | 6 => some .cancellation
+  | _ => none
+
 /-- What reconstruction needs to read a proof back into Lean. -/
 structure Context where
   /-- What the TPTP names in the proof stand for. -/
@@ -64,15 +98,22 @@ structure Context where
   contradiction : Array Expr → Option Expr → MetaM Expr := fun _ _ =>
     throwError "replay was not given a way to prove arithmetic steps"
   /--
-  `a ↔ b` where the two are one comparison with its terms moved across it,
-  which is the shape normalising a literal leaves, and none where they are not.
+  `a ↔ b`, where a literal-wise simplification rewrote the literal `a` into
+  `b`, by exactly the rewrites that procedure makes; the factor is the one the
+  step recorded against the literal (see `Unit.literalFactors?`), `(1, 1)`
+  where it recorded none.
 
-  Handed in for the same reason as `contradiction`, and asked first: what
-  relates the two is that the difference between their sides is the same, which
-  is a fact about a ring, where a decision procedure would be asked for each
-  way round the equivalence goes.
+  Handed in for the same reason as `contradiction`: the rewrites are identities
+  of a ring and facts about an order, which are Mathlib's.
   -/
-  rearranged : Expr → Expr → MetaM (Option Expr) := fun _ _ => pure none
+  literalIff : LiteralRewrite → Expr → Expr → Int × Nat → MetaM Expr :=
+    fun _ _ _ _ => throwError "replay was not given a way to prove literal rewrites"
+  /--
+  `¬a`, where a literal-wise simplification found the literal `a` false and
+  dropped it: evaluated, it is a comparison of numbers that fails.
+  -/
+  literalFalse : LiteralRewrite → Expr → Int × Nat → MetaM Expr :=
+    fun _ _ _ => throwError "replay was not given a way to prove literal rewrites"
   /--
   `x ≠ 0 → x * z = x * w → z = w` at three numbers, and none where their sort
   does not cancel.

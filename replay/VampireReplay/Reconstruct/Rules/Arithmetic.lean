@@ -3,11 +3,16 @@ import VampireReplay.Reconstruct.Basic
 /-!
 The steps that hold by arithmetic.
 
-Vampire's own arithmetic rules -- ALASCA normalising a literal into a sum
-against zero, evaluating what is constant, adding two inequalities together --
-record nothing of why each is sound, so these are the one kind of step whose
-conclusion replay has to prove for itself. What proves it is the decision
-procedure `Context.contradiction` holds.
+Vampire's own arithmetic rules record nothing of why each is sound, so these
+are the steps whose conclusion replay has to prove for itself. Two kinds:
+
+* The literal-wise simplifications -- evaluation, theory normalization, ALASCA
+  normalization, cancellation -- rewrite each literal into one literal, or find
+  it false. The worker records which literal each became, and each rewrite is
+  proved by exactly the rewrites its rule makes (`Context.literalIff`).
+* The rest -- theory axioms, ALASCA's inferences adding inequalities together --
+  hold by the arithmetic of their literals, which the decision procedure
+  `Context.contradiction` settles.
 -/
 
 namespace Vampire.Reconstruct.Arithmetic
@@ -135,14 +140,7 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     let #[(proof, stated)] := step.premises
       | throwError "{step.rule.name} on a formula should have one premise, got \
         {step.premises.size}"
-    let conclusion ← step.conclusion
-    -- The rewriting can reach inside an uninterpreted symbol's arguments,
-    -- where the leaves are not literals of the formula: `f (x - y)` for
-    -- `f (x + -y)`. Then what relates the two is the numbers, not the shape.
-    return ← try restate proof stated conclusion
-      catch e =>
-        try rollingBack ((← read).contradiction #[proof] (some conclusion))
-        catch _ => throw e
+    return ← restate proof stated (← step.conclusion)
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let targetParts := clauseLiterals target step.unit.clauseSize?
@@ -155,18 +153,9 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     -- the step acted on, and those are what the numbers settle.
     let premiseParts := premises.zipIdx.map fun ((_, stated), i) =>
       clauseLiterals stated ((step.unit.parents[i]?).bind (·.clauseSize?))
-    -- Where every literal of the conclusion is one the step carried over, the
-    -- ones it acted on are not in it: evaluating them found them false, so the
-    -- numbers refute them without the conclusion being asked for -- which, a
-    -- literal naming a subformula being that whole formula, can be far more
-    -- than a decision procedure should be handed.
-    let deleted := targetParts.all fun t => premiseParts.any (·.contains t)
     let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
       let some (proof, _) := premises[i]?
-        | if deleted then
-            return mkApp2 (mkConst ``False.elim [.zero]) target
-              (← byArithmetic facts (mkConst ``False))
-          return ← byArithmetic facts target
+        | return ← byArithmetic facts target
       elimGiven premiseParts[i]! (motive? := some target)
         (fun _ h => do
           let says ← instantiateMVars (← inferType h)
@@ -175,6 +164,64 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
           go (facts.push (← plainly h)) (i + 1)) proof
     let statements := #[target] ++ premises.map (·.2)
     withRoundings statements fun roundings => go roundings 0
+
+/--
+A literal-wise simplification: each literal of the premise became the literal
+of the conclusion the worker recorded, by the rewrites of the procedure it
+recorded, or was found false and dropped.
+
+Before clausification the step states a formula, and its atoms are rewritten
+where they stand, which is a congruence down to them; only theory
+normalization rewrites formulas.
+-/
+def literalwise (step : Step) : ReconstructM Expr := do
+  let #[(proof, stated)] := step.premises
+    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "{step.rule.name} should have one premise, got none"
+  if step.unit.clause?.isNone then
+    unless step.rule == .theoryNormalization do
+      throwError "{step.rule.name} rewrote a formula, which only theory normalization does"
+    let rewritten (a b : Expr) : ReconstructM (Option Expr) := do
+      return some (← (← read).literalIff .theoryNormalization a b (1, 1))
+    return ← restate proof stated (← step.conclusion) rewritten
+  let some procedure := step.unit.literalProcedure?.bind LiteralRewrite.ofRecorded?
+    | throwError "step {step.unit.number} ({step.rule.name}) recorded no procedure"
+  let some images := step.placedAt 0
+    | throwError "step {step.unit.number} ({step.rule.name}) recorded nothing of \
+      what its literals became"
+  let factors := step.unit.literalFactors?
+  step.underVars fun vars target => do
+    let #[(premise, premiseStated)] ← premisesOf step vars
+      | throwError "{step.rule.name} should have one premise"
+    let parts := clauseLiterals premiseStated parent.clauseSize?
+    unless images.size == parts.size do
+      throwError "step {step.unit.number} recorded {images.size} literals' \
+        images for a premise of {parts.size}"
+    let into := step.into target
+    -- A literal of no arguments -- a name, which replay states as what it
+    -- stands for -- has nothing in it any of the procedures rewrites.
+    let literals := (parent.clause?.map (·.literals)).getD #[]
+    let bare (i : Nat) : Bool :=
+      (literals[i]?.map fun l => l.arity == 0 && !l.isEquality).getD false
+    elimGiven parts (motive? := some target) (fun i h => do
+      let factor := (factors.bind (·[i]?)).getD (1, 1)
+      match images[i]? with
+      | some (some (j, _)) =>
+        let some goal := into.parts[j]?
+          | throwError "step {step.unit.number} has no literal {j}"
+        let iff ← if bare i then do
+            unless ← isDefEq parts[i]! goal do
+              throwError "{step.rule.name} rewrote{indentExpr parts[i]!}\ninto\
+                {indentExpr goal}\nbut it has no arguments to rewrite"
+            pure (mkApp (mkConst ``Iff.refl) parts[i]!)
+          else (← read).literalIff procedure parts[i]! goal factor
+        let some placed := into.inject 0 j (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
+          | throwError "step {step.unit.number} has no literal {j}"
+        return placed
+      | _ =>
+        let refuted ← (← read).literalFalse procedure parts[i]! factor
+        return mkApp2 (mkConst ``False.elim [.zero]) target (mkApp refuted h)) premise
 
 /-- `a * b`, whichever numbers those are. -/
 private def asProduct (e : Expr) : Option (Expr × Expr) :=

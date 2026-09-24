@@ -316,19 +316,4 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
         (← byArithmetic (facts.push (← plainly h)) (mkConst ``False) fuel)
     return ofNotNot goal refuted
 
-/--
-`a ↔ b`, when the two say the same of the same numbers.
-
-What vampire's normalisation does to a literal -- `a ≤ b` for `¬(b < a)`, an
-equality for the two inequalities it stands between, a sum moved to one side of
-a comparison -- is no congruence, so nothing relates the two but arithmetic.
--/
-def arithmeticIff (a b : Expr) : ReconstructM Expr := do
-  -- Normalising a literal moves its terms across the comparison and nothing
-  -- else, which is settled by the difference between the sides being the same;
-  -- what is left over is for the numbers.
-  if let some moved ← (← read).rearranged a b then
-    return moved
-  byArithmetic #[] (mkApp2 (mkConst ``Iff) a b)
-
 end Vampire.Reconstruct
