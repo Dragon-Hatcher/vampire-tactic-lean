@@ -124,8 +124,24 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
     #[← mkAppOptM ``Classical.not_not #[some target], contradiction]
 
 /--
-What a propositional clause says: what each of its names stands for, and their
-disjunction.
+That the literals `parts` are not all false: `¬l₁ → … → ¬lₙ → False`.
+
+This is how a propositional clause is stated here, rather than as the
+disjunction of its literals. Using a clause is then applying it: a unit
+propagation through a premise is `fun x => premise h₁ … x … hₘ`, and a premise
+with every literal false is `premise h₁ … hₘ`, where each `hᵢ` says a literal
+is false. Through a disjunction the same step resolved literal by literal, and
+each resolution wrote out the clause that was left; a propositional refutation
+can be tens of thousands of derivations of clauses dozens of literals wide, and
+what the proof holds of every one of them is kept for as long as the file is.
+-/
+private def negativeClause (parts : Array Expr) : Expr :=
+  parts.foldr (init := mkConst ``False) fun l rest =>
+    .forallE `h (mkApp (mkConst ``Not) l) rest .default
+
+/--
+What a propositional clause says: what each of its names stands for, and that
+they are not all false (`negativeClause`).
 
 Built once per clause and read back from `states`. The solver uses a clause as a
 premise of as many derivations as it likes, so premise uses far outnumber
@@ -135,7 +151,7 @@ the refutation.
 private def satClauseParts (c : SatClause) :
     ReconstructM (Array Expr × Expr) := do
   let parts ← c.literals.mapM namedFormula
-  return (parts, junction ``Or ``False parts)
+  return (parts, negativeClause parts)
 
 /--
 The clauses a propositional refutation rests on, each after the ones it was
@@ -154,82 +170,46 @@ private partial def satOrder (c : SatClause) :
   modify fun (seen, order) => (seen, order.push c)
 
 /--
-`¬says`, for a literal of a clause, from what is known of its name's flip: a
-proof `negated` of `refuting`.
-
-Which of the two carries the negation is read off what the two names stand for
--- a name and its negation are two names, and either may carry it. Asking a
-conversion check instead meant comparing two components, which are whole
-first-order formulas, once for every literal of every premise use.
+`¬(parts[j] ∨ …)` from what says each of those literals is false, the
+junction's suffixes being `suffix`.
 -/
-private def refutationOf (says refuting negated : Expr) : ReconstructM Expr := do
-  if refuting == mkApp (mkConst ``Not) says then
-    return negated
-  if says == mkApp (mkConst ``Not) refuting then
-    return mkApp2 (mkConst ``not_not_intro) refuting negated
-  throwError "neither of{indentExpr says}\nand{indentExpr refuting}\n\
-    is the negation of the other"
-
-/--
-`¬part` for the `j`th literal of a premise, which the propagation has made false.
--/
-private def falseAt (parts : Array Expr) (names : Array String)
-    (known : Std.HashMap String (Expr × Expr)) (j : Nat) : ReconstructM Expr := do
-  let some name := names[j]? | throwError "missing literal"
-  let some says := parts[j]? | throwError "missing literal"
-  let some (negated, refuting) := known[flippedName name]?
-    | throwError "literal {j} of a propositional premise is not false"
-  refutationOf says refuting negated
-
-/--
-`¬(parts[j] ∨ … )`, the premise's literals from the `j`th on all being false.
--/
-private def allFalseFrom (parts suffix : Array Expr) (names : Array String)
-    (known : Std.HashMap String (Expr × Expr)) (j : Nat) : ReconstructM Expr := do
+private def allFalseFrom (parts suffix refutations : Array Expr) (j : Nat) : Expr := Id.run do
   let last := parts.size - 1
-  let mut acc ← falseAt parts names known last
+  let mut acc := refutations[last]!
   for d in [0 : last - j] do
     let i := last - 1 - d
-    acc := mkApp4 (mkConst ``not_or_intro) parts[i]! suffix[i + 1]!
-      (← falseAt parts names known i) acc
+    acc := mkApp4 (mkConst ``not_or_intro) parts[i]! suffix[i + 1]! refutations[i]! acc
   return acc
 
 /--
-The one literal of a premise its others leave, from what says each of those is
-false: the literals before it resolved away from the front, and those after it
-from the back, all of them at once.
+What says the flip of a literal `says` is false, from `notNot : ¬¬says`.
 
-Self-contained: it says nothing about the rest of the propagation, which is what
-keeps the propagation linear. It is also the whole of the replay's share of a
-large propositional refutation, so it is written with the fewest terms: a
-resolution per literal, where taking the clause apart by cases wrote out a
-motive, a hypothesis and an `absurd` for each of them.
+Of a name and its flip, one says the negation of what the other does, so this
+is `notNot` itself where the flip is `¬says`, and `¬¬¬flipped` taken down to
+`¬flipped` where `says` is.
 -/
-private def implied (parts : Array Expr) (names : Array String) (u : Nat)
-    (known : Std.HashMap String (Expr × Expr)) (proof : Expr) :
-    ReconstructM Expr := do
-  unless u < parts.size do throwError "missing literal"
-  let suffix := suffixJunctions ``Or ``False parts
-  let mut h := proof
-  for j in [0 : u] do
-    h := mkApp4 (mkConst ``Or.resolve_left) parts[j]! suffix[j + 1]! h
-      (← falseAt parts names known j)
-  if u + 1 == parts.size then
-    return h
-  return mkApp4 (mkConst ``Or.resolve_right) parts[u]! suffix[u + 1]! h
-    (← allFalseFrom parts suffix names known (u + 1))
+private def refutingFlip (says flipped notNot : Expr) : ReconstructM Expr := do
+  if flipped == mkApp (mkConst ``Not) says then
+    return notNot
+  if says == mkApp (mkConst ``Not) flipped then
+    -- `fun f => notNot (fun k => k f)`.
+    return .lam `f flipped
+      (mkApp notNot (.lam `k says (mkApp (.bvar 0) (.bvar 1)) .default)) .default
+  throwError "neither of{indentExpr says}\nand{indentExpr flipped}\n\
+    is the negation of the other"
 
 /--
 `False`, by unit propagation through the clauses a derived clause was derived
 from: each of them has all but one of its literals already false, so that one
 holds, and the last of them has none left.
 
-What each premise leaves is bound rather than written out, so a literal a dozen
-later premises are false by is proved once.
+`refuted` maps a literal's name to what says it is false. What each premise
+leaves is bound rather than written out, so a literal a dozen later premises
+are false by is proved once.
 -/
 private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
     (proved : Std.HashMap UInt32 Expr)
-    (known : Std.HashMap String (Expr × Expr)) (premises : Array SatClause)
+    (refuted : Std.HashMap String Expr) (premises : Array SatClause)
     (i : Nat) (bound : Array Expr) : ReconstructM Expr := do
   let some premise := premises[i]?
     | throwError "unit propagation through the recorded premises ended without \
@@ -240,24 +220,22 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
   let some (parts, _) := states[premise.index]?
     | throwError "a propositional clause used before it was stated"
   let unassigned := names.zipIdx.filterMap fun (name, j) =>
-    if (known[flippedName name]?).isNone then some j else none
-  -- The parts are given rather than found throughout: what a name stands for
-  -- can be a disjunction in its own right, and then the shape of what the
-  -- clause says is not where its literals are.
+    if (refuted[name]?).isNone then some j else none
+  let refutation (j : Nat) : Expr := (refuted[names[j]!]?).getD (.bvar 0)
   if let #[u] := unassigned then
+    -- `¬¬q` for the one literal `q` left, and so the flip of `q` is false.
     let some says := parts[u]? | throwError "missing literal"
     let some name := names[u]? | throwError "missing literal"
-    let value ← implied parts names u known proof
-    withLetDecl (Name.mkSimple s!"p{i}") says value fun p =>
-      propagate states proved (known.insert name (p, says)) premises (i + 1)
+    let notNot : Expr := .lam `x (mkApp (mkConst ``Not) says)
+      (mkAppN proof ((List.range names.size).toArray.map refutation)) .default
+    let (flipped, _) ← flipName name
+    let value ← refutingFlip says flipped notNot
+    withLetDecl (Name.mkSimple s!"p{i}") (mkApp (mkConst ``Not) flipped) value fun p =>
+      propagate states proved (refuted.insert (flippedName name) p) premises (i + 1)
         (bound.push p)
   else if unassigned.isEmpty then
     -- Nothing left to hold: the premise is the contradiction.
-    if parts.isEmpty then
-      return ← bindLets bound proof
-    let suffix := suffixJunctions ``Or ``False parts
-    let contradiction := mkApp (← allFalseFrom parts suffix names known 0) proof
-    bindLets bound contradiction
+    bindLets bound (mkAppN proof ((List.range names.size).toArray.map refutation))
   else
     -- More than one literal left, so the premise would be a case split rather
     -- than a propagation. The solver's derivations are propagations, each
@@ -267,8 +245,8 @@ private partial def propagate (states : Std.HashMap UInt32 (Array Expr × Expr))
       unassigned, got {unassigned.size}: the derivation is not unit propagation"
 
 /--
-A proof of what a propositional clause says, from proofs of the clauses it was
-derived from.
+A proof of what a propositional clause says (`negativeClause`), from proofs of
+the clauses it was derived from.
 
 A clause is either a first-order clause's propositional shadow, and then it says
 what that clause says, up to the order of the names; or the solver derived it,
@@ -280,30 +258,27 @@ private def satClause (states : Std.HashMap UInt32 (Array Expr × Expr))
     (proved : Std.HashMap UInt32 Expr)
     (origins : Std.HashMap UInt32 (Expr × Expr)) (c : SatClause) :
     ReconstructM Expr := do
-  let some (parts, target) := states[c.index]?
+  let some (parts, _) := states[c.index]?
     | throwError "a propositional clause proved before it was stated"
-  if let some origin := c.origin? then
-    let some (proof, stated) := origins[origin.number]?
-      | throwError "the propositional clause for step {origin.number} is not \
-        among the refutation's premises"
-    return ← carryAll stated target proof
-  -- Suppose the clause fails; then each of its literals is false, which is to
-  -- say that each of their negations holds.
-  let contradiction ← withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
-    let mut known : Std.HashMap String (Expr × Expr) := {}
-    let suffix := suffixJunctions ``Or ``False parts
-    for (name, i) in c.literals.zipIdx do
-      let (flipped, says) ← flipName name
-      let some body := parts[i]? | throwError "missing literal"
-      let refuted : Expr := .lam `d body
-        (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
-      known := known.insert (flippedName name)
-        (mkApp4 (mkConst ``Iff.mpr) flipped (mkApp (mkConst ``Not) body) says refuted,
-          flipped)
-    mkLambdaFVars #[n] (← propagate states proved known c.premises 0 #[])
-  let notNot := mkApp (mkConst ``Not) (mkApp (mkConst ``Not) target)
-  return mkApp4 (mkConst ``Iff.mp) notNot target (mkApp (mkConst ``Classical.not_not) target)
-    contradiction
+  let decls := parts.mapIdx fun i l =>
+    (Name.mkSimple s!"h{i}", fun (_ : Array Expr) => pure (mkApp (mkConst ``Not) l))
+  withLocalDeclsD decls fun refutations => do
+    if let some origin := c.origin? then
+      let some (proof, stated) := origins[origin.number]?
+        | throwError "the propositional clause for step {origin.number} is not \
+          among the refutation's premises"
+      -- The first-order clause's literals in the order of the names, and then
+      -- all of them false.
+      let disjunction := junction ``Or ``False parts
+      let carried ← carryAll stated disjunction proof
+      if parts.isEmpty then return carried
+      let suffix := suffixJunctions ``Or ``False parts
+      return ← mkLambdaFVars refutations
+        (mkApp (allFalseFrom parts suffix refutations 0) carried)
+    -- Suppose each of the clause's literals false.
+    let refuted := c.literals.zipIdx.foldl (init := {})
+      fun m (name, i) => m.insert name refutations[i]!
+    mkLambdaFVars refutations (← propagate states proved refuted c.premises 0 #[])
 
 /--
 A proof of what a derived propositional clause says, as a lemma of its own:
