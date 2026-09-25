@@ -17,38 +17,6 @@ namespace Vampire.Reconstruct.Clause
 open Lean Meta
 
 /--
-Instantiates a premise clause at the variables the conclusion kept.
-
-A clause is universally quantified over the variables occurring in it, and a
-rule that drops a literal can drop the last occurrence of a variable with it.
-Such a variable is instantiated at an arbitrary element of its sort; vampire's
-domains are never empty.
--/
-def instantiateKept (parent : Vampire.Unit) (vars : Vars) (proof stated : Expr) :
-    ReconstructM (Expr × Expr) := do
-  let args ← argsFor parent vars
-  return (mkAppN proof args, ← instantiateForall stated args)
-
-/--
-The parts of a junction of `count` of them, taken apart rather than rebuilt.
-
-A formula's own parts are all built the moment any one of them is, so a clause
-that came from one conjunct would otherwise pay for the whole formula; and a
-clause of a few hundred literals rewritten along its whole length would pay for
-stating all of them at each rewrite.
--/
-def partsOf (fn : Name) (whole : Expr) (count : Nat) : ReconstructM (Array Expr) := do
-  if count == 0 then return #[]
-  let mut parts := #[]
-  let mut rest := whole
-  for _ in [0 : count - 1] do
-    unless rest.isAppOfArity fn 2 do
-      throwError "expected a junction of {count} parts, got{indentExpr whole}"
-    parts := parts.push rest.appFn!.appArg!
-    rest := rest.appArg!
-  return parts.push rest
-
-/--
 A step that restates a premise clause, perhaps with its literals rebuilt in
 another order: the premise itself where it already states the conclusion, and
 otherwise its literals related one by one.
@@ -61,10 +29,7 @@ def restatedLiterals (step : Step) (parent : Vampire.Unit) (proof stated : Expr)
 
 /-- A step whose conclusion restates its premise's literals. -/
 def literals (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "{step.rule.name} should have one premise, got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   relateLiterals step parent premiseProof premiseStated
 
 /--
@@ -77,10 +42,7 @@ instance of it. A clause is universally quantified, so an instance follows from
 it; which instance is the unifier's to say, and the inference discards it.
 -/
 def condensation (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "condensation should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "condensation should have one premise, got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   let use ← step.useAt 0
   step.underVars fun kept target => do
     let vars ← coverVars kept step.unit.boundVarSorts

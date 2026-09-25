@@ -91,50 +91,16 @@ def someElement (τ : Expr) : ReconstructM Expr := do
   mkAppOptM ``Classical.choice #[some τ, some (← nonempty τ)]
 
 /--
-`⟦∃ vs, body⟧`: what a premise says a block of existentials means.
-
-A witness is chosen from this, so it has to come from the premise: a conclusion
-states the block in terms of the skolem that choosing the witness is what
-introduces.
--/
-def blockProp (positive : Bool) (sorts : Array (UInt32 × String))
-    (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
-    ReconstructM Expr := do
-  -- The body stated once, every variable of the block abstracted from it in
-  -- one pass, and the binders put around it: abstracting a binder at a time
-  -- walks the body once per variable, and a block can have a hundred.
-  let bound := bound.toArray
-  let types ← bound.mapM fun (_, sortName) => sortType sortName
-  let decls := bound.zip types |>.map fun ((v, _), τ) =>
-    (Name.mkSimple s!"X{v}", fun (_ : Array Expr) => pure τ)
-  withLocalDeclsD decls fun xs => do
-    let vars := (bound.zip xs).foldl (init := vars) fun acc ((v, _), x) => acc.insert v x
-    let inner ← formula sorts vars body
-    let mut out := inner.abstract xs
-    for i in (List.range bound.size).reverse do
-      let name := Name.mkSimple s!"X{bound[i]!.1}"
-      let τ := types[i]!
-      out ← if positive then
-          pure (mkApp2 (mkConst ``Exists [← getLevel τ]) τ (.lam name τ out .default))
-        else
-          -- A universal block is skolemised through its failing, so the
-          -- negation stays outermost and the quantifiers go inside it.
-          pure (.forallE name τ out .default)
-    return if positive then out else mkApp (mkConst ``Not) out
-
-
-/--
 The predicates a block's witnesses are chosen from, stated once: `qs[i]` is
 `fun v₀ … vᵢ => ∃ vᵢ₊₁ …, body` (`¬∀ vᵢ₊₁ …, body` at negative polarity), and
 the witness for `vᵢ` is chosen from `qs[i]` at the witnesses before it
 (`blockPredicate`).
 
-What `blockProp` gives for each variable in turn, but the body is stated and
-abstracted once for the whole block, and a witness is an argument rather than
-substituted in: each witness is chosen over the ones before it, so substituting
-them makes every predicate hold every witness before it, and each abstraction
-walks them all again -- quadratic in a block's length, and a block can have a
-hundred variables.
+The body is stated and abstracted once for the whole block, and a witness is
+an argument rather than substituted in: each witness is chosen over the ones
+before it, so substituting them makes every predicate hold every witness before
+it, and each abstraction walks them all again -- quadratic in a block's length,
+and a block can have a hundred variables.
 -/
 def blockPredicates (positive : Bool) (sorts : Array (UInt32 × String))
     (bound : Array (UInt32 × String)) (vars : Vars) (body : Formula) :

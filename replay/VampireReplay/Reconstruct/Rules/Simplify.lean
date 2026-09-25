@@ -307,10 +307,7 @@ The premise's own formula is walked, so the equivalence this rests on is built
 from the premise rather than recovered by comparing it with the conclusion.
 -/
 def reduceFalseTrue (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, _)] := step.premises
-    | throwError "reduce_false_true should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "reduce_false_true should have one premise, got none"
+  let ⟨parent, premiseProof, _⟩ ← step.onlyPremise
   let some premise := parent.formula?
     | throwError "reduce_false_true should be given a formula"
   match ← simplify (parent.varSorts ++ step.unit.varSorts) {} premise with

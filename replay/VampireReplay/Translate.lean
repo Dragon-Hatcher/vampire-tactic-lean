@@ -80,7 +80,6 @@ structure State where
   decls : Declarations := {}
   /-- Every TPTP identifier handed out, to keep them distinct. -/
   taken : Std.HashSet String := {}
-  varCount : Nat := 0
   /--
   The arithmetic type each type a term has been met at reduces to, if any.
   Every subterm is asked, and they are at a handful of types.

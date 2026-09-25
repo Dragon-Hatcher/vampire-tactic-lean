@@ -16,8 +16,7 @@ open Lean Meta
 
 /-- A step that restates its premise. -/
 def restated (step : Step) : ReconstructM Expr := do
-  let #[(proof, stated)] := step.premises
-    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
+  let ⟨_, proof, stated⟩ ← step.onlyPremise
   restate proof stated (← step.conclusion)
 
 /--

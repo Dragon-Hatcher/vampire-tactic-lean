@@ -161,8 +161,8 @@ private def subformulaParts (sorts : Array (UInt32 × String)) (vars : Vars)
       | throwError "expected a negation, got{indentExpr e}"
     return inner
   match ← connectiveOf g with
-  | .and => Clause.partsOf ``And (← body) subs.size
-  | .or => Clause.partsOf ``Or (← body) subs.size
+  | .and => countedParts ``And (← body) subs.size
+  | .or => countedParts ``Or (← body) subs.size
   | .iff => sides (← body)
   | .xor => sides (← negated (← body))
   | .not => return #[← negated (← body)]
@@ -661,7 +661,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
   | .and =>
     -- The clause came from one conjunct, the recorded one.
-    let parts ← Clause.partsOf ``And stated f.subformulas.size
+    let parts ← countedParts ``And stated f.subformulas.size
     let some argument := choices[f.index]?
       | throwError "nothing says which conjunct of{indentExpr stated}\nthis \
           clause came from"
@@ -674,7 +674,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       mkLambdaFVars #[h] (mkApp rest (← projectGiven parts argument.toNat h))
   | .or =>
     -- Every disjunct is taken into the same clause, so each must lead to it.
-    let parts ← Clause.partsOf ``Or stated f.subformulas.size
+    let parts ← countedParts ``Or stated f.subformulas.size
     -- A disjunction of literals is the clause itself, up to the order its
     -- literals are in, and is carried into it following the shape of both.
     let literals ← f.subformulas.allM fun g => do
@@ -700,10 +700,7 @@ private partial def descend (sorts : Array (UInt32 × String))
 
 /-- `clausify`: one clause of a formula's conjunctive normal form. -/
 def clausify (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "clausify should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "clausify should have one premise, got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   let some premise := parent.formula?
     | throwError "clausify should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts
@@ -726,7 +723,7 @@ def clausify (step : Step) : ReconstructM Expr := do
       mkLambdaFVars xs
         (← carryAll (junction ``Or ``False generalised) target proof
           (sourceCount := some generalised.size)
-          (targetCount := step.unit.clause?.map (·.size)))
+          (targetCount := step.unit.clauseSize?))
     | none =>
       let proof ← step.withInto target fun into => do
         let implication ← descend sorts

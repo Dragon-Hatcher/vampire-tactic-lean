@@ -154,64 +154,37 @@ def closeComplementary (target h₁ h₂ : Expr)
     {indentExpr (← instantiateMVars (← inferType h₂))}\nare not complementary"
 
 /--
-Which of `parts`, from the `start`th on, a literal stating `stated` is.
+Which of `parts` a literal stating `stated` is.
 
 The literal is usually the very one the conclusion was built from, so it is
 looked for as it stands before what the parts mean is asked about: a clause of
 a few hundred literals is placed a literal at a time, and unifying with each of
 its parts costs more than the inferences do.
 -/
-def findPart? (parts : Array Expr) (stated : Expr) (start : Nat := 0) :
-    ReconstructM (Option Nat) := do
-  for k in [start : parts.size] do
+def findPart? (parts : Array Expr) (stated : Expr) : ReconstructM (Option Nat) := do
+  for k in [0 : parts.size] do
     if parts[k]! == stated then return some k
-  for k in [start : parts.size] do
+  for k in [0 : parts.size] do
     if ← isDefEq parts[k]! stated then return some k
   return none
 
 /--
-A proof of a clause from one of its literals `parts`, found by lookup, or
-`none` where the literal is not among them in any of the ways it can be stated.
-`inject i h` proves the clause from a proof `h` of its `i`th literal.
-
-A simplifying or generating inference carries every literal it did not act on
-into the conclusion unchanged, so where the literal lands is not searched for.
+`target` from `h`, a literal a step dropped because nothing makes it hold:
+`t ≠ t`, which removing trivial inequalities leaves, and `⊥` or `¬⊤`, which
+simplifying away a truth value leaves. `none` for any other literal.
 -/
-def placeAmong? (parts : Array Expr) (inject : Nat → Expr → ReconstructM Expr)
-    (h : Expr) : ReconstructM (Option Expr) := do
-  -- The literal is looked for as it stands before the other ways of stating it
-  -- are built, for the same reason `findPart?` compares before it unifies.
-  let place (candidate : Expr) : ReconstructM (Option Expr) := do
-    let some i ← findPart? parts (← instantiateMVars (← inferType candidate))
-      | return none
-    return some (← inject i candidate)
-  if let some placed ← place h then
-    return placed
-  if let some flipped ← flipEquality h then
-    if let some placed ← place flipped then
-      return placed
-  for candidate in ← doubleNegations h do
-    if let some placed ← place candidate then
-      return placed
+def refuteDropped? (target h : Expr) : ReconstructM (Option Expr) := do
+  let stated ← instantiateMVars (← inferType h)
+  if stated.isConstOf ``False then
+    return some (← mkAppOptM ``False.elim #[some target, some h])
+  let some inner := asNegation stated | return none
+  if inner.isConstOf ``True then
+    return some (← mkAppOptM ``absurd
+      #[some inner, some target, some (mkConst ``True.intro), some h])
+  if let some (_, a, b) := inner.eq? then
+    if ← sameFormula a b then
+      return some (← mkAppOptM ``absurd #[some inner, some target, some (← mkEqRefl a), some h])
   return none
-
-/--
-`placeAmong?` for `target`, its literals read off its shape.
-
-That shape is the clause's only where no literal of it is itself a disjunction;
-a literal naming a subformula stands for that formula, and one that is a
-disjunction is taken apart with the rest. `Into.place?` places by the clause's
-own count of literals, for a caller that knows it.
--/
-def placeLiteral? (target : Expr) (h : Expr) : ReconstructM (Option Expr) :=
-  placeAmong? (junctionParts ``Or target) (injectPart ``Or target) h
-
-/-- `placeLiteral?`, for a caller that cannot go on without the literal placed. -/
-def placeLiteral (target : Expr) (h : Expr) : ReconstructM Expr := do
-  let some placed ← placeLiteral? target h
-    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
-        \nis not among{indentExpr target}"
-  return placed
 
 /--
 `a` from `¬¬a`, with both written out.

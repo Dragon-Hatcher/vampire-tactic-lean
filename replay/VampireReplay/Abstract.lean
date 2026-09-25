@@ -138,14 +138,7 @@ def abstracting (ask : Array Expr → Option Expr → MetaM Expr)
   -- and no wider. The answer proves the question with those variables free, so
   -- applying it to the terms they stand for, and to the facts the question
   -- took as hypotheses, proves what was asked.
-  let mut atoms := #[]
-  let mut seen : Std.HashSet Expr := {}
-  for type in types do
-    let (atoms', seen') ← atomsOf type atoms seen
-    atoms := atoms'; seen := seen'
-  if let some claim := claim then
-    let (atoms', _) ← atomsOf claim atoms seen
-    atoms := atoms'
+  let mut atoms ← opaqueTerms (types ++ claim.toArray)
   if atoms.isEmpty then
     return ← ask facts claim
   -- Two atoms can be one term reached two ways: a numeral's or an operator's

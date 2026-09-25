@@ -125,10 +125,7 @@ where
 
 /-- `skolemize`: drops the existentials of a formula for chosen witnesses. -/
 def skolemize (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, _)] := step.premises
-    | throwError "skolemize should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "skolemize should have one premise, got none"
+  let ⟨parent, premiseProof, _⟩ ← step.onlyPremise
   let some premise := parent.formula?
     | throwError "skolemize should be given a formula"
   let some conclusion := step.unit.formula?

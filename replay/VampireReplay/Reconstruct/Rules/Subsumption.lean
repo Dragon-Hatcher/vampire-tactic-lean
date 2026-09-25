@@ -27,12 +27,7 @@ open Lean Meta
 premise resolves away.
 -/
 def subsumptionResolution (step : Step) : ReconstructM Expr := do
-  let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
-    | throwError "subsumption resolution should have two premises, got \
-      {step.premises.size}"
-  let #[mainParent, sideParent] := step.unit.parents
-    | throwError "subsumption resolution should have two premises, got \
-      {step.unit.parents.size}"
+  let (⟨mainParent, mainProof, mainStated⟩, ⟨sideParent, sideProof, sideStated⟩) ← step.twoPremises
   -- The main premise is taken to be the first. It is the one that loses a
   -- literal, so it has to have one recorded against it and the side premise
   -- none; that is checked, so premises the other way round are an error
@@ -55,36 +50,15 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     -- each went: the literals placed are carried, and the one that is not is
     -- the one to close the case with.
     let sidePlaced := step.placedAt 1
-    let unplaced (k : Nat) : Bool :=
-      match sidePlaced with
-      | some placed => (placed[k]?.join).isNone
-      | none => true
+    let some placements := sidePlaced
+      | throwError "subsumption resolution recorded nothing of where the side \
+          premise's literals went"
     step.withInto target fun into =>
     carryPast mainType target mainAt into (· == resolved.toNat)
       (placed := step.placedAt 0) (sourceCount := mainParent.clauseSize?)
       (fun _ h =>
-        carryPast sideType target sideAt into unplaced
+        carryPast sideType target sideAt into (fun k => (placements[k]?.join).isNone)
           (placed := sidePlaced) (sourceCount := sideParent.clauseSize?)
-          (fun _ hSide => do
-            let removed ← instantiateMVars (← inferType h)
-            -- The one literal of the side premise the substitution makes
-            -- complementary to the removed one closes the case; the rest are
-            -- literals of the conclusion.
-            for candidate in #[some hSide, ← flipEquality hSide] do
-              let some candidate := candidate | continue
-              let stated ← instantiateMVars (← inferType candidate)
-              let complementary ←
-                match asNegation stated, asNegation removed with
-                | some inner, _ => isDefEq inner removed
-                | _, some inner => isDefEq inner stated
-                | _, _ => pure false
-              unless complementary do
-                continue
-              let (positive, negative) :=
-                if (asNegation stated).isSome then (h, candidate) else (candidate, h)
-              return ← mkAppOptM ``absurd
-                #[some (← inferType positive), some target, some positive,
-                  some negative]
-            into.place hSide))
+          (fun _ hSide => closeComplementary target h hSide))
 
 end Vampire.Reconstruct.Subsumption

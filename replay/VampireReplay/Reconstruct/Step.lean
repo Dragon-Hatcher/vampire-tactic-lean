@@ -191,6 +191,32 @@ def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
   let (_, earlier) ← step.occurrence? i
   step.unit.placement? i earlier
 
+/-- One of a step's premises: the step it is, a proof of it, and what it says. -/
+structure Premise where
+  parent : Vampire.Unit
+  proof : Expr
+  stated : Expr
+
+/-- The step's premises, where there are `count` of them. -/
+private def Step.premisesExactly? (step : Step) (count : Nat) : Option (Array Premise) := do
+  guard (step.premises.size == count && step.unit.parents.size == count)
+  return (step.unit.parents.zip step.premises).map fun (parent, proof, stated) =>
+    { parent, proof, stated }
+
+private def Step.wrongPremises (step : Step) (count : Nat) : ReconstructM α :=
+  throwError "{step.rule.name} should have {count} premise(s), got {step.premises.size} \
+    proved and {step.unit.parents.size} recorded"
+
+/-- The step's one premise. -/
+def Step.onlyPremise (step : Step) : ReconstructM Premise := do
+  let some #[p] := step.premisesExactly? 1 | step.wrongPremises 1
+  return p
+
+/-- The step's two premises, in the order vampire states them. -/
+def Step.twoPremises (step : Step) : ReconstructM (Premise × Premise) := do
+  let some #[p, q] := step.premisesExactly? 2 | step.wrongPremises 2
+  return (p, q)
+
 /-- `k` given the conclusion's literals to place into, `target` being what it says. -/
 def Step.withInto (step : Step) (target : Expr) (k : Into → ReconstructM Expr) :
     ReconstructM Expr :=
@@ -227,21 +253,13 @@ them.
 The literals are taken as vampire has them rather than found by taking the
 clause apart: a literal naming a subformula stands for a whole formula, and the
 disjuncts of what it rebuilds to are not literals of the clause.
-
-@b position? is where `parent` is among the step's parents, which says which
-of the worker's records of where its literals went are this use's: a step can
-take one premise twice. Without it, the premise's first position is taken.
 -/
 def relateLiterals (step : Step) (parent : Vampire.Unit)
-    (premiseProof premiseStated : Expr) (position? : Option Nat := none) :
-    ReconstructM Expr := do
-  let some source := parent.clause?
+    (premiseProof premiseStated : Expr) : ReconstructM Expr := do
+  let (some source, some _) := (parent.clause?, step.unit.clause?)
     | -- These rules run over formulas too, before clausification, and there a
       -- formula's shape is what it says.
       return mkApp (← implies (← instantiateMVars premiseStated)
-        (← step.conclusion)) premiseProof
-  let some _ := step.unit.clause?
-    | return mkApp (← implies (← instantiateMVars premiseStated)
         (← step.conclusion)) premiseProof
   step.underVars fun kept target => do
     -- Dropping a literal can drop the last occurrence of a variable with it.
@@ -251,7 +269,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
     -- Where the worker recorded each literal went, which is where it goes;
     -- one it did not is looked for.
-    let position? := position? <|> step.unit.parents.findIdx? (·.number == parent.number)
+    let position? := step.unit.parents.findIdx? (·.number == parent.number)
     let placed := position?.bind step.placedAt
     -- The conclusion's literals, by the count of them: a literal can itself be
     -- a disjunction, which taking the clause apart by its shape would split.
@@ -262,16 +280,9 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
         if let some done ← into.place? h (hint := i) then return done
         -- Every literal the step kept is one of the conclusion's; one it
         -- dropped has to be refutable on its own, as `t ≠ t` is.
-        let stated ← instantiateMVars (← inferType h)
-        if let some inner := asNegation stated then
-          if let some (_, lhs, rhs) := inner.eq? then
-            if ← isDefEq lhs rhs then
-              return ← mkAppOptM ``absurd
-                #[some inner, some target, some (← mkEqRefl lhs), some h]
-        if stated.isConstOf ``False then
-          return ← mkAppOptM ``False.elim #[some target, some h]
-        throwError "the literal{indentExpr stated}\nis neither among\
-          {indentExpr target}\nnor refutable on its own")
+        if let some refuted ← refuteDropped? target h then return refuted
+        throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\n\
+          is neither among{indentExpr target}\nnor refutable on its own")
         (mkAppN premiseProof args)
 
 /--

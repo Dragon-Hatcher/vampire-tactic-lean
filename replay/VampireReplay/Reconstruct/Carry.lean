@@ -28,18 +28,10 @@ or a formula where `count` is `none`: a clause's by its count, since a literal
 naming a subformula stands for that formula and can be a disjunction, and a
 formula's by its shape, which is what it says.
 -/
-def clauseLiterals (stated : Expr) (count : Option Nat) : Array Expr :=
+def clauseLiterals (stated : Expr) (count : Option Nat) : ReconstructM (Array Expr) :=
   match count with
-  | some 0 => #[]
-  | some n => Id.run do
-    let mut parts := #[]
-    let mut rest := stated
-    for _ in [0 : n - 1] do
-      unless rest.isAppOfArity ``Or 2 do return parts.push rest
-      parts := parts.push rest.appFn!.appArg!
-      rest := rest.appArg!
-    return parts.push rest
-  | none => junctionParts ``Or stated
+  | some n => countedParts ``Or stated n
+  | none => pure (junctionParts ``Or stated)
 
 /--
 `k` given `target`, a clause of `count` literals (or a formula, where `count`
@@ -47,11 +39,7 @@ is `none`), to place literals into; see `Into`.
 -/
 def withInto (target : Expr) (count : Option Nat) (k : Into → ReconstructM Expr) :
     ReconstructM Expr := do
-  let parts := clauseLiterals target count
-  if let some n := count then
-    unless parts.size == n do
-      throwError "the conclusion{indentExpr target}\nis not a clause of {n} literals"
-  withDisjunction parts k
+  withDisjunction (← clauseLiterals target count) k
 
 /--
 A proof of the conclusion from one of its literals, found among them, or
@@ -111,7 +99,7 @@ A proof of `motive` from a proof `h` of `source`, a clause of `count` literals
 def elimLiterals (source : Expr) (count : Option Nat)
     (handler : Nat → Expr → ReconstructM Expr) (h : Expr) (motive? : Option Expr := none) :
     ReconstructM Expr :=
-  elimGiven (clauseLiterals source count) handler h (motive? := motive?)
+  do elimGiven (← clauseLiterals source count) handler h (motive? := motive?)
 
 /--
 `target` from a proof of `source`, whose literals the step carried into it:
@@ -129,17 +117,15 @@ def carryWith (source target proof : Expr) (into : Into)
 `target` from a proof of `source`, a step having acted on the literals
 `special` picks out and carried the rest.
 
-`onSpecial i h` proves all of `target` from one it acted on; `onKept i h` says
-what one it carried gives, which is placed as `carryWith` places it.
+`onSpecial i h` proves all of `target` from one it acted on; one it carried is
+placed as `carryWith` places it.
 -/
 def carryPast (source target proof : Expr) (into : Into) (special : Nat → Bool)
     (onSpecial : Nat → Expr → ReconstructM Expr)
-    (onKept : Nat → Expr → ReconstructM Expr := fun _ h => pure h)
     (placed : Option Placement := none) (sourceCount : Option Nat := none) :
     ReconstructM Expr :=
   elimLiterals source sourceCount (motive? := some target) (fun i h => do
-    if special i then onSpecial i h
-    else into.placeAt placed i (← onKept i h)) proof
+    if special i then onSpecial i h else into.placeAt placed i h) proof
 
 /--
 `carryWith`, for a step that left every literal as it was: nothing to do where

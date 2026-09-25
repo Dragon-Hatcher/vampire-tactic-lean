@@ -22,21 +22,16 @@ are.
 Each constraint is a case: it holds, and then it is a literal of the
 conclusion; or the pair it denies is equal, which is what `k` is handed.
 -/
-partial def underConstraints (step : Step) (vars : Vars) (into : Into)
+partial def underConstraints (step : Step) (into : Into)
     (k : Array (Expr × Expr × Expr) → ReconstructM Expr) : ReconstructM Expr := do
   let positions := step.unit.constraints
-  if positions.isEmpty then return ← k #[]
-  let some clause := step.unit.clause?
-    | throwError "a step with unification constraints is not a clause"
-  let literals := clause.literals
-  let mut constraints := #[]
   for i in positions do
-    let some l := literals[i]?
-      | throwError "the step records a constraint at literal {i}, and its \
-          conclusion has {literals.size}"
-    constraints := constraints.push (← literal vars l)
+    unless i < into.parts.size do
+      throwError "the step records a constraint at literal {i}, and its \
+        conclusion has {into.parts.size}"
   let rec go (equal : Array (Expr × Expr × Expr)) (i : Nat) : ReconstructM Expr := do
-    let some constraint := constraints[i]? | k equal
+    let some position := positions[i]? | k equal
+    let constraint := into.parts[position]!
     let some equality := constraint.not?
       | throwError "the constraint{indentExpr constraint}\nis not a disequality"
     let some (_, x, y) := equality.eq?
@@ -44,7 +39,7 @@ partial def underConstraints (step : Step) (vars : Vars) (into : Into)
     let deferred ← withLocalDeclD `h equality fun h => do
       mkLambdaFVars #[h] (← go (equal.push (x, y, h)) (i + 1))
     let held ← withLocalDeclD `h constraint fun h => do
-      mkLambdaFVars #[h] (← into.place h)
+      mkLambdaFVars #[h] (into.inject position h)
     mkAppM ``Classical.byCases #[deferred, held]
   go #[] 0
 

@@ -139,29 +139,26 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
   -- to rewrite its literals where they stand: a congruence, whose leaves are
   -- where the arithmetic is.
   if step.unit.clause?.isNone then
-    let #[(proof, stated)] := step.premises
-      | throwError "{step.rule.name} on a formula should have one premise, got \
-        {step.premises.size}"
+    let ⟨_, proof, stated⟩ ← step.onlyPremise
     return ← restate proof stated (← step.conclusion)
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     withInto target step.unit.clauseSize? fun into => do
     -- Each premise holds, so one of its literals does, which is a case; every
     -- case has to make the conclusion. A literal the step carried over is one
-    -- of the conclusion's own -- the premise is instantiated at the step's
-    -- substitution, and its literals rebuilt as the conclusion's are -- so
-    -- that case is closed by finding it there. What is left is the literals
-    -- the step acted on, and those are what the numbers settle.
-    let premiseParts := premises.zipIdx.map fun ((_, stated), i) =>
+    -- of the conclusion's own, where the worker recorded it went; what is left
+    -- is the literals the step acted on, and those are what the numbers
+    -- settle.
+    let premiseParts ← premises.zipIdx.mapM fun ((_, stated), i) =>
       clauseLiterals stated ((step.unit.parents[i]?).bind (·.clauseSize?))
     let rec go (facts : Array Expr) (i : Nat) : ReconstructM Expr := do
       let some (proof, _) := premises[i]?
         | return ← byArithmetic facts target
+      let placed := step.placedAt i
       elimGiven premiseParts[i]! (motive? := some target)
-        (fun _ h => do
-          let says ← instantiateMVars (← inferType h)
-          if let some j := into.parts.findIdx? (· == says) then
-            return into.inject j h
+        (fun k h => do
+          if let some (some _) := placed.bind (·[k]?) then
+            return ← into.placeAt placed k h
           go (facts.push (← plainly h)) (i + 1)) proof
     let statements := #[target] ++ premises.map (·.2)
     withRoundings statements fun roundings => go roundings 0
@@ -232,10 +229,7 @@ where they stand, which is a congruence down to them; only theory
 normalization rewrites formulas.
 -/
 def literalwise (step : Step) : ReconstructM Expr := do
-  let #[(proof, stated)] := step.premises
-    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "{step.rule.name} should have one premise, got none"
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
   if step.unit.clause?.isNone then
     unless step.rule == .theoryNormalization do
       throwError "{step.rule.name} rewrote a formula, which only theory normalization does"
@@ -255,7 +249,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let #[(premise, premiseStated)] ← premisesOf step vars
       | throwError "{step.rule.name} should have one premise"
-    let parts := clauseLiterals premiseStated parent.clauseSize?
+    let parts ← clauseLiterals premiseStated parent.clauseSize?
     unless images.size == parts.size do
       throwError "step {step.unit.number} recorded {images.size} literals' \
         images for a premise of {parts.size}"
@@ -291,10 +285,7 @@ which virtual term gave it and a point every premise literal fails at, which
 the premise, holding for every `x`, denies.
 -/
 def viras (step : Step) : ReconstructM Expr := do
-  let #[(proof, stated)] := step.premises
-    | throwError "alasca_viras_qe should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "alasca_viras_qe should have one premise, got none"
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
   let some images := step.placedAt 0
     | throwError "step {step.unit.number} (alasca_viras_qe) recorded nothing of what \
       its literals became"

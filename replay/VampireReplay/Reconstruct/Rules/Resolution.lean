@@ -20,11 +20,9 @@ The conclusion from the two literals a resolution resolved on: complementary,
 or -- where an abstracting unifier could not make them so -- complementary up
 to the pairs it deferred into constraint literals of the conclusion.
 -/
-def closeResolved (step : Step) (vars : Vars) (into : Into) (h₁ h₂ : Expr) :
-    ReconstructM Expr := do
-  if step.unit.constraints.isEmpty then
-    return ← closeComplementary into.whole h₁ h₂
-  underConstraints step vars into fun equal => closeComplementary into.whole h₁ h₂ equal
+def closeResolved (step : Step) (into : Into) (h₁ h₂ : Expr) :
+    ReconstructM Expr :=
+  underConstraints step into fun equal => closeComplementary into.whole h₁ h₂ equal
 
 /--
 `resolution`: both premises but for the complementary pair resolved on.
@@ -33,10 +31,7 @@ def closeResolved (step : Step) (vars : Vars) (into : Into) (h₁ h₂ : Expr) :
 the pair resolved on is complementary up to what it deferred.
 -/
 def resolution (step : Step) : ReconstructM Expr := do
-  let #[(proof₁, stated₁), (proof₂, stated₂)] := step.premises
-    | throwError "resolution should have two premises, got {step.premises.size}"
-  let #[parent₁, parent₂] := step.unit.parents
-    | throwError "resolution should have two premises, got {step.unit.parents.size}"
+  let (⟨parent₁, proof₁, stated₁⟩, ⟨parent₂, proof₂, stated₂⟩) ← step.twoPremises
   let use₁ ← step.useAt 0
   let use₂ ← step.useAt 1
   let some resolved₁ := use₁.literal
@@ -52,15 +47,13 @@ def resolution (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (p₁, t₁) ← instantiateAt parent₁ use₁ vars proof₁ stated₁
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
-    -- Every literal but the resolved one carries over, so the conclusion keeps
-    -- it; where it keeps it is a lookup, not a search.
-    -- The resolved pair is complementary, which closes that case -- against
-    -- what the two carries have left of the conclusion, which is what the
-    -- innermost of them says it is and not what the outer one was given.
+    -- Every literal but the resolved one carries over, to where the worker
+    -- recorded it went; the resolved pair is complementary, which closes
+    -- that case.
     step.withInto target fun into =>
       carryPast t₁ target p₁ into (· == resolved₁.toNat)
         (fun _ h₁ => carryPast t₂ target p₂ into (· == resolved₂.toNat)
-          (fun _ h₂ => closeResolved step vars into h₁ h₂)
+          (fun _ h₂ => closeResolved step into h₁ h₂)
           (placed := step.placedAt 1) (sourceCount := parent₂.clauseSize?))
         (placed := step.placedAt 0) (sourceCount := parent₁.clauseSize?)
 
@@ -112,10 +105,7 @@ conclusion keeps; so every literal of the premise at the unifier is a literal
 of the conclusion, and there is no case to close.
 -/
 def factoring (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "factoring should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "factoring should have one premise, got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   let use ← step.useAt 0
   step.underVars fun kept target => do
     let vars ← coverVars kept step.unit.boundVarSorts
@@ -126,30 +116,30 @@ def factoring (step : Step) : ReconstructM Expr := do
         (sourceCount := parent.clauseSize?)
 
 /--
-The conclusion `into`, where an abstracting unifier left constraints among its
-literals and `h` denies the equality the step resolved on.
+The conclusion `into`, from `h` denying the equality `inner` a step resolved
+away: the binding makes its sides one term, which `h` then denies.
 
-The unifier does not make the two terms one: what it could not unify it defers
-into disequality literals of the conclusion. So the conclusion holds either
-because one of those disequalities does -- and then it is that literal -- or
-because none does, and then the pairs deferred are equal, the two terms are one
-by congruence at those pairs, and `h` denies it.
+Unless the unifier abstracted: what it could not unify it defers into
+disequality literals of the conclusion, so the conclusion holds either because
+one of those does -- and then it is that literal -- or because none does, and
+then the pairs deferred are equal, the two sides are one by congruence at those
+pairs, and `h` denies it.
 -/
-def fromConstraints (step : Step) (vars : Vars) (into : Into) (inner h : Expr) :
+def refuteResolvedEquality (step : Step) (into : Into) (inner h : Expr) :
     ReconstructM Expr := do
-  if step.unit.constraints.isEmpty then
-    -- Equality resolution either unifies the two sides or defers what it
-    -- could not unify into constraints. Neither here: the step resolved an
-    -- inequality between two terms that no substitution makes one, which is
-    -- vampire's https://github.com/vprover/vampire/issues/938. The premise
-    -- gives the conclusion only of the terms that do make them equal, not of
-    -- every term, so there is nothing here to replay.
-    throwError "step {step.unit.number}: vampire resolved{indentExpr inner}\n\
-      although no substitution makes its sides equal and no constraints were \
-      recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
   let some (_, lhs, rhs) := inner.eq?
     | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-  underConstraints step vars into fun equal => do
+  if step.unit.constraints.isEmpty then
+    unless ← sameFormula lhs rhs do
+      -- Vampire resolved an inequality between two terms no substitution
+      -- makes one (https://github.com/vprover/vampire/issues/938): the premise
+      -- gives the conclusion only of the terms that make them equal, so there
+      -- is nothing here to replay.
+      throwError "step {step.unit.number}: vampire resolved{indentExpr inner}\n\
+        although no substitution makes its sides equal and no constraints were \
+        recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
+    return ← mkAppOptM ``absurd #[some inner, some into.whole, some (← mkEqRefl lhs), some h]
+  underConstraints step into fun equal => do
     let some made ← equalUnder equal lhs rhs
       | throwError "step {step.unit.number}: the sides of{indentExpr inner}\n\
           are not equal even assuming the unifier's deferred constraints"
@@ -165,12 +155,7 @@ and applies the binding to the rest -- once per step, so a clause with several
 such inequalities takes several steps.
 -/
 def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "equality resolution with deletion should have one premise, \
-      got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "equality resolution with deletion should have one premise, \
-      got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   let use ← step.useAt 0
   let some resolved := use.literal
     | throwError "equality resolution with deletion did not record the \
@@ -192,11 +177,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
           | throwError "the literal resolved on is not a negation:{indentExpr stated}"
         let some (_, lhs, rhs) := inner.eq?
           | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-        if ← sameFormula lhs rhs then
-          mkAppOptM ``absurd
-            #[some inner, some target, some (← mkEqRefl lhs), some h]
-        else
-          fromConstraints step vars into inner h)
+        refuteResolvedEquality step into inner h)
 
 /--
 `equality_factoring`: one of the premise's equalities factored against another.
@@ -212,11 +193,7 @@ side equality, which the conclusion carries. Which of the two it is is settled
 by the case, not looked for.
 -/
 def equalityFactoring (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "equality factoring should have one premise, got \
-      {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "equality factoring should have one premise, got none"
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   let uses := step.unit.premiseUses.filter (·.premise == parent.number)
   let #[selected, side] := uses
     | throwError "equality factoring recorded {uses.size} uses of its premise, \

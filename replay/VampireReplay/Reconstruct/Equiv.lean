@@ -132,7 +132,7 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
     if target.isAppOfArity ``And 2 then
       let parts := junctionParts ``And target
       return ← withLocalDeclD `h source fun h => do
-        mkLambdaFVars #[h] (← introParts target 0 fun j => do
+        mkLambdaFVars #[h] (← introParts target fun j => do
           return mkApp (← implies source parts[j]!) h)
     -- What the source says of each of its conjuncts, when the target is one of
     -- them: a rule that leaves a conjunct out keeps the rest in place.
@@ -141,7 +141,7 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
       for (conjunct, i) in conjuncts.zipIdx do
         if ← sameFormula conjunct target then
           return ← withLocalDeclD `h source fun h => do
-            mkLambdaFVars #[h] (← projectPart ``And source i h)
+            mkLambdaFVars #[h] (← projectPart source i h)
     let parts := junctionParts ``Or target
     let index := parts.zipIdx.foldl (init := ({} : Std.HashMap Expr Nat))
       fun acc (p, i) => acc.insert p i
@@ -151,37 +151,22 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
     let branchFor (d : Expr) : ReconstructM Expr := do
       if let some i := index[d]? then
         return ← withLocalDeclD `l d fun l => do
-          mkLambdaFVars #[l] (← injectPart ``Or target i l)
+          mkLambdaFVars #[l] (← injectPart target i l)
       if let some (α, a, b, negated) := equalityLiteral? d then
         let equation ← mkAppOptM ``Eq #[some α, some b, some a]
         let flipped := if negated then mkApp (mkConst ``Not) equation else equation
         if let some i := index[flipped]? then
           return ← withLocalDeclD `l d fun l => do
-            mkLambdaFVars #[l] (← injectPart ``Or target i (← symmLiteral α a b negated l))
-      if let some inner := d.not? then
-        -- Absent, so it has to be refutable: `t ≠ t` is what removal leaves.
-        if let some (_, a, b) := inner.eq? then
-          if ← sameFormula a b then
-            return ← withLocalDeclD `l d fun l => do
-              mkLambdaFVars #[l]
-                (← mkAppOptM ``absurd
-                  #[some inner, some target, some (← mkEqRefl a), some l])
-        if inner.isConstOf ``True then
-          return ← withLocalDeclD `l d fun l => do
-            mkLambdaFVars #[l]
-              (← mkAppOptM ``absurd
-                #[some (mkConst ``True), some target,
-                  some (mkConst ``True.intro), some l])
-      -- Simplifying away a truth value leaves nothing of a disjunct that was
-      -- `⊥`, and nothing of one that was `¬⊤`.
-      if d.isConstOf ``False then
-        return ← withLocalDeclD `l d fun l => do
-          mkLambdaFVars #[l] (← mkAppOptM ``False.elim #[some target, some l])
-      throwError "the disjunct{indentExpr d}\nis neither among\
-        {indentExpr target}\nnor refutable on its own"
+            mkLambdaFVars #[l] (← injectPart target i (← symmLiteral α a b negated l))
+      -- Absent, so it has to be refutable on its own.
+      withLocalDeclD `l d fun l => do
+        let some refuted ← refuteDropped? target l
+          | throwError "the disjunct{indentExpr d}\nis neither among\
+              {indentExpr target}\nnor refutable on its own"
+        mkLambdaFVars #[l] refuted
     let branches ← (junctionParts ``Or source).mapM branchFor
     withLocalDeclD `h source fun h => do
-      mkLambdaFVars #[h] (← elimParts source 0 (fun i hi => do
+      mkLambdaFVars #[h] (← elimParts source (fun i hi => do
         let some branch := branches[i]?
           | throwError "the disjunction{indentExpr source}\nhas no disjunct {i}"
         return mkApp branch hi) h)
@@ -413,19 +398,19 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
             mkApp4 (mkConst ``Iff.mpr) ap[i]! bp[i]! parts[i]! h
           if fn == ``And then
             let forward ← withLocalDeclD `h a fun h => do
-              mkLambdaFVars #[h] (← introParts b 0 fun j => do
-                return mp j (← projectPart fn a j h))
+              mkLambdaFVars #[h] (← introParts b fun j => do
+                return mp j (← projectPart a j h))
             let backward ← withLocalDeclD `h b fun h => do
-              mkLambdaFVars #[h] (← introParts a 0 fun j => do
-                return mpr j (← projectPart fn b j h))
+              mkLambdaFVars #[h] (← introParts a fun j => do
+                return mpr j (← projectPart b j h))
             return mkApp4 (mkConst ``Iff.intro) a b forward backward
           else
             let forward ← withLocalDeclD `h a fun h => do
-              mkLambdaFVars #[h] (← elimParts a 0 (fun i hi =>
-                injectPart fn b i (mp i hi)) h)
+              mkLambdaFVars #[h] (← elimParts a (fun i hi =>
+                injectPart b i (mp i hi)) h)
             let backward ← withLocalDeclD `h b fun h => do
-              mkLambdaFVars #[h] (← elimParts b 0 (fun i hi =>
-                injectPart fn a i (mpr i hi)) h)
+              mkLambdaFVars #[h] (← elimParts b (fun i hi =>
+                injectPart a i (mpr i hi)) h)
             return mkApp4 (mkConst ``Iff.intro) a b forward backward
     throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
 

@@ -320,10 +320,7 @@ end
 
 /-- Either normalisation: the premise's formula, normalised. -/
 private def normalizeStep (expand : Bool) (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, _)] := step.premises
-    | throwError "{step.rule.name} should have one premise, got {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "{step.rule.name} should have one premise, got none"
+  let ⟨parent, premiseProof, _⟩ ← step.onlyPremise
   let some premise := parent.formula?
     | throwError "normalisation should be given a formula"
   let sorts := parent.varSorts ++ step.unit.varSorts

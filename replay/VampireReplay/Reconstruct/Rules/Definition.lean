@@ -408,9 +408,7 @@ one still needed.
 way round as an implication rather than an equivalence.
 -/
 def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, premiseStated)] := step.premises
-    | throwError "unused predicate definition removal should have one premise, \
-      got {step.premises.size}"
+  let ⟨_, premiseProof, premiseStated⟩ ← step.onlyPremise
   weaken premiseProof (← instantiateMVars premiseStated) (← step.conclusion)
 
 /--
@@ -492,11 +490,9 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
   step.underVars fun kept target => do
     -- Splitting substitutes nothing, so the conclusion keeps the premise's
     -- variables; it records no unifier because there is none to record.
-    let vars ← coverVars kept step.unit.boundVarSorts
-    let (premiseAt, premiseType) ←
-      Clause.instantiateKept parent vars proof stated
-    carryAll premiseType target premiseAt (sourceCount := parent.clauseSize?)
-      (targetCount := step.unit.clause?.map (·.size))
+    let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
+    carryAll (← instantiateForall stated args) target (mkAppN proof args)
+      (sourceCount := parent.clauseSize?) (targetCount := step.unit.clauseSize?)
 
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
@@ -568,7 +564,7 @@ def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
       -- What says each literal fails, the whole clause having failed.
       let failing ← parts.mapIdxM fun i part => do
         pure (.lam `l part
-          (mkApp h (← injectPart ``Or body i (.bvar 0))) .default)
+          (mkApp h (← injectPart body i (.bvar 0))) .default)
       -- A goal of `False` over the equalities denied, and the failing of
       -- everything else; the equalities are substituted away and what is left
       -- contradicts itself.

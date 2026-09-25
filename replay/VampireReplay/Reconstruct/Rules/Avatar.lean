@@ -33,14 +33,6 @@ private def definedComponent (definition : Formula) :
     if (← connectiveOf component) matches .«forall» then component.boundVars else #[]
   return some (component, bound)
 
-/-- Whether a name is the negation `~name` of a component's name. -/
-private def isNegatedName (name : String) : Bool :=
-  name.startsWith "~"
-
-/-- The component name a name speaks of, without the `~` of its negation. -/
-private def positiveName (name : String) : String :=
-  if isNegatedName name then (name.drop 1).toString else name
-
 /--
 `avatar_component`: the component a name stands for, under that name.
 
@@ -51,11 +43,7 @@ def component (step : Step) : ReconstructM Expr := do
   let #[(name, assumption)] := step.assumed
     | throwError "an avatar component clause should hold under one name, got \
       {step.assumed.size}"
-  let #[(_, _)] := step.premises
-    | throwError "an avatar component clause should have one premise, got \
-      {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "an avatar component clause without its definition"
+  let ⟨parent, _, _⟩ ← step.onlyPremise
   let core ← step.conclusion
   if ← sameFormula (← inferType assumption) core then
     return assumption
@@ -76,7 +64,7 @@ def component (step : Step) : ReconstructM Expr := do
       return x
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
-    carryAll stated target instance_ (targetCount := step.unit.clause?.map (·.size))
+    carryAll stated target instance_ (targetCount := step.unit.clauseSize?)
 
 /--
 `avatar_contradiction_clause`: the names a refuted clause held under cannot all
@@ -86,16 +74,12 @@ The premise derived the empty clause from them, so at least one of them fails,
 which is what the disjunction of their negations says.
 -/
 def contradictionClause (step : Step) : ReconstructM Expr := do
-  let #[(premiseProof, _)] := step.premises
-    | throwError "an avatar contradiction clause should have one premise, got \
-      {step.premises.size}"
-  let some parent := step.unit.parents[0]?
-    | throwError "an avatar contradiction clause should have one premise, got none"
+  let ⟨parent, premiseProof, _⟩ ← step.onlyPremise
   let target ← step.conclusion
   -- One disjunct per name the premise held under, whatever the formula each
   -- stands for is: the conclusion is a formula, not a clause with a count of
   -- its own, and a name's formula can itself be a disjunction.
-  let parts := clauseLiterals target (some parent.splits.size)
+  let parts ← clauseLiterals target (some parent.splits.size)
   -- Were every one of those names to fail, nothing would follow from the
   -- premise; so suppose the disjunction fails and read each name off that.
   let contradiction ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
@@ -343,7 +327,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
       continue
     definitions := definitions.insert name (parent, uses, position)
   -- One disjunct per name, whatever the formula each stands for is.
-  let disjunctParts := clauseLiterals target (some disjuncts.size)
+  let disjunctParts ← clauseLiterals target (some disjuncts.size)
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
     let refutations := refutationsOf disjunctParts h
     let refuted (i : Nat) (of : Expr) : ReconstructM Expr := do
@@ -376,7 +360,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- negation, with nothing to look for.
     let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool) := {}
     for (name, i) in disjuncts.zipIdx do
-      let key := positiveName name
+      let key := (splitName name).2
       -- A name the clause held under is in the split clause flipped, and is no
       -- component of it -- unless it is one: a component that is the
       -- complement of an assumption is named by the assumption's flip. Which
@@ -416,7 +400,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- vampire states it: a literal naming a subformula stands for a whole
       -- formula, so the disjuncts of what it rebuilds to are not its literals.
       let parts ←
-        if isNegatedName name then
+        if (splitName name).1 then
           -- A ground component of one negative literal is named positively,
           -- the definition stating the literal's complement, so the component
           -- is what the negated name says rather than what the definition does.
@@ -435,7 +419,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- Injected by the count of the component's literals, which can
       -- themselves be disjunctions.
       let refutations := refutationsOf parts against
-      let placed := if isNegatedName name then none
+      let placed := if (splitName name).1 then none
         else step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
         let negation := refutations[j]!
@@ -451,7 +435,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- naming a subformula stands for that formula, which can be a disjunction.
     let some clause := parent.clause?
       | throwError "an avatar split clause splits {parent}, which is not a clause"
-    let clauseParts ← Clause.partsOf ``Or instantiated clause.size
+    let clauseParts ← countedParts ``Or instantiated clause.size
     let contradiction ← elimGiven clauseParts (fun i hl => do
       if let some (part, negation, flipped) := negationAt[i]? then
         -- The worker recorded the component's literal as the clause's, turned
