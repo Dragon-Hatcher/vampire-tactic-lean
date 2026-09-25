@@ -127,7 +127,11 @@ private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
       choice existence
     witnesses := witnesses.push witness
     vars := vars.insert v witness
-  return (vars, h)
+  -- What is left is the block's body at the witnesses, which the choices
+  -- state through the definition `blockPredicates` gave it; stated as the
+  -- body itself, it is what the step put in the block's place.
+  let stated ← formula sorts vars body
+  return (vars, ← mkExpectedTypeHint h (if positive then stated else mkNot stated))
 
 /--
 The parts of a signed subformula, taken apart rather than built again.

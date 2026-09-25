@@ -18,6 +18,23 @@ private def given (τ : Expr) : ReconstructM (Option Expr) := do
       return some e
   return none
 
+/--
+The locals `e` mentions, and those their types mention in turn, in the order
+the context has them: what a definition closed over `e` has to take.
+-/
+def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
+  let lctx ← getLCtx
+  let mut found : Std.HashSet FVarId := {}
+  let mut pending := (collectFVars {} e).fvarIds.toList
+  while !pending.isEmpty do
+    let id :: rest := pending | break
+    pending := rest
+    if found.contains id || except.contains (mkFVar id) then continue
+    found := found.insert id
+    if let some decl := lctx.find? id then
+      pending := (collectFVars {} (← instantiateMVars decl.type)).fvarIds.toList ++ pending
+  return (lctx.sortFVarsByContextOrder found.toArray).map mkFVar
+
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   if let some inst := (← get).nonempty[τ]? then
@@ -145,7 +162,21 @@ def blockPredicates (positive : Bool) (sorts : Array (UInt32 × String))
   let decls := names.zip types |>.map fun (n, τ) => (n, fun (_ : Array Expr) => pure τ)
   withLocalDeclsD decls fun xs => do
     let vars := (bound.zip xs).foldl (init := vars) fun acc ((v, _), x) => acc.insert v x
-    let inner := (← formula sorts vars body).abstract xs
+    -- The body as a definition of its own, over the block's variables and
+    -- the locals it mentions: every witness is chosen from it, and the choices
+    -- and the facts about them mention the definition rather than each hold a
+    -- copy of the body.
+    let stated ← instantiateMVars (← formula sorts vars body)
+    if stated.hasMVar then throwError "a quantifier block's body is not fully elaborated"
+    let locals ← closureOf stated (except := xs)
+    let closed ← mkLambdaFVars (locals ++ xs) stated
+    let lps := (collectLevelParams {} closed).params
+    let name ← mkAuxDeclName `_block
+    let closedType ← inferType closed
+    addDecl (.defnDecl (mkDefinitionValEx name lps.toList closedType closed .abbrev
+      .safe [name]))
+    let applied := mkAppN (mkConst name (lps.toList.map mkLevelParam)) (locals ++ xs)
+    let inner := applied.abstract xs
     let n := bound.size
     let mut qs := #[]
     for i in [0:n] do
@@ -205,7 +236,7 @@ def registerSkolem (skolems : Std.HashMap UInt32 Term) (vars : Vars) (v : UInt32
   -- definition of its own, closed over the goal's locals it mentions, the
   -- symbol is a constant applied to those, and the choice is unfolded only
   -- where something asks what it is.
-  let locals := (collectFVars {} definition).fvarIds.map mkFVar
+  let locals ← closureOf definition
   let closed ← instantiateMVars (← mkLambdaFVars locals definition)
   let levels := (collectLevelParams {} closed).params
   let name ← mkAuxDeclName `_skolem

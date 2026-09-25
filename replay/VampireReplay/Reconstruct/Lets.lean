@@ -127,8 +127,33 @@ def bindLets (bound : Array Expr) (body : Expr) (share : Bool := false) :
     out := .letE decl.userName type value out (nondep := false)
   return out
 
+/--
+How many places each subterm of `e` is used from, `e` itself not counted:
+each subterm walked once, however many places share it.
+-/
+private partial def countUses (e : Expr) : StateM (Std.HashMap Expr Nat) PUnit := do
+  let children : Array Expr := match e with
+    | .app f a => #[f, a]
+    | .lam _ t b _ | .forallE _ t b _ => #[t, b]
+    | .letE _ t v b _ => #[t, v, b]
+    | .mdata _ b | .proj _ _ b => #[b]
+    | _ => #[]
+  for c in children do
+    let n := (← get).getD c 0
+    modify (·.insert c (n + 1))
+    if n == 0 then countUses c
+
+/--
+The most subterms `hoistClosed` binds. The lets are nested, so the innermost
+use of the first is under all of them, and Lean's terms cannot hold a bound
+variable past about a million.
+-/
+private def maxHoisted : Nat := 500000
+
 /-- What `hoistClosed` has bound so far, and what it made of each subterm. -/
 private structure Hoisted where
+  /-- How many places each subterm is used from (`countUses`). -/
+  uses : Std.HashMap Expr Nat := {}
   done : Std.HashMap Expr Expr := {}
   locals : Array FVarId := #[]
   types : Array Expr := #[]
@@ -154,7 +179,12 @@ private partial def hoist (e : Expr) : StateRefT Hoisted MetaM Expr := do
     | .mdata d b => do pure (.mdata d (← hoist b))
     | .proj s i b => do pure (.proj s i (← hoist b))
     | _ => pure e
-  let result ← if e.hasLooseBVars then pure rebuilt else do
+  -- Only what is used from more than one place is worth a local: one used
+  -- once is checked once wherever it stands.
+  let s ← get
+  let result ← if e.hasLooseBVars || s.uses.getD e 0 < 2 || s.locals.size ≥ maxHoisted then
+      pure rebuilt
+    else do
     let type ← inferType e
     -- A proof is left where it stands, the formulas in it bound: a proof is
     -- used where it is built, and one bound for every node of a closed proof
@@ -197,8 +227,9 @@ private partial def abstractHoisted (index : Std.HashMap FVarId Nat) (e : Expr) 
   return result
 
 /--
-`e`, a closed proof over the context's locals, with every one of its subterms
-that mentions no bound variable let-bound once, above the rest.
+`e`, a closed proof over the context's locals, with each of its subterms that
+mentions no bound variable and is used from more than one place let-bound
+once, above the rest.
 
 The locals a replayed proof is over are abstracted when it is made a lemma, and
 a local is then a de Bruijn index that counts every let above where it is used:
@@ -207,7 +238,8 @@ the kernel checks each. Bound above them all, it is one local, used by index.
 Wants `e` maximally shared, as what it keeps is by subterm.
 -/
 def hoistClosed (e : Expr) : MetaM Expr := do
-  let (body, s) ← (hoist e).run {}
+  let uses := ((countUses e).run {}).2
+  let (body, s) ← (hoist e).run { uses }
   let index := Std.HashMap.ofList s.locals.toList.zipIdx
   let n := s.locals.size
   let mut out := ((abstractHoisted index body n).run {}).1
