@@ -285,7 +285,9 @@ A numeral is a term of no arguments to vampire, however replay states it, so
 -/
 partial def pushMinus (negate : Bool) (t : Expr) : MetaM (Expr × Option Expr) := do
   let wrap (e : Expr) : MetaM Expr := if negate then mkAppM ``Neg.neg #[e] else pure e
-  if (← inferType t).isSort then return (t, none)
+  -- A type is left as it is; a proposition -- the literal itself -- is not.
+  let τ ← inferType t
+  if τ.isSort && !τ.isProp then return (t, none)
   if !t.isApp || (numeral? t).isSome then return (← wrap t, none)
   if let (``Neg.neg, #[_, _, a]) := t.getAppFnArgs then
     if negate then return (a, some (← mkAppM ``neg_neg #[a]))
