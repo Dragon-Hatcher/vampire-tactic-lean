@@ -159,7 +159,7 @@
  *             into the clause it is building and each conjunct into a clause of
  *             its own, so a clause is one path through the conjunctions and
  *             this is that path
- *   uses      {premise, literal, term, flags, firstBinding, numBindings}: how a
+ *   uses      {premise, literal, term, flags, firstBinding, numBindings, to}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
  *             inference acted on or `NONE`, and `term` the index of the term it
@@ -170,7 +170,10 @@
  *             conclusion against the premises.
  *             flags: 1 = the term was rewritten throughout the premise rather
  *             than only in that literal, which is what simultaneous
- *             superposition does
+ *             superposition does. `to` is what the equation acted on rewrote
+ *             `term` to, when that is not its other side, or `NONE`: an
+ *             arithmetic equation `k s + t = 0` rewrites `s` to `-t/k`. Like
+ *             `term`, it is stated in the premise's variables
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
  *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
@@ -266,7 +269,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 28;
+const uint32_t VERSION = 29;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 34;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -1054,7 +1057,7 @@ struct Encoder {
       InferenceStore::instance()->recoverSubsumptionResolutionUses(u);
     }
 
-    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 6);
+    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 7);
     uint32_t numUses = 0;
     if (const Stack<InferenceStore::PremiseUse>* recorded =
           InferenceStore::instance()->premiseUses(u)) {
@@ -1083,6 +1086,7 @@ struct Encoder {
         uses.push_back(use.flags);
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
         uses.push_back(static_cast<uint32_t>(use.bindings.size()));
+        uses.push_back(use.to.isEmpty() ? NONE : encodeTerm(use.to));
         numUses++;
       }
     }
@@ -1136,9 +1140,10 @@ struct Encoder {
               boundSorts.set(term.var(), sort);
           }
         }
-        if (use.term.isTerm())
-          SortHelper::collectVariableSorts(const_cast<Term*>(use.term.term()),
-            boundSorts);
+        for (TermList t : {use.term, use.to})
+          if (t.isTerm())
+            SortHelper::collectVariableSorts(const_cast<Term*>(t.term()),
+              boundSorts);
       }
       DHMap<unsigned, TermList, FnvHash, IdentityHash>::Iterator it3(boundSorts);
       while (it3.hasNext()) {
@@ -1490,7 +1495,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 8));
   putWord(buf, static_cast<uint32_t>(enc.genLits.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 6));
+  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 7));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.congruences.size() / 5));
   putWord(buf, static_cast<uint32_t>(enc.congruenceArgs.size()));

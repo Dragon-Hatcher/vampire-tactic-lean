@@ -122,6 +122,63 @@ partial def equalUnder (equal : Array (Expr × Expr × Expr)) (a b : Expr) :
   return some proof
 
 /--
+Whether ALASCA's unifier reads a term as arithmetic: a sum, a product, a
+difference, a negation or a numeral, rather than an uninterpreted symbol
+applied, which it unifies argument by argument.
+-/
+private def arithmetic (e : Expr) : Bool :=
+  match e.getAppFn with
+  | .const c _ =>
+    c == ``HAdd.hAdd || c == ``HSub.hSub || c == ``HMul.hMul || c == ``HDiv.hDiv
+      || c == ``Neg.neg || c == ``OfNat.ofNat || c == ``OfScientific.ofScientific
+      || c == ``Nat.cast || c == ``Int.cast || c == `Rat.cast
+  | _ => false
+
+/--
+`a = b`, for two terms ALASCA's unifier unified, where `equal` are the pairs it
+deferred with what says each is equal; `none` where they are not.
+
+Its unifier works up to arithmetic: `f(X + 1)` and `f(a)` unify by `X ↦ a - 1`,
+which makes them equal as numbers rather than one term. So the two are compared
+in ring normal form, with the deferred pairs, their atoms numbered alike -- a
+unification it solved is then one term -- and descended as the unifier
+descends them: two applications of one uninterpreted symbol argument by
+argument, and anything it reads as arithmetic as a question about numbers,
+which the deferred pairs are facts for.
+-/
+partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) :
+    ReconstructM (Option Expr) := do
+  if a == b then return some (← mkEqRefl a)
+  let normal ← (← read).ringNormalForms
+    (#[a, b] ++ equal.flatMap fun (x, y, _) => #[x, y])
+  -- What says each normal form is what it normalises.
+  let normalEq (i : Nat) (h : Expr) : MetaM Expr := do
+    mkEqTrans (← mkEqSymm normal[2 * i + 2]!.2) (← mkEqTrans h normal[2 * i + 3]!.2)
+  let pairs ← equal.zipIdx.mapM fun ((_, _, h), i) => do
+    return (normal[2 * i + 2]!.1, normal[2 * i + 3]!.1, ← normalEq i h)
+  let rec go (a b : Expr) : ReconstructM (Option Expr) := do
+    if a == b then return some (← mkEqRefl a)
+    for (x, y, p) in pairs do
+      if x == a && y == b then return some p
+      if x == b && y == a then return some (← mkEqSymm p)
+    if arithmetic a || arithmetic b then
+      return some (← (← read).contradiction (pairs.map (·.2.2)) (some (← mkEq a b)))
+    unless a.isApp && b.isApp do return none
+    let as := a.getAppArgs
+    let bs := b.getAppArgs
+    unless a.getAppFn == b.getAppFn && as.size == bs.size do return none
+    let mut proof ← mkEqRefl a.getAppFn
+    for (x, y) in as.zip bs do
+      if x == y then
+        proof ← mkCongrFun proof x
+      else
+        let some p ← go x y | return none
+        proof ← mkCongr proof p
+    return some proof
+  let some same ← go normal[0]!.1 normal[1]!.1 | return none
+  return some (← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2)))
+
+/--
 `target` from two complementary literals.
 
 Either can be the negation of the other -- both can be negations, `¬¬a` and

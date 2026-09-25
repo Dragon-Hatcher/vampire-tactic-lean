@@ -240,6 +240,7 @@ def run (proof : Proof) (symbols : Symbols)
     (literalRewritten : LiteralRewrite → Expr → MetaM (Expr × Expr))
     (virasRefute : Expr → Expr → Nat → Array Expr → Array Expr → MetaM Expr)
     (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
+    (ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)))
     (checkSteps : Bool := false) :
     MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
@@ -261,7 +262,7 @@ def run (proof : Proof) (symbols : Symbols)
     | none => none
   let (outcome, _) ←
     (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse,
-              literalRewritten, virasRefute, cancelling,
+              literalRewritten, virasRefute, cancelling, ringNormalForms,
               checkSteps
               flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>

@@ -143,6 +143,17 @@ structure Context where
   -/
   cancelling : Expr → Expr → Expr → MetaM (Option Expr) := fun _ _ _ => pure none
   /--
+  Each term in ring normal form, with `e = nf`, the atoms numbered alike across
+  all of them and normalised too: two terms one up to the identities of a
+  commutative ring, at any depth, come out as one. That is what ALASCA's
+  unifier makes of two terms it unifies, solving `X + 1 = a` for `X` where it
+  can rather than leaving the pair.
+
+  Handed in for the same reason as `contradiction`.
+  -/
+  ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)) := fun _ =>
+    throwError "replay was not given a way to normalise terms over a ring"
+  /--
   The number each numeral symbol stands for, by its name and arity: ALASCA's
   multiplication by a number is printed as the number is.
   -/

@@ -148,7 +148,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 28
+private def version : UInt32 := 29
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -232,7 +232,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let genLits := genStates + numGenStates * 8 * 4
   let choices := genLits + numGenLits * 2 * 4
   let uses := choices + numChoices * 2 * 4
-  let bindings := uses + numUses * 6 * 4
+  let bindings := uses + numUses * 7 * 4
   let congruences := bindings + numBindings * 2 * 4
   let congruenceArgs := congruences + numCongruences * 5 * 4
   let placements := congruenceArgs + numCongruenceArgs * 4
@@ -388,8 +388,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     index "conjunction" conjunction numFormulas
     index "conjunct" (at_ choices 2 i 1) (at_ formulas 7 conjunction 3)
   for i in [0:numUses] do
-    optional "used term" (at_ uses 6 i 2) numTerms
-    range "use bindings" (at_ uses 6 i 4) (at_ uses 6 i 5) numBindings
+    optional "used term" (at_ uses 7 i 2) numTerms
+    range "use bindings" (at_ uses 7 i 4) (at_ uses 7 i 5) numBindings
+    optional "rewritten-to term" (at_ uses 7 i 6) numTerms
   for i in [0:numBindings] do index "binding" (at_ bindings 2 i 1) numTerms
   for i in [0:numPlacements] do
     range "placement entries" (at_ placements 4 i 2) (at_ placements 4 i 3)
@@ -589,6 +590,12 @@ structure PremiseUse where
   -/
   rewritesWholePremise : Bool
   bindings : Array (UInt32 × Term)
+  /--
+  What the equation acted on rewrote `term` to, when that is not the
+  equation's other side: an arithmetic equation `k s + t = 0` rewrites `s` to
+  `-t/k`. Stated in the premise's variables, as `term` is.
+  -/
+  to : Option Term
 
 /--
 One step of the reasoning behind a congruence-closure conflict, which vampire
@@ -1174,19 +1181,21 @@ def premiseUses (u : Unit) : Array PremiseUse :=
   let first := u.field 13
   let count := u.field 14
   Array.ofFn (n := count.toNat) fun i =>
-    let base := p.layout.uses + (first.toNat + i.val) * 6 * 4
+    let base := p.layout.uses + (first.toNat + i.val) * 7 * 4
     let literal := readU32 p.data (base + 4)
     let term := readU32 p.data (base + 8)
     let flags := readU32 p.data (base + 12)
     let firstBinding := readU32 p.data (base + 16)
     let numBindings := readU32 p.data (base + 20)
+    let to := readU32 p.data (base + 24)
     { premise := readU32 p.data base
       literal := if literal == none32 then none else some literal
       term := if term == none32 then none else some ⟨p, term⟩
       rewritesWholePremise := flags &&& 1 != 0
       bindings := Array.ofFn (n := numBindings.toNat) fun j =>
         let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
-        (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩) }
+        (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩)
+      to := if to == none32 then none else some ⟨p, to⟩ }
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=

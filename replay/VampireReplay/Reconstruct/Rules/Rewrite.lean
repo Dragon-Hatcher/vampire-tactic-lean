@@ -10,7 +10,8 @@ the right-hand side under the match; `BackwardDemodulation` is the same
 inference found from the other end, and states its premises the same way
 round. `Superposition` does the same with the
 equation's own clause and a unifier rather than a match, so the equation's other
-literals join the conclusion.
+literals join the conclusion. ALASCA's superposition is superposition with an
+arithmetic equation, `k s + t = 0` used as `s = -t/k`.
 
 Which subterm of which literal, which side of the equation, and the
 substitution: none of it survives the inference -- vampire's own proof checker
@@ -175,6 +176,23 @@ private def orientedEquation (parent : Vampire.Unit) (use : PremiseUse)
   return (rhs, lhs, ← mkEqSymm proof)
 
 /--
+The equation a premise use points at, as `orientedEquation` gives it: the
+literal's own sides, or, where the use recorded what its side was rewritten to,
+that. An arithmetic equation `k s + t = 0` rewrites `s` to `-t/k`, which is no
+side of it, and follows from it by the numbers.
+-/
+private def equationOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
+    (proof : Expr) : ReconstructM (Expr × Expr × Expr) := do
+  let some to := use.to | orientedEquation parent use proof (← inferType proof)
+  let some side := use.term
+    | throwError "no side was recorded for the equation used from step {parent.number}"
+  let trees ← TreeCache.new
+  let bindings := Std.HashMap.ofList use.bindings.toList
+  let «from» := (← treeOf trees vars bindings side).toExpr
+  let to := (← treeOf trees vars bindings to).toExpr
+  return («from», to, ← byArithmetic #[← plainly proof] (← mkEq «from» to))
+
+/--
 What a rewriting inference did to the premise it rewrote: which literal, and
 the term within it, at the substitution the premise was taken at.
 -/
@@ -270,13 +288,19 @@ def demodulation (step : Step) : ReconstructM Expr := do
       (sourceCount := mainParent.clauseSize?) (targetCount := step.unit.clauseSize?)
 
 /--
-`superposition`: the clause being rewritten and the equation rewriting it, both
-at the unifier, with the rewritten literal in place of the equation's.
+Superposition: the clause being rewritten and the equation rewriting it, both
+at the unifier, with the rewritten literal in place of the equation's. The
+equation is the second premise, or the first where `equationFirst`; and the
+term it rewrote is its side, up to the unifier's deferred pairs, and up to
+arithmetic too where `moduloRing` (`equalModuloRing`).
 -/
-def superposition (step : Step) : ReconstructM Expr := do
-  let (⟨mainParent, mainProof, mainStated⟩, ⟨sideParent, sideProof, sideStated⟩) ← step.twoPremises
-  let mainUse ← step.useAt 0
-  let sideUse ← step.useAt 1
+private def superposeInto (step : Step) (equationFirst moduloRing : Bool) :
+    ReconstructM Expr := do
+  let (p, q) ← step.twoPremises
+  let ((main, ⟨mainParent, mainProof, mainStated⟩), (side, ⟨sideParent, sideProof, sideStated⟩)) :=
+    if equationFirst then ((1, q), (0, p)) else ((0, p), (1, q))
+  let mainUse ← step.useAt main
+  let sideUse ← step.useAt side
   let some equationLiteral := sideUse.literal
     | throwError "{step.rule.name} did not record which literal is the equation"
   step.underVars fun kept target => do
@@ -291,16 +315,15 @@ def superposition (step : Step) : ReconstructM Expr := do
     -- many of the rewritten premise's literals the rewrite reaches.
     step.withInto target fun into =>
       carryPast sideType target sideAt into (· == equationLiteral.toNat)
-        (placed := step.placedAt 1) (sourceCount := sideParent.clauseSize?)
+        (placed := step.placedAt side) (sourceCount := sideParent.clauseSize?)
         (fun _ hSide => do
-          let («from», to, heq) ←
-            orientedEquation sideParent sideUse hSide (← inferType hSide)
+          let («from», to, heq) ← equationOf sideParent sideUse vars hSide
           let rewriteBy (heq : Expr) : ReconstructM Expr := do
             let (rewritten, says) ← rewriteClause rw vars mainType mainAt heq to
-            carryAll says target rewritten (placed := step.placedAt 0) (into := into)
+            carryAll says target rewritten (placed := step.placedAt main) (into := into)
               (sourceCount := mainParent.clauseSize?)
           let source := rw.target.toExpr
-          if step.unit.constraints.isEmpty then
+          if step.unit.constraints.isEmpty && !moduloRing then
             return ← rewriteBy heq
           -- An abstracting unifier did not make the rewritten term and the
           -- equation's side one: what it could not unify it left as
@@ -308,14 +331,22 @@ def superposition (step : Step) : ReconstructM Expr := do
           -- of the two. So either one of those holds, and it is the
           -- conclusion, or each pair is equal, the two terms are equal by
           -- congruence at those pairs, and the equation rewrites the premise
-          -- once composed with that.
+          -- once composed with that. ALASCA's unifier works up to arithmetic
+          -- as well, and the two are then equal as numbers.
           underConstraints step into fun equal => do
-            let some same ← equalUnder equal source «from»
+            let some same ← if moduloRing then equalModuloRing equal source «from»
+                else equalUnder equal source «from»
               | throwError "step {step.unit.number}: the rewritten term\
                   {indentExpr source}\nand the side of the equation\
                   {indentExpr «from»}\nare not equal even assuming the \
                   unifier's deferred constraints"
             rewriteBy (← mkEqTrans same heq))
+
+/-- `superposition`: vampire states the rewritten clause first. -/
+def superposition (step : Step) : ReconstructM Expr := superposeInto step (equationFirst := false) (moduloRing := false)
+
+/-- `alasca_superposition`: ALASCA states the equation first. -/
+def alascaSuperposition (step : Step) : ReconstructM Expr := superposeInto step (equationFirst := true) (moduloRing := true)
 
 /--
 `inner_rewriting`: a clause with one of its own disequalities `l ≠ r` used to

@@ -209,6 +209,17 @@ def ringEq (a b : Expr) : MetaM (Option Expr) := do
     return none
   return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
 
+/--
+Each of `es` in ring normal form, with `e = nf`, the atoms numbered alike across
+all of them: two that are one up to the identities of a commutative ring, their
+atoms' insides included, come out as one term.
+-/
+def ringNormalForms (es : Array Expr) : MetaM (Array (Expr × Expr)) := do
+  let state ← IO.mkRef {}
+  es.mapM fun e => do
+    let r ← ringNormal state e
+    return (r.expr, ← r.getProof)
+
 /-- `ringEq`, failing where the two are not one. -/
 def ringEq! (a b : Expr) : MetaM Expr := do
   let some h ← ringEq a b
