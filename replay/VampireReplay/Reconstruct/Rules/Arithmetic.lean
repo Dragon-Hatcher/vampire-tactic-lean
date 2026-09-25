@@ -166,6 +166,54 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     withRoundings statements fun roundings => go roundings 0
 
 /--
+`e` with each of its atoms replaced by what `rewrite` makes of it, and `e ↔`
+that: its connectives and quantifiers kept, each atom rewritten where it
+stands.
+-/
+private partial def rewriteAtoms (rewrite : Expr → ReconstructM (Expr × Expr)) (e : Expr) :
+    ReconstructM (Expr × Expr) := do
+  -- Whether a formula is built by a connective or a quantifier, rather than
+  -- an atom.
+  let compound (a : Expr) : ReconstructM Bool := do
+    let a ← instantiateMVars a
+    if a.isForall then return true
+    return a.isAppOfArity ``Not 1 || a.isAppOfArity ``And 2 || a.isAppOfArity ``Or 2 ||
+      a.isAppOfArity ``Iff 2 || a.isAppOfArity ``Exists 2 || a.isConstOf ``True ||
+      a.isConstOf ``False
+  let e ← instantiateMVars e
+  let go := rewriteAtoms rewrite
+  let both (lemma_ : Name) (a b : Expr) (fn : Expr → Expr → Expr) :
+      ReconstructM (Expr × Expr) := do
+    let (a', ha) ← go a
+    let (b', hb) ← go b
+    return (fn a' b', ← mkAppM lemma_ #[ha, hb])
+  if let .forallE n d b bi := e then
+    if (← isProp d) && !b.hasLooseBVars then
+      return ← both ``imp_congr d b fun d' b' => .forallE n d' b' bi
+    return ← withLocalDecl n bi d fun x => do
+      let (b', hb) ← go (b.instantiate1 x)
+      return (← mkForallFVars #[x] b', ← mkAppM ``forall_congr' #[← mkLambdaFVars #[x] hb])
+  match_expr e with
+  | True => return (e, ← mkAppM ``Iff.refl #[e])
+  | False => return (e, ← mkAppM ``Iff.refl #[e])
+  | Not a => do
+    -- A negated atom is a literal, as vampire has one, and is rewritten
+    -- whole: `¬(a ≤ b)` becomes `b < a`, not `¬¬(b < a)`.
+    unless ← compound a do return ← rewrite e
+    let (a', h) ← go a
+    return (mkApp (mkConst ``Not) a', ← mkAppM ``not_congr #[h])
+  | And a b => both ``and_congr a b (mkApp2 (mkConst ``And))
+  | Or a b => both ``or_congr a b (mkApp2 (mkConst ``Or))
+  | Iff a b => both ``iff_congr a b (mkApp2 (mkConst ``Iff))
+  | Exists τ p => do
+    let .lam n _ body bi := p | rewrite e
+    withLocalDecl n bi τ fun x => do
+      let (b', hb) ← go (body.instantiate1 x)
+      return (← mkAppM ``Exists #[← mkLambdaFVars #[x] b'],
+        ← mkAppM ``exists_congr #[← mkLambdaFVars #[x] hb])
+  | _ => rewrite e
+
+/--
 A literal-wise simplification: each literal of the premise became the literal
 of the conclusion the worker recorded, by the rewrites of the procedure it
 recorded, or was found false and dropped.
@@ -182,9 +230,11 @@ def literalwise (step : Step) : ReconstructM Expr := do
   if step.unit.clause?.isNone then
     unless step.rule == .theoryNormalization do
       throwError "{step.rule.name} rewrote a formula, which only theory normalization does"
-    let rewritten (a b : Expr) : ReconstructM (Option Expr) := do
-      return some (← (← read).literalIff .theoryNormalization a b (1, 1))
-    return ← restate proof stated (← step.conclusion) rewritten
+    -- The formula's atoms each rewritten where they stand, and what that
+    -- makes is the formula vampire stated, up to how it writes one.
+    let (rewritten, h) ← rewriteAtoms
+      (fun a => do (← read).literalRewritten .theoryNormalization a) stated
+    return ← restate (← mkAppM ``Iff.mp #[h, proof]) rewritten (← step.conclusion)
   let some procedure := step.unit.literalProcedure?.bind LiteralRewrite.ofRecorded?
     | throwError "step {step.unit.number} ({step.rule.name}) recorded no procedure"
   let some images := step.placedAt 0
@@ -199,50 +249,18 @@ def literalwise (step : Step) : ReconstructM Expr := do
       throwError "step {step.unit.number} recorded {images.size} literals' \
         images for a premise of {parts.size}"
     let into := step.into target
-    -- Each literal as the procedure reads it: a symbol vampire introduced
-    -- is a symbol to it, whatever definition replay states it as, so the
-    -- literals the ports are handed have those marked. The marks are
-    -- metadata, and the literals the ones the clauses state.
-    let premiseLiterals := (parent.clause?.map (·.literals)).getD #[]
-    let conclusionLiterals := (step.unit.clause?.map (·.literals)).getD #[]
-    -- The premise's variables at what `premisesOf` instantiated them at: the
-    -- substitution the step recorded, if it recorded one.
-    let premiseVars ← withReader ({ · with markIntroduced := true }) do
-      let covered ← coverVars parent vars step.unit.boundVarSorts
-      let some use := step.useAt? 0 | pure covered
-      let bound := Std.HashMap.ofList use.bindings.toList
-      let mut out : Vars := {}
-      for (v, sortName) in parent.varSorts do
-        out := out.insert v (← match bound[v]? with
-          | some image => term covered image
-          | none => do someElement (← sortType sortName))
-      pure out
-    let marked (vars : Vars) (l : Vampire.Literal) (stated : Expr) : ReconstructM Expr := do
-      let e ← withReader ({ · with markIntroduced := true }) (literal vars l)
-      unless ← isDefEq e stated do
-        throwError "step {step.unit.number}: restating{indentExpr stated}\nwith the \
-          symbols vampire introduced marked gave{indentExpr e}"
-      return e
     elimGiven parts (motive? := some target) (fun i h => do
       let factor := (factors.bind (·[i]?)).getD (1, 1)
-      let some premiseLiteral := premiseLiterals[i]?
-        | throwError "step {step.unit.number} has no premise literal {i}"
-      let from_ ← marked premiseVars premiseLiteral parts[i]!
       match images[i]? with
       | some (some (j, _)) =>
         let some goal := into.parts[j]?
           | throwError "step {step.unit.number} has no literal {j}"
-        let some conclusionLiteral := conclusionLiterals[j]?
-          | throwError "step {step.unit.number} has no literal {j}"
-        let to ← marked vars conclusionLiteral goal
-        trace[vampire] "step {step.unit.number}: {repr procedure} rewrote{indentExpr from_}\ninto{indentExpr to}"
-        let iff ← (← read).literalIff procedure from_ to factor
-        let iff ← mkExpectedTypeHint iff (mkApp2 (mkConst ``Iff) parts[i]! goal)
+        let iff ← (← read).literalIff procedure parts[i]! goal factor
         let some placed := into.inject 0 j (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
           | throwError "step {step.unit.number} has no literal {j}"
         return placed
       | _ =>
-        let refuted ← (← read).literalFalse procedure from_ factor
+        let refuted ← (← read).literalFalse procedure parts[i]! factor
         return mkApp2 (mkConst ``False.elim [.zero]) target (mkApp refuted h)) premise
 
 /-- `a * b`, whichever numbers those are. -/

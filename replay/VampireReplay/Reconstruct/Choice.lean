@@ -18,23 +18,6 @@ private def given (τ : Expr) : ReconstructM (Option Expr) := do
       return some e
   return none
 
-/--
-The locals `e` mentions, and those their types mention in turn, in the order
-the context has them: what a definition closed over `e` has to take.
--/
-def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
-  let lctx ← getLCtx
-  let mut found : Std.HashSet FVarId := {}
-  let mut pending := (collectFVars {} e).fvarIds.toList
-  while !pending.isEmpty do
-    let id :: rest := pending | break
-    pending := rest
-    if found.contains id || except.contains (mkFVar id) then continue
-    found := found.insert id
-    if let some decl := lctx.find? id then
-      pending := (collectFVars {} (← instantiateMVars decl.type)).fvarIds.toList ++ pending
-  return (lctx.sortFVarsByContextOrder found.toArray).map mkFVar
-
 /-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   if let some inst := (← get).nonempty[τ]? then
@@ -166,16 +149,9 @@ def blockPredicates (positive : Bool) (sorts : Array (UInt32 × String))
     -- the locals it mentions: every witness is chosen from it, and the choices
     -- and the facts about them mention the definition rather than each hold a
     -- copy of the body.
-    let stated ← instantiateMVars (← formula sorts vars body)
-    if stated.hasMVar then throwError "a quantifier block's body is not fully elaborated"
-    let locals ← closureOf stated (except := xs)
-    let closed ← mkLambdaFVars (locals ++ xs) stated
-    let lps := (collectLevelParams {} closed).params
-    let name ← mkAuxDeclName `_block
-    let closedType ← inferType closed
-    addDecl (.defnDecl (mkDefinitionValEx name lps.toList closedType closed .abbrev
-      .safe [name]))
-    let applied := mkAppN (mkConst name (lps.toList.map mkLevelParam)) (locals ++ xs)
+    let stated ← formula sorts vars body
+    let applied ← auxDefinition `_block (← mkLambdaFVars xs stated)
+    let applied := mkAppN applied xs
     let inner := applied.abstract xs
     let n := bound.size
     let mut qs := #[]
@@ -228,22 +204,11 @@ def registerSkolem (skolems : Std.HashMap UInt32 Term) (vars : Vars) (v : UInt32
   -- A symbol is registered once: the units that skolemised it choose the
   -- same witness, and a second definition would be a second symbol.
   if (← get).introduced.contains symbol.name then return ← term vars skolemTerm
-  let definition ← instantiateMVars (← mkLambdaFVars args witness)
-  if definition.hasMVar then
-    throwError "the witness chosen for {symbol.name} is not fully elaborated"
   -- A witness is a choice over the rest of its block, and the terms that
   -- mention the symbol are walked by every step that states a clause; as a
-  -- definition of its own, closed over the goal's locals it mentions, the
-  -- symbol is a constant applied to those, and the choice is unfolded only
-  -- where something asks what it is.
-  let locals ← closureOf definition
-  let closed ← instantiateMVars (← mkLambdaFVars locals definition)
-  let levels := (collectLevelParams {} closed).params
-  let name ← mkAuxDeclName `_skolem
-  let closedType ← inferType closed
-  addDecl (.defnDecl (mkDefinitionValEx name levels.toList closedType closed .abbrev
-    .safe [name]))
-  let standsFor := mkAppN (mkConst name (levels.toList.map mkLevelParam)) locals
+  -- definition of its own the symbol is a constant, and the choice is
+  -- unfolded only where something asks what it is.
+  let standsFor ← auxDefinition `_skolem (← mkLambdaFVars args witness)
   modify fun s => { s with introduced := s.introduced.insert symbol.name standsFor }
   term vars skolemTerm
 

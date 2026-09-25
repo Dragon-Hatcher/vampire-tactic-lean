@@ -294,8 +294,8 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     if fuel > 0 then
       for (fact, i) in facts.zipIdx do
         if let some denied := (← instantiateMVars (← inferType fact)).not? then
-          -- Through a definition applied, as an equality proxy is.
-          unless denied.headBeta.isAppOfArity ``Eq 3 do continue
+          -- Through what vampire defined, as an equality proxy is.
+          unless (← unfoldDefinitions denied).isAppOfArity ``Eq 3 do continue
           -- Rolled back if it fails, as every attempt that may not succeed is.
           try
             return ← rollingBack do

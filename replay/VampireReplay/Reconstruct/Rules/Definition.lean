@@ -95,7 +95,7 @@ private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit :
         | throwError "variable X{arg.var} has no recorded sort"
       return x
     let definition ← mkLambdaFVars locals (← term vars body)
-    modify fun s => { s with introduced := s.introduced.insert name definition }
+    defineIntroduced name definition
 
 /--
 Registers what an `avatar_definition` step introduces.
@@ -166,7 +166,7 @@ private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit 
         | throwError "variable X{arg.var} has no recorded sort"
       return x
     let definition ← mkLambdaFVars args body
-    modify fun s => { s with introduced := s.introduced.insert symbol.name definition }
+    defineIntroduced symbol.name definition
 
 /--
 Proves a definition, which once its name is bound says only that something is
@@ -451,7 +451,7 @@ private def registerInequalitySplitting (u : Vampire.Unit) : ReconstructM PUnit 
   let body ← withVars u.varSorts {} fun vars _ => term vars t
   let definition ← withLocalDeclD `x (← inferType body) fun x => do
     mkLambdaFVars #[x] (mkApp (mkConst ``Not) (← mkEq x body))
-  modify fun s => { s with introduced := s.introduced.insert name definition }
+  defineIntroduced name definition
 
 /--
 `inequality_splitting_name_introduction`: that the named term is not unequal to
@@ -554,13 +554,13 @@ then each equality it denies holds, and substituting them away leaves the
 literal it asserts failing of terms that are now the same -- `¬(t = t)`, or a
 predicate both holding and failing.
 
-The conclusion applies the binding rather than having it reduced, so it is
-reduced here for the shape to be read, and the proof restated at the shape the
-step states: the two are one term to the kernel.
+The conclusion states the proxy, so its definition is unfolded here for the
+shape to be read, and the proof restated at the shape the step states: the two
+are one term to the kernel.
 -/
 def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
   let conclusion ← step.conclusion
-  let reduced ← Meta.transform conclusion (post := fun e => return .done e.headBeta)
+  let reduced ← unfoldDefinitions conclusion
   let proof ← forallTelescopeReducing reduced fun xs body => do
     let parts := junctionParts ``Or body
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) body) fun h => do

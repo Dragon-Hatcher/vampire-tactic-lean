@@ -188,53 +188,20 @@ private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
   unless ra.expr == rb.expr do return none
   return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
 
-/-- The symbols vampire introduced that `e` mentions, marked, each once; what
-is under one is part of it. -/
-private partial def introducedIn (e : Expr) : Array Expr :=
-  (go e).run ({}, #[]) |>.2.2
-where
-  go (t : Expr) : StateM (Std.HashSet Expr × Array Expr) PUnit := do
-    if (← get).1.contains t then return
-    modify fun (seen, found) => (seen.insert t, found)
-    if Vampire.Reconstruct.isMarkedIntroduced t then
-      modify fun (seen, found) => (seen, found.push t)
-      return
-    match t with
-    | .app f a => do go f; go a
-    | .lam _ d b _ | .forallE _ d b _ => do go d; go b
-    | .letE _ τ v b _ => do go τ; go v; go b
-    | .mdata _ b | .proj _ _ b => go b
-    | _ => pure ()
-
 /--
 `a = b` for two terms, or two statements, that are one up to the identities
 of a commutative ring: both are put into ring normal form, the atoms numbered
 alike, and have to come out as one term. What certifies a rewrite a port of
-vampire's has already decided on, never what decides it.
-
-A symbol vampire introduced is stated as the definition it stands for -- a
-skolem as a choice over the formula it came from -- which the normal form
-would compare as it numbers atoms; it is a symbol here as it is to vampire, a
-local for each, and the equation is instantiated at them after.
+vampire's has already decided on, never what decides it. ALASCA's `$lin_mul`
+is read as the product it is.
 -/
 def ringEq (a b : Expr) : MetaM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
-  -- ALASCA's `k * t` is the product it is stated as, metadata aside.
-  let a := Vampire.Reconstruct.unmarkLinMul a
-  let b := Vampire.Reconstruct.unmarkLinMul b
-  let inA := introducedIn a
-  let symbols := inA ++ (introducedIn b).filter fun t => !inA.contains t
-  if symbols.isEmpty then return ← ringEqNormal a b
-  let decls ← symbols.mapIdxM fun i t => do
-    let τ ← inferType t
-    return (Name.mkSimple s!"v{i}", fun (_ : Array Expr) => pure τ)
-  withLocalDeclsD decls fun locals => do
-    let abstract (e : Expr) : Expr := e.replace fun t =>
-      match symbols.idxOf? t with
-      | some i => some locals[i]!
-      | none => none
-    let some h ← ringEqNormal (abstract a) (abstract b) | return none
-    return some (mkAppN (← mkLambdaFVars locals h) symbols)
+  let a' ← Vampire.Reconstruct.unfoldDefinitions a (only := (· == ``Vampire.Reconstruct.linMul))
+  let b' ← Vampire.Reconstruct.unfoldDefinitions b (only := (· == ``Vampire.Reconstruct.linMul))
+  let some h ← ringEqNormal a' b' | return none
+  -- `a' = b'` is `a = b`: `linMul` unfolds to the product.
+  return some (← mkExpectedTypeHint h (← mkEq a b))
 
 /-- `ringEq`, failing where the two are not one. -/
 def ringEq! (a b : Expr) : MetaM Expr := do
@@ -277,26 +244,22 @@ def congrArgs (fn : Expr) (args : Array Expr) (rewritten : Array Simp.Result) :
 private partial def visit (step : Expr → MetaM (Option (Expr × Expr)))
     (seen : IO.Ref (Std.HashMap Expr Simp.Result)) (t : Expr) : MetaM Simp.Result := do
   if let some r := (← seen.get)[t]? then return r
-  let r ← do
-    if Vampire.Reconstruct.isMarkedIntroduced t then pure { expr := t }
-    else
-      -- The subterms first: a term's arguments, never its head.
-      let inner : Simp.Result ← match t with
-        | .app .. => do
-          let args := t.getAppArgs
-          let rewritten ← args.mapM (visit step seen)
-          let (rebuilt, proof?) ← congrArgs t.getAppFn args rewritten
-          pure { expr := rebuilt, proof? }
-        | .mdata d e => do
-          let r ← visit step seen e
-          pure { r with expr := .mdata d r.expr }
-        | _ => pure { expr := t }
-      match ← step inner.expr with
-      | some (t', h) =>
-        pure { expr := t', proof? := some (← match inner.proof? with
-          | some p => mkEqTrans p h
-          | none => pure h) }
-      | none => pure inner
+  -- The subterms first: a term's arguments, never its head.
+  let inner : Simp.Result ← match t with
+    | .app .. => do
+      let args := t.getAppArgs
+      let rewritten ← args.mapM (visit step seen)
+      let (rebuilt, proof?) ← congrArgs t.getAppFn args rewritten
+      pure { expr := rebuilt, proof? }
+    | .mdata d e => do
+      let r ← visit step seen e
+      pure { r with expr := .mdata d r.expr }
+    | _ => pure { expr := t }
+  let r ← match ← step inner.expr with
+    | some (t', h) => pure { expr := t', proof? := some (← match inner.proof? with
+        | some p => mkEqTrans p h
+        | none => pure h) }
+    | none => pure inner
   seen.modify (·.insert t r)
   return r
 
@@ -306,11 +269,8 @@ subterms under it have been rewritten, and never about what it rewrote a
 subterm into -- which is how vampire's `BottomUpTermTransformer` visits a term.
 Nothing else is rewritten, and nothing under a binder: a literal has none.
 
-A term is rewritten in its arguments and never in its head. For a symbol
-vampire introduced -- a named formula, an equality proxy, a defined function,
-which replay states as the definition it stands for, marked
-(`markedIntroduced`), or as a definition applied -- that is what makes it a
-symbol, as it is to vampire.
+A term is rewritten in its arguments and never in its head: a symbol vampire
+introduced is a definition applied to its arguments, and a symbol to vampire.
 -/
 def bottomUp (step : Expr → MetaM (Option (Expr × Expr))) (e : Expr) :
     MetaM Simp.Result := do

@@ -2,6 +2,7 @@ import Lean
 import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.Ring
 import VampireReplay.Abstract
+import VampireReplay.Reconstruct.Monad
 
 /-!
 What proves the arithmetic steps of vampire's that hold by the arithmetic of
@@ -211,6 +212,15 @@ The terms the procedure cannot read are put aside by
 it here is the asking.
 -/
 def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
+  -- What vampire defined, and ALASCA's products, unfolded: a proxy applied is
+  -- an equation and `$lin_mul` a product only once they are, and no procedure
+  -- looks inside a definition.
+  let facts ← facts.mapM fun fact => do
+    let stated ← instantiateMVars (← inferType fact)
+    let unfolded ← Vampire.Reconstruct.unfoldDefinitions stated
+    if unfolded == stated then return fact
+    mkExpectedTypeHint fact unfolded
+  let claim ← claim.mapM fun c => do Vampire.Reconstruct.unfoldDefinitions (← instantiateMVars c)
   let (facts, claim, back) ← substituted facts claim
   back <| ← match claim with
   | none => VampireReplay.Abstract.abstracting askAbout facts none

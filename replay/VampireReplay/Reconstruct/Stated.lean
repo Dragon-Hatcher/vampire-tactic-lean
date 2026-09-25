@@ -209,13 +209,11 @@ def interpreted (name : String) (args : Array Expr) :
       if n.denominator == 1 then return ← wholeNumeral τ n.numerator
       return mkApp2 (← headAt ``HDiv.hDiv τ 2)
         (← wholeNumeral τ n.numerator) (← wholeNumeral τ (Int.ofNat n.denominator))
-    -- ALASCA writes a term's coefficient as the numeral applied to it.
+    -- ALASCA writes a term's coefficient as the numeral applied to it, a
+    -- symbol of its own (`linMul`).
     if n.multiplies then
       let #[a] := args | return none
-      let τ ← inferType a
-      let timesK := mkApp (← headAt ``HMul.hMul τ 2) (← numeralAt τ)
-      if (← read).markIntroduced then return some (mkApp (markedLinMul timesK) a)
-      return some (mkApp timesK a)
+      return some (← mkAppM ``linMul #[← numeralAt (← inferType a), a])
     unless args.isEmpty do return none
     let some τ ← sortType? n.sort | throwUnknownSort n.sort
     return some (← numeralAt τ)
@@ -228,11 +226,7 @@ a definition gave it.
 def applySymbol (name : String) (args : Array Expr) : ReconstructM Expr := do
   match ← interpreted name args with
   | some e => return e
-  | none =>
-    let head ← symbolExpr name
-    if (← read).markIntroduced && !(← isGoalSymbol name) then
-      return mkAppN (markedIntroduced name head) args
-    return mkAppN head args
+  | none => return mkAppN (← symbolExpr name) args
 
 /--
 `sym before = sym after`, from a proof that each argument of the one is the
@@ -265,11 +259,8 @@ private partial def termGround (vars : Vars) (t : Term) :
     let some x := vars[t.var]?
       | throwError "variable X{t.var} is not bound here"
     return (x, false)
-  -- Kept terms are stated unmarked, so marking states afresh.
-  let keep := !(← read).markIntroduced
-  if keep then
-    if let some e := (← get).groundTerms[t.index]? then
-      return (e, true)
+  if let some e := (← get).groundTerms[t.index]? then
+    return (e, true)
   let some symbol := t.symbol?
     | throwError "term has unknown functor {t.functor}"
   let mut args := #[]
@@ -278,11 +269,8 @@ private partial def termGround (vars : Vars) (t : Term) :
     let (e, argGround) ← termGround vars arg
     args := args.push e
     ground := ground && argGround
-  -- Shared terms are compared without their metadata, so a marked one is
-  -- not shared: it would come back as the unmarked term kept before it.
-  let applied ← applySymbol symbol.name args
-  let built ← if keep then shared applied else pure applied
-  if ground && keep then
+  let built ← shared (← applySymbol symbol.name args)
+  if ground then
     modify fun s => { s with groundTerms := s.groundTerms.insert t.index built }
   return (built, ground)
 
@@ -324,8 +312,7 @@ private def literalGround (vars : Vars) (l : Literal) :
       let some symbol := l.symbol?
         | throwError "literal has unknown predicate {l.predicate}"
       applySymbol symbol.name args
-  let stated := if polarity then atom else mkApp (mkConst ``Not) atom
-  return (← if (← read).markIntroduced then pure stated else shared stated, ground)
+  return (← shared (if polarity then atom else mkApp (mkConst ``Not) atom), ground)
 
 /-- Rebuilds a vampire literal as a Lean proposition. -/
 def literal (vars : Vars) (l : Literal) : ReconstructM Expr :=

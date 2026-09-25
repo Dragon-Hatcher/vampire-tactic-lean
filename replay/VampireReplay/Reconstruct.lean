@@ -175,8 +175,7 @@ private partial def bindIntroduced : ReconstructM PUnit := do
             not record the sorts of"
         let definition ← reading u <| withVars bound {} fun vars locals => do
           mkLambdaFVars locals (← formula sorts vars named)
-        modify fun s =>
-          { s with introduced := s.introduced.insert name definition }
+        defineIntroduced name definition
     -- Clausification records the steps it took, which say where each of its
     -- skolemisations happened; anything else is looked for in the formula.
     if u.genClause?.isSome then
@@ -238,6 +237,7 @@ def run (proof : Proof) (symbols : Symbols)
     (contradiction : Array Expr → Option Expr → MetaM Expr)
     (literalIff : LiteralRewrite → Expr → Expr → Int × Nat → MetaM Expr)
     (literalFalse : LiteralRewrite → Expr → Int × Nat → MetaM Expr)
+    (literalRewritten : LiteralRewrite → Expr → MetaM (Expr × Expr))
     (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
     (checkSteps : Bool := false) :
     MetaM (Option Outcome) := do
@@ -259,7 +259,8 @@ def run (proof : Proof) (symbols : Symbols)
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse, cancelling,
+    (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse,
+              literalRewritten, cancelling,
               checkSteps
               flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>

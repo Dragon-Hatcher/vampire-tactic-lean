@@ -66,14 +66,6 @@ structure Context where
   -/
   flipping : Bool := false
   /--
-  Whether a symbol vampire introduced is stated marked (`markedIntroduced`)
-  rather than as the bare definition it stands for. Vampire treats such a
-  symbol as a symbol, while the definition it is stated as is whatever it
-  abbreviates; what ports vampire's rewriting of a literal needs to tell the
-  two apart, and asks for literals stated this way.
-  -/
-  markIntroduced : Bool := false
-  /--
   What the goal holds, for when something of a sort is needed and no instance
   says the sort is inhabited.
 
@@ -126,6 +118,12 @@ structure Context where
   -/
   literalFalse : LiteralRewrite → Expr → Int × Nat → MetaM Expr :=
     fun _ _ _ => throwError "replay was not given a way to prove literal rewrites"
+  /--
+  What a literal-wise simplification makes of the literal `a`, and `a ↔` it:
+  for a step that rewrote a formula, whose atoms it rewrote where they stand.
+  -/
+  literalRewritten : LiteralRewrite → Expr → MetaM (Expr × Expr) :=
+    fun _ _ => throwError "replay was not given a way to prove literal rewrites"
   /--
   `x ≠ 0 → x * z = x * w → z = w` at three numbers, and none where their sort
   does not cancel.
@@ -289,51 +287,84 @@ def sortType (name : String) : ReconstructM Expr := do
   let some τ ← sortType? name | throwUnknownSort name
   return τ
 
-/-- The key `markedIntroduced` annotates a symbol vampire introduced with. -/
-def introducedKey : Name := `vampire.introduced
+universe u in
+/--
+ALASCA's multiplication by a numeral, `$lin_mul`: `k * t`, as a definition of
+its own. To interpreted evaluation it is a symbol, which it leaves be, and to
+polynomial normalization the product it is, so the two have to be told apart;
+what reads it as the product unfolds it.
+-/
+def linMul {α : Type u} [Mul α] (k t : α) : α := k * t
 
 /--
-What a symbol vampire introduced is stated as, marked as that symbol: the
-annotation is metadata, so it is the definition as far as any check of a term
-goes, and it is there for what reads the term as vampire does.
+The locals `e` mentions, and those their types mention in turn, in the order
+the context has them: what a definition closed over `e` has to take.
 -/
-def markedIntroduced (name : String) (e : Expr) : Expr :=
-  .mdata (KVMap.empty.insert introducedKey (.ofString name)) e
-
-/-- Whether `e` is a symbol vampire introduced, marked as such. -/
-def isMarkedIntroduced : Expr → Bool
-  | .mdata d _ => (d.find introducedKey).isSome
-  | _ => false
-
-/-- The key `markedLinMul` annotates ALASCA's multiplication by a numeral with. -/
-def linMulKey : Name := `vampire.linMul
+def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
+  let lctx ← getLCtx
+  let mut found : Std.HashSet FVarId := {}
+  let mut pending := (collectFVars {} e).fvarIds.toList
+  while !pending.isEmpty do
+    let id :: rest := pending | break
+    pending := rest
+    if found.contains id || except.contains (mkFVar id) then continue
+    found := found.insert id
+    if let some decl := lctx.find? id then
+      pending := (collectFVars {} (← instantiateMVars decl.type)).fvarIds.toList ++ pending
+  return (lctx.sortFVarsByContextOrder found.toArray).map mkFVar
 
 /--
-ALASCA's multiplication by a numeral, `$lin_mul`, which replay states as the
-product `k * t`, marked as that symbol around `k * ·`: to polynomial
-normalization it is the product, but interpreted evaluation takes it for a
-symbol of its own, and leaves it be.
--/
-def markedLinMul (timesK : Expr) : Expr :=
-  .mdata (KVMap.empty.insert linMulKey (.ofBool true)) timesK
+`value` as an auxiliary definition, closed over the locals it mentions (and
+those they depend on), and the definition applied to them. `kind` names it:
+`_defined` for what vampire defined, `_skolem` for a witness, `_block` for the
+body of a quantifier block.
 
-/-- Whether `e` is ALASCA's `k * ·`, marked as such. -/
-def isMarkedLinMul : Expr → Bool
-  | .mdata d _ => (d.find linMulKey).isSome
+A definition of its own is a constant to everything that walks a term, which
+only a check of what it is unfolds -- and a symbol vampire introduced is one:
+vampire does not look inside it either.
+-/
+def auxDefinition (kind : Name) (value : Expr) (reducible : Bool := false) : MetaM Expr := do
+  let value ← instantiateMVars value
+  if value.hasMVar then throwError "cannot define{indentExpr value}\nwhile it has metavariables"
+  let locals ← closureOf value
+  let closed ← mkLambdaFVars locals value
+  let lps := (collectLevelParams {} closed).params
+  let name ← mkAuxDeclName kind
+  let closedType ← inferType closed
+  addDecl (.defnDecl (mkDefinitionValEx name lps.toList closedType closed .abbrev .safe [name]))
+  if reducible then setReducibleAttribute name
+  return mkAppN (mkConst name (lps.toList.map mkLevelParam)) locals
+
+/--
+Binds the symbol vampire introduced, `name`, to `definition`: what gave it its
+meaning, a function of the symbol's arguments. Once, and read back after.
+-/
+def defineIntroduced (name : String) (definition : Expr) : ReconstructM PUnit := do
+  if (← get).introduced.contains name then return
+  -- Reducible: what vampire defined is compared through to what it says,
+  -- as it always was, where a witness or a block's body never needs to be.
+  let standsFor ← auxDefinition `_defined definition (reducible := true)
+  modify fun s => { s with introduced := s.introduced.insert name standsFor }
+
+/-- Whether `n` is a definition `defineIntroduced` made. -/
+def isIntroducedDefinition : Name → Bool
+  | .str _ s => s.startsWith "_defined"
   | _ => false
 
-/-- `e` with every mark `markedLinMul` put on it taken off. -/
-partial def unmarkLinMul (e : Expr) : Expr :=
-  match e with
-  | .app f a =>
-    let f := if isMarkedLinMul f then f.mdataExpr! else f
-    .app (unmarkLinMul f) (unmarkLinMul a)
-  | .mdata d b => if isMarkedLinMul e then unmarkLinMul b else .mdata d (unmarkLinMul b)
-  | .lam n d b bi => .lam n (unmarkLinMul d) (unmarkLinMul b) bi
-  | .forallE n d b bi => .forallE n (unmarkLinMul d) (unmarkLinMul b) bi
-  | .letE n τ v b nd => .letE n (unmarkLinMul τ) (unmarkLinMul v) (unmarkLinMul b) nd
-  | .proj s i b => .proj s i (unmarkLinMul b)
-  | _ => e
+/--
+`e` with what vampire defined unfolded -- a named formula, an equality proxy,
+a defined function -- and `$lin_mul` read as the product: what says the
+equation or comparison such a symbol stands for, for what has to see it.
+`only` picks which of those.
+-/
+def unfoldDefinitions (e : Expr)
+    (only : Name → Bool := fun n => isIntroducedDefinition n || n == ``linMul) : MetaM Expr :=
+  Meta.transform e (pre := fun t => do
+    let .const n us := t.getAppFn | return .continue
+    unless only n do return .continue
+    let some info := (← getEnv).find? n | return .continue
+    let value ← instantiateValueLevelParams info us
+    return .visit (value.beta t.getAppArgs))
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

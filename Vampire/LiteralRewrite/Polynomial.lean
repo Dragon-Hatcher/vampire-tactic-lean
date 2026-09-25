@@ -198,9 +198,6 @@ def floorArg? (e : Expr) : Option Expr :=
 vampire's normalizer is, which only matters to where it looks.
 -/
 partial def normalize (e : Expr) : MetaM (Expr × Normalized) := do
-  -- ALASCA's `k * t` is a product to the normalizer.
-  let e := if e.isApp && Vampire.Reconstruct.isMarkedLinMul e.appFn! then
-    mkApp e.appFn!.mdataExpr! e.appArg! else e
   let α ← instantiateMVars (← inferType e)
   let rendered (t : Expr) : MetaM Nf := do
     let (β, n) ← normalize t
@@ -218,6 +215,9 @@ partial def normalize (e : Expr) : MetaM (Expr × Normalized) := do
       normalizeAdd (← normalize a).2 (← normalizeMinus α (← normalize b).2)
     | (``HMul.hMul, #[_, _, _, _, a, b]) => do
       normalizeMul α (← normalize a).2 (← normalize b).2
+    -- ALASCA's `$lin_mul` is a product to the normalizer: `ifLinMul`.
+    | (``Vampire.Reconstruct.linMul, #[_, _, k, t]) => do
+      normalizeMul α (← normalize k).2 (← normalize t).2
     | (``Neg.neg, #[_, _, a]) => do normalizeMinus α (← normalize a).2
     | (``HDiv.hDiv, #[_, _, _, _, a, b]) =>
       if integral α then do pure (.pre 1 #[← func (.quot .euclidean) #[a, b]])
@@ -416,12 +416,12 @@ with the numeral), and the factors as a product to the right, a power as the
 factor that many times.
 -/
 partial def parse (e : Expr) : MetaM Nf := do
-  let e := Vampire.Reconstruct.unmarkLinMul e
   let α ← instantiateMVars (← inferType e)
   if numeric α then
     if let some c := numeral? e then return numeralNf α c
     if e.isAppOfArity ``HAdd.hAdd 6 then return .poly α (← summands e)
-    if e.isAppOfArity ``HMul.hMul 6 then return .poly α #[← monom e]
+    if e.isAppOfArity ``HMul.hMul 6 || e.isAppOfArity ``Vampire.Reconstruct.linMul 4 then
+      return .poly α #[← monom e]
   if let some x := floorArg? e then return .func α .floor #[← parse x]
   if let some (op, a, b) := binary? e then
     match op with
@@ -439,6 +439,9 @@ where
     if let some c := numeral? m then return (c, #[])
     -- A sum at a monomial's place is a monomial whose one factor it is.
     if m.isAppOfArity ``HAdd.hAdd 6 then return (1, #[(← parse m, 1)])
+    -- A monomial's numeral times its factors: `$lin_mul`, `Monom::denormalize`.
+    if let (``Vampire.Reconstruct.linMul, #[_, _, k, t]) := m.getAppFnArgs then
+      if let some c := numeral? k then return (c, groupFactors (← factors t))
     if let (``HMul.hMul, #[_, _, _, _, k, t]) := m.getAppFnArgs then
       if let some c := numeral? k then return (c, groupFactors (← factors t))
     return (1, groupFactors (← factors m))

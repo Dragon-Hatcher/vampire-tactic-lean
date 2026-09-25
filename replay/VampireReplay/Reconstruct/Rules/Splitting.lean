@@ -86,7 +86,7 @@ def register (u : Vampire.Unit) : ReconstructM PUnit := do
   let definition ← withVars bound {} fun vars locals => do
     let inner ← halfHolds (splitVars u arguments) rest vars
     mkLambdaFVars locals (mkApp (mkConst ``Not) inner)
-  modify fun s => { s with introduced := s.introduced.insert name definition }
+  defineIntroduced name definition
 
 /--
 `general_splitting_component`: the half a general splitting kept, under the

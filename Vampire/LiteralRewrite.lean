@@ -39,23 +39,6 @@ private def interpreted? (rule : LiteralRewrite) (p : Expr) : MetaM (Option Outc
   | _ => pure none
 
 /--
-`b`, or the denied comparison it was put the same way round from, and the
-equivalence of the two.
-
-Theory normalization also rewrites formulas, whose atoms replay relates after
-putting both formulas the same way round, a denied comparison turned into the
-comparison the other way (`sameWayRound`): what it writes `¬(y < x)` arrives as
-`x ≤ y`. It never writes `≤` itself, so an atom `x ≤ y` of what it made is one
-of those.
--/
-private def deniedIfTurned (rule : LiteralRewrite) (b : Expr) : MetaM (Expr × Expr) := do
-  let some c := comparison? b | return (b, ← iffRefl b)
-  unless rule == .theoryNormalization && c.positive && c.rel == .le do
-    return (b, ← iffRefl b)
-  let denied := mkNot (← mkAppM ``LT.lt #[c.rhs, c.lhs])
-  return (denied, ← mkAppOptM ``not_lt #[some c.sort, none, some c.rhs, some c.lhs])
-
-/--
 `arithmetic_subterm_generalization`: the premise, instantiated at the
 substitution the step recorded (replay has done that), is the conclusion up to
 the identities of a ring -- a variable standing for `x - y` is `x - y` again
@@ -78,9 +61,7 @@ def literalIff (rule : LiteralRewrite) (a b : Expr) (factor : Int × Nat) : Meta
   let a' ← instantiateMVars a
   let b' ← instantiateMVars b
   let h ← match ← interpreted? rule a' with
-    | some (.literal q h) =>
-      let (b'', back) ← deniedIfTurned rule b'
-      trans h (← trans (← sameLiteral! rule.name a' q b'') back)
+    | some (.literal q h) => trans h (← sameLiteral! rule.name a' q b')
     | some (.constant value _) =>
       throwError "{rule.name} finds{indentExpr a'}\n{value}, but vampire made it{indentExpr b'}"
     | none => match rule with
@@ -89,6 +70,19 @@ def literalIff (rule : LiteralRewrite) (a b : Expr) (factor : Int × Nat) : Meta
       | .generalization => generalization a' b'
       | _ => cancellation a' b'
   mkExpectedTypeHint h (← mkAppM ``Iff #[a, b])
+
+/--
+What the procedure `rule` makes of the literal `a`, and `a ↔` it: for a step
+that rewrote a formula's atoms where they stand, which only theory
+normalization does.
+-/
+def literalRewritten (rule : LiteralRewrite) (a : Expr) : MetaM (Expr × Expr) := do
+  let a ← instantiateMVars a
+  match ← interpreted? rule a with
+  | some (.literal q h) => return (q, h)
+  | some (.constant true h) => return (mkConst ``True, h)
+  | some (.constant false h) => return (mkConst ``False, h)
+  | none => throwError "{rule.name} does not rewrite formulas"
 
 /-- `¬a`, where the procedure `rule` found the literal `a` false and dropped it. -/
 def literalFalse (rule : LiteralRewrite) (a : Expr) (factor : Int × Nat) : MetaM Expr := do
