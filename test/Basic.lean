@@ -103,3 +103,10 @@ example {ι : Type} [Inhabited ι] (p : Prop) (a b : ι) (f : ι → ι)
 example {ι : Type} [Inhabited ι] (f : ι → ι) (a : ι)
     (h : ∀ x, ∀ v : Prop, (v → f x = a) ∧ (¬v → f x = x)) (h2 : f a ≠ a) : False := by
   vampire [*]
+
+-- Options a user forces join the ones the tactic forces rather than replace
+-- them: forcing `shuffle_input` here would otherwise reorder the hypothesis's
+-- conjunction, and its input step would no longer be the hypothesis.
+#guard_msgs (drop info) in
+example (p q r s t : Prop) (h : p ∧ q ∧ r ∧ s ∧ t) (g : ¬t ∨ ¬s) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("forced_options", "si=on")]) [*]

@@ -68,6 +68,10 @@ structure Config where
   -/
   forced : Array (String × String) :=
     #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
+  -- Vampire takes one `forced_options`, the last given, so options a user
+  -- forces are merged into these rather than passed after them: passed after,
+  -- they would replace these, and a proof could then use what replay cannot
+  -- follow. Theirs go first, so that these hold whatever they say.
   /-- Extra vampire options, as `(name, value)` pairs of its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/
@@ -81,10 +85,13 @@ def toArgs (cfg : Config) : Array String :=
     s!"schedule={cfg.schedule}",
     s!"heartbeats={cfg.heartbeats}", s!"wall_limit={cfg.wallLimit}", s!"cores={cfg.cores}"]
     ++ (if cfg.strategy.isEmpty then #[] else #[s!"strategy={cfg.strategy}"])
-    ++ (if cfg.forced.isEmpty then #[] else
-      #[s!"forced_options={String.intercalate ":" (cfg.forced.map
-        (fun (n, v) => s!"{n}={v}") |>.toList)}"])
-    ++ cfg.options.map fun (n, v) => s!"{n}={v}"
+    ++ (if forced.isEmpty then #[] else #[s!"forced_options={String.intercalate ":" forced.toList}"])
+    ++ (cfg.options.filter (!isForced ·.1)).map fun (n, v) => s!"{n}={v}"
+where
+  isForced (name : String) : Bool := name == "forced_options" || name == "fo"
+  /-- What a user forced, then what replay needs forced (see `forced`). -/
+  forced : Array String :=
+    (cfg.options.filter (isForced ·.1)).map (·.2) ++ cfg.forced.map fun (n, v) => s!"{n}={v}"
 
 end Config
 
