@@ -736,7 +736,7 @@ def polynomialFalse (p : Expr) : MetaM Expr := do
   let r ← evaluationSteps p
   let normal ← ringNormal (← IO.mkRef {}) r.expr
   -- `p = p₁ = nf`, so `¬nf → ¬p`.
-  let toNormal ← mkEqTrans (← match r.proof? with | some h => pure h | none => mkEqRefl p)
+  let toNormal ← mkEqTrans (← r.getProof)
     (← normal.getProof)
   let refuted ← refute normal.expr
   mkExpectedTypeHint (← mkAppM ``mt #[← mkAppM ``Eq.mp #[toNormal], refuted]) (mkNot p)
@@ -871,7 +871,6 @@ private def alascaDifference (c : Comparison) :
     MetaM (AlascaPredicate × Expr × Expr) := do
   let α := c.sort
   let zero ← wholeOf α 0
-  let isZero (e : Expr) := natLit? e == some 0
   -- `l < r` or `l ≤ r`, or `l = r` with `l` the zero side if there is one.
   let (pred, l, r, h₀) ← match c.rel with
     | .eq =>
@@ -974,7 +973,6 @@ def alascaNormalization (p q : Expr) (factor : Int × Nat) : MetaM Expr := do
   let some d := comparison? q
     | throwError "ALASCA normalized{indentExpr p}\ninto{indentExpr q}, which \
         compares no numbers"
-  let isZero (e : Expr) := natLit? e == some 0
   let written := if d.rel == .eq then (if isZero d.rhs then d.lhs else d.rhs) else d.rhs
   unless ← writes term written do
     throwError "ALASCA normalization makes{indentExpr (← term.toExpr)}\nof{indentExpr p}, \
@@ -983,7 +981,7 @@ def alascaNormalization (p q : Expr) (factor : Int × Nat) : MetaM Expr := do
   let kExpr ← numeralOf α k
   let scaled ← mkAppM ``HMul.hMul #[kExpr, written]
   let r ← evaluationSteps t
-  let same ← mkEqTrans (← match r.proof? with | some h => pure h | none => mkEqRefl t)
+  let same ← mkEqTrans (← r.getProof)
     (← ringEq! r.expr scaled)
   let zero ← wholeOf α 0
   let positive := pred != .neq
@@ -1029,7 +1027,7 @@ def alascaFalse (p : Expr) (factor : Int × Nat) : MetaM Expr := do
   -- `t R 0 ↔ ↑value · factor R 0`, decided.
   let r ← evaluationSteps t
   let tValue ← numeralOf α (value * mkRat factor.1 factor.2)
-  let same ← mkEqTrans (← match r.proof? with | some h => pure h | none => mkEqRefl t)
+  let same ← mkEqTrans (← r.getProof)
     (← ringEq! r.expr tValue)
   let atom ← alascaAtom pred α tValue
   let refuted ← byNumerals (mkNot atom)

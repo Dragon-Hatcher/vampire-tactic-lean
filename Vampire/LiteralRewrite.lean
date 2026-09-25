@@ -3,14 +3,15 @@ import Vampire.LiteralRewrite.Viras
 
 /-!
 The literal-wise simplifications: theory normalization, the three evaluations,
-ALASCA normalization and cancellation.
+ALASCA normalization, cancellation and arithmetic subterm generalization, and
+VIRAS quantifier elimination.
 
 Each rewrites a clause a literal at a time, and the worker records which
 literal of the conclusion each literal of the premise became, and which
 procedure rewrote it. Each procedure is ported (`LiteralRewrite.Interpreted`,
-`LiteralRewrite.Polynomial`): the port works out what the procedure makes of
-the premise's literal, that is checked against what vampire made, and the
-rewrite is proved step by step as the procedure made it.
+`LiteralRewrite.Polynomial`, `LiteralRewrite.Viras`): the port works out what
+the procedure makes of the premise's literal, that is checked against what
+vampire made, and the rewrite is proved step by step as the procedure made it.
 
 Kept apart from the replay because the replay is precompiled and imports no
 Mathlib; replay is handed `literalIff` and `literalFalse`.
@@ -30,14 +31,18 @@ private def _root_.Vampire.Reconstruct.LiteralRewrite.name : LiteralRewrite → 
   | .cancellation => "cancellation"
   | .generalization => "arithmetic subterm generalization"
 
-/-- What one of the procedures that rewrite a term an operation at a time makes
-of a literal. -/
+/--
+What one of the procedures that rewrite a term an operation at a time makes of
+a literal -- theory normalization, interpreted evaluation and pushing unary
+minus -- and `none` for the others, which rewrite a literal as a whole.
+-/
 private def interpreted? (rule : LiteralRewrite) (p : Expr) : MetaM (Option Outcome) :=
   match rule with
   | .theoryNormalization => some <$> theoryNormalization p
   | .interpretedEvaluation normalizing => some <$> interpretedEvaluation normalizing p
   | .pushUnaryMinus => some <$> pushUnaryMinus p
-  | _ => pure none
+  | .polynomialEvaluation | .alascaNormalization | .cancellation | .generalization =>
+    pure none
 
 /--
 `arithmetic_subterm_generalization`: the premise, instantiated at the
@@ -69,7 +74,9 @@ def literalIff (rule : LiteralRewrite) (a b : Expr) (factor : Int × Nat) : Meta
       | .polynomialEvaluation => polynomialEvaluation a' b'
       | .alascaNormalization => alascaNormalization a' b' factor
       | .generalization => generalization a' b'
-      | _ => cancellation a' b'
+      | .cancellation => cancellation a' b'
+      | .theoryNormalization | .interpretedEvaluation _ | .pushUnaryMinus =>
+        throwError "{rule.name} rewrote{indentExpr a'}\nas a whole literal, which it never does"
   mkExpectedTypeHint h (← mkAppM ``Iff #[a, b])
 
 /--
@@ -94,7 +101,9 @@ def literalFalse (rule : LiteralRewrite) (a : Expr) (factor : Int × Nat) : Meta
     | none => match rule with
       | .polynomialEvaluation => polynomialFalse a'
       | .alascaNormalization => alascaFalse a' factor
-      | _ => throwError "{rule.name} never drops a literal, but dropped{indentExpr a'}"
+      | .cancellation | .generalization | .theoryNormalization | .interpretedEvaluation _
+      | .pushUnaryMinus =>
+        throwError "{rule.name} never drops a literal, but dropped{indentExpr a'}"
   mkExpectedTypeHint h (mkNot a)
 
 end Vampire.LiteralRewrite

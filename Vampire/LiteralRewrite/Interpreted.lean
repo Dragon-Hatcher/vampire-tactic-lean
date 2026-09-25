@@ -223,7 +223,7 @@ private def evaluationStep (e : Expr) : MetaM (Option (Expr × Expr)) := do
 private def normalizeInequality (p : Expr) : MetaM (Expr × Expr) := do
   let some c := comparison? p | return (p, ← iffRefl p)
   unless c.rel == .lt do return (p, ← iffRefl p)
-  let isZero := natLit? c.lhs == some 0
+  let lhsZero := isZero c.lhs
   if integral c.sort && !c.positive then
     -- `¬(a < b) ↔ b ≤ a ↔ b < a + 1 ↔ 0 < a + 1 + -b`.
     let a1 ← mkAppM ``HAdd.hAdd #[c.lhs, ← wholeOf c.sort 1]
@@ -231,7 +231,7 @@ private def normalizeInequality (p : Expr) : MetaM (Expr × Expr) := do
     let addOne ← mkAppM ``Iff.symm #[← mkAppOptM ``Int.lt_add_one_iff #[some c.rhs, some c.lhs]]
     let (atom, diff) ← againstZero c.sort c.rhs a1
     return (atom, ← trans notLt (← trans addOne diff))
-  if isZero then return (p, ← iffRefl p)
+  if lhsZero then return (p, ← iffRefl p)
   let (atom, h) ← againstZero c.sort c.lhs c.rhs
   if c.positive then return (atom, h)
   return (mkNot atom, ← negated h)

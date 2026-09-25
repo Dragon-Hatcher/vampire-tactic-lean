@@ -37,6 +37,9 @@ def natLit? (e : Expr) : Option Nat :=
   | (``OfNat.ofNat, #[_, .lit (.natVal n), _]) => some n
   | _ => none
 
+/-- Whether a term is the numeral zero. -/
+def isZero (e : Expr) : Bool := natLit? e == some 0
+
 /-- A whole numeral: `n`, or `-n` for a positive `n`, as vampire writes one. -/
 def wholeNumeral? (e : Expr) : Option Int :=
   match natLit? e with
@@ -189,17 +192,6 @@ def ringNormal (state : IO.Ref AtomM.State) (e : Expr) : MetaM Simp.Result := do
   -- `e' = nf` is `e = nf`: `linMul` unfolds to the product.
   return { expr := r.expr, proof? := some (← mkExpectedTypeHint (← r.getProof) (← mkEq e r.expr)) }
 
-/-- `a = b` by putting both into ring normal form, the atoms numbered alike. -/
-private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
-  let state ← IO.mkRef {}
-  let ra ← ringNormal state a
-  let rb ← ringNormal state b
-  -- Up to instances: a numeral in the normal form is built from whichever
-  -- instance path its side came with.
-  unless ra.expr == rb.expr || (← withReducibleAndInstances (isDefEq ra.expr rb.expr)) do
-    return none
-  return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
-
 /--
 `a = b` for two terms, or two statements, that are one up to the identities
 of a commutative ring: both are put into ring normal form, the atoms numbered
@@ -208,7 +200,14 @@ vampire's has already decided on, never what decides it.
 -/
 def ringEq (a b : Expr) : MetaM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
-  ringEqNormal a b
+  let state ← IO.mkRef {}
+  let ra ← ringNormal state a
+  let rb ← ringNormal state b
+  -- Up to instances: a numeral in the normal form is built from whichever
+  -- instance path its side came with.
+  unless ra.expr == rb.expr || (← withReducibleAndInstances (isDefEq ra.expr rb.expr)) do
+    return none
+  return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
 
 /-- `ringEq`, failing where the two are not one. -/
 def ringEq! (a b : Expr) : MetaM Expr := do

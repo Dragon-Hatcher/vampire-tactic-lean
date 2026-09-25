@@ -68,13 +68,12 @@ for a literal that is none of those, which VIRAS leaves as it is.
 -/
 def complement? (x p : Expr) : MetaM (Option Complement) := do
   let some c := comparison? p | return none
-  let isZero (e : Expr) := natLit? e == some 0
   let (symbol, s) ← match c.rel, c.positive with
     | .lt, true => if isZero c.lhs then pure (Symbol.geq, c.rhs) else return none
     | .le, true => if isZero c.lhs then pure (Symbol.gt, c.rhs) else return none
     | .eq, positive =>
-      let s := if isZero c.rhs then c.lhs else if isZero c.lhs then c.rhs else c.lhs
       unless isZero c.rhs || isZero c.lhs do return none
+      let s := if isZero c.rhs then c.lhs else c.rhs
       pure (if positive then Symbol.neq else Symbol.eq, s)
     | _, _ => return none
   -- The complement's term is `-s`, so its slope is `s`'s negated.
@@ -156,11 +155,7 @@ private def sameStatement (a b : Expr) : MetaM Bool := return (← ringEq a b).i
 
 /-- A proof of `False` from `facts` and nothing but linear arithmetic. -/
 private def byLinarith (facts : Array Expr) : MetaM Expr := do
-  let facts ← facts.mapM fun f => do
-    let stated ← instantiateMVars (← inferType f)
-    let unfolded ← unfoldDefinitions stated
-    if unfolded == stated then return f
-    mkExpectedTypeHint f unfolded
+  let facts ← facts.mapM unfoldFact
   let proof ← mkFreshExprMVar (mkConst ``False)
   Mathlib.Tactic.Linarith.linarith true facts.toList {} proof.mvarId!
   instantiateMVars proof
@@ -360,11 +355,7 @@ where
   byLinarithGoal (goal : Expr) (facts : Array Expr) : MetaM Expr := do
     -- Unfolded as the facts are, so that the two speak of the same atoms.
     let proof ← mkFreshExprMVar (← unfoldDefinitions goal)
-    let facts ← facts.mapM fun f => do
-      let stated ← instantiateMVars (← inferType f)
-      let unfolded ← unfoldDefinitions stated
-      if unfolded == stated then return f
-      mkExpectedTypeHint f unfolded
+    let facts ← facts.mapM unfoldFact
     Mathlib.Tactic.Linarith.linarith true facts.toList {} proof.mvarId!
     mkExpectedTypeHint (← instantiateMVars proof) goal
   byCasesOn (cond goal : Expr) (yes no : Expr → MetaM Expr) : MetaM Expr := do

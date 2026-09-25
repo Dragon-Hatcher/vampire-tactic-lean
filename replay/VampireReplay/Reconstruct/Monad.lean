@@ -374,6 +374,13 @@ def unfoldDefinitions (e : Expr)
     let value ← instantiateValueLevelParams info us
     return .visit (value.beta t.getAppArgs))
 
+/-- `fact`, restated as what it says with `unfoldDefinitions` applied. -/
+def unfoldFact (fact : Expr) : MetaM Expr := do
+  let stated ← instantiateMVars (← inferType fact)
+  let unfolded ← unfoldDefinitions stated
+  if unfolded == stated then return fact
+  mkExpectedTypeHint fact unfolded
+
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do
   if let some e := (← read).symbols.symbols[name]? then return e

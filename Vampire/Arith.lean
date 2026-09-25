@@ -146,18 +146,16 @@ integers, the rationals and the reals are; a sort that does not cancel has no
 instance and gets nothing.
 -/
 def cancelling (x z w : Expr) : MetaM (Option Expr) := do
-  try commitIfNoEx do
-    let product ← mkEq (← mkAppM ``HMul.hMul #[x, z]) (← mkAppM ``HMul.hMul #[x, w])
-    -- What is left of the lemma once its implicit arguments are taken is
-    -- `a ≠ 0 → a * b = a * c → b = c`. Unifying the second hypothesis with
-    -- `x * z = x * w` settles `a`, `b`, `c` and the multiplication; the zero
-    -- and the cancellation instance are then synthesized, and a sort that
-    -- does not cancel has none.
-    instantiated ``mul_left_cancel₀ fun stated => do
-      let .forallE _ _ (.forallE _ hypothesis _ _) _ := stated | return false
-      if hypothesis.hasLooseBVars then return false
-      isDefEq hypothesis product
-  catch _ => return none
+  let product ← mkEq (← mkAppM ``HMul.hMul #[x, z]) (← mkAppM ``HMul.hMul #[x, w])
+  -- What is left of the lemma once its implicit arguments are taken is
+  -- `a ≠ 0 → a * b = a * c → b = c`. Unifying the second hypothesis with
+  -- `x * z = x * w` settles `a`, `b`, `c` and the multiplication; the zero
+  -- and the cancellation instance are then synthesized, and a sort that
+  -- does not cancel has none.
+  instantiated ``mul_left_cancel₀ fun stated => do
+    let .forallE _ _ (.forallE _ hypothesis _ _) _ := stated | return false
+    if hypothesis.hasLooseBVars then return false
+    isDefEq hypothesis product
 
 /--
 The facts and the claim with each local a fact equates to something without it
@@ -215,11 +213,7 @@ def contradiction (facts : Array Expr) (claim : Option Expr) : MetaM Expr := do
   -- What vampire defined, and ALASCA's products, unfolded: a proxy applied is
   -- an equation and `$lin_mul` a product only once they are, and no procedure
   -- looks inside a definition.
-  let facts ← facts.mapM fun fact => do
-    let stated ← instantiateMVars (← inferType fact)
-    let unfolded ← Vampire.Reconstruct.unfoldDefinitions stated
-    if unfolded == stated then return fact
-    mkExpectedTypeHint fact unfolded
+  let facts ← facts.mapM Vampire.Reconstruct.unfoldFact
   let claim ← claim.mapM fun c => do Vampire.Reconstruct.unfoldDefinitions (← instantiateMVars c)
   let (facts, claim, back) ← substituted facts claim
   back <| ← match claim with
