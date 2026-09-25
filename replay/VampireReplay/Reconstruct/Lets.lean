@@ -78,6 +78,47 @@ private partial def abstractBound (index : Std.HashMap FVarId Nat) (bound : Std.
   return result
 
 /--
+`es` with every binder's name and binder info made one, each shared subterm
+visited once.
+-/
+private unsafe def eraseBindersImpl (es : Array Expr) : Array Expr := Id.run do
+  let rec go (e : Expr) : StateM (Lean.PtrMap Expr Expr) Expr := do
+    if let some done := (← get).find? e then return done
+    let result ← match e with
+      | .app f a => do pure (e.updateApp! (← go f) (← go a))
+      | .lam n d b bi => do
+        let (d', b') := (← go d, ← go b)
+        pure (if n == `x && bi == .default && ptrEq d d' && ptrEq b b' then e
+          else .lam `x d' b' .default)
+      | .forallE n d b bi => do
+        let (d', b') := (← go d, ← go b)
+        pure (if n == `x && bi == .default && ptrEq d d' && ptrEq b b' then e
+          else .forallE `x d' b' .default)
+      | .letE n t v b nondep => do
+        let (t', v', b') := (← go t, ← go v, ← go b)
+        pure (if n == `x && ptrEq t t' && ptrEq v v' && ptrEq b b' then e
+          else .letE `x t' v' b' nondep)
+      | .mdata _ b => do pure (e.updateMData! (← go b))
+      | .proj _ _ b => do pure (e.updateProj! (← go b))
+      | _ => pure e
+    modify (·.insert e result)
+    return result
+  (es.mapM go).run' (Lean.mkPtrMap)
+
+/--
+`es` with every binder's name and binder info made one.
+
+They mean nothing to the kernel, and `==` on terms -- what every map keyed by
+term goes by -- ignores them too, so two terms differing only there are one
+term to those maps. They are two to `ShareCommon`, though, and a lookup that
+meets both compares them in full; over a proof whose quantified formulas were
+rebuilt under a binder named otherwise, or read back off a lemma's statement,
+that was a fifth of its subterms. Erased, sharing makes them one object.
+-/
+@[implemented_by eraseBindersImpl]
+opaque eraseBinders (es : Array Expr) : Array Expr
+
+/--
 `let x₀ := v₀; …; let xₙ := vₙ; body`, over let-bound locals `bound`, each of
 whose values and types mentions only the locals before it.
 
@@ -108,7 +149,12 @@ def bindLets (bound : Array Expr) (body : Expr) (share : Bool := false) :
     let decl ← id.getDecl
     let some value := decl.value? | throwError "a let-bound local has no value"
     unshared := unshared.push (← instantiateMVars value) |>.push (← instantiateMVars decl.type)
-  let terms ← if share then IO.lazyPure fun _ => ShareCommon.shareCommon' unshared
+  -- Shared once to fold the copies together, then with the binders' names
+  -- erased, which makes one term of those that differ only there
+  -- (`eraseBinders`); erasing walks each shared subterm once.
+  let terms ← if share then do
+      let shared ← IO.lazyPure fun _ => ShareCommon.shareCommon' unshared
+      IO.lazyPure fun _ => ShareCommon.shareCommon' (eraseBinders shared)
     else pure unshared
   let (abstracted, s) := (abstractBound index set bound.size terms[0]! 0).run {}
   let mut mentions := s.mentions
@@ -238,6 +284,12 @@ the kernel checks each. Bound above them all, it is one local, used by index.
 Wants `e` maximally shared, as what it keeps is by subterm.
 -/
 def hoistClosed (e : Expr) : MetaM Expr := do
+  -- The inference cache is keyed by term, and replay has filled it with the
+  -- terms it built before the proof was shared -- copies of these very
+  -- subterms, equal to them but other objects, so that a lookup meeting one
+  -- compares the two in full. Hoisting infers over the shared proof alone, so
+  -- it starts from an empty cache, where equal terms are the same object.
+  modifyThe Meta.State fun s => { s with cache := { s.cache with inferType := {} } }
   let uses := ((countUses e).run {}).2
   let (body, s) ← (hoist e).run { uses }
   let index := Std.HashMap.ofList s.locals.toList.zipIdx

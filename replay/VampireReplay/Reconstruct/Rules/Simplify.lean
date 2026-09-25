@@ -74,32 +74,39 @@ that is merely dropped, which is the order vampire settles the two in: a
 junction with both loses to the one that absorbs it. Dropping every argument
 leaves the unit, which is what vampire returns for a junction left empty.
 -/
-private partial def absorbUnits (isAnd : Bool) (parts : Array Expr) :
+private def absorbUnits (isAnd : Bool) (parts : Array Expr) :
     ReconstructM (Expr × Option Expr) := do
   let (fn, unit) := if isAnd then (``And, ``True) else (``Or, ``False)
   let dropped := mkConst unit
   let absorbing := mkConst (if isAnd then ``False else ``True)
-  let some head := parts[0]? | throwError "a junction with no arguments"
-  if parts.size == 1 then
-    return (head, none)
-  let rest := parts.extract 1 parts.size
-  let (tail, tailProof) ← absorbUnits isAnd rest
-  -- The tail absorbed, the junction still standing: what is left is to settle
-  -- this one argument against it.
-  let congruence ← congr2? (if isAnd then ``and_congr else ``or_congr)
-    head (junction fn unit rest) none tailProof
-  let compose (result : Expr) (absorption : Expr) : ReconstructM (Expr × Option Expr) :=
-    return (result, ← iffTrans? congruence (some absorption))
-  if head == absorbing then
-    compose absorbing (← ofCore (if isAnd then ``false_and else ``true_or) #[tail])
-  else if tail == absorbing then
-    compose absorbing (← ofCore (if isAnd then ``and_false else ``or_true) #[head])
-  else if head == dropped then
-    compose tail (← ofCore (if isAnd then ``true_and else ``false_or) #[tail])
-  else if tail == dropped then
-    compose head (← ofCore (if isAnd then ``and_true else ``or_false) #[head])
-  else
-    return (mkApp2 (mkConst fn) head tail, congruence)
+  let some last := parts.back? | throwError "a junction with no arguments"
+  -- From the last argument up, each settled against the tail after it
+  -- already absorbed; the tails as given are built once rather than again at
+  -- every argument, which over a wide junction is the square of its width.
+  let given := suffixJunctions fn unit parts
+  let mut tail := last
+  let mut tailProof : Option Expr := none
+  for k in [0 : parts.size - 1] do
+    let i := parts.size - 2 - k
+    let head := parts[i]!
+    let congruence ← congr2? (if isAnd then ``and_congr else ``or_congr)
+      head given[i + 1]! none tailProof
+    let compose (result : Expr) (absorption : Expr) : ReconstructM (Expr × Option Expr) :=
+      return (result, ← iffTrans? congruence (some absorption))
+    let (result, proof) ←
+      if head == absorbing then
+        compose absorbing (← ofCore (if isAnd then ``false_and else ``true_or) #[tail])
+      else if tail == absorbing then
+        compose absorbing (← ofCore (if isAnd then ``and_false else ``or_true) #[head])
+      else if head == dropped then
+        compose tail (← ofCore (if isAnd then ``true_and else ``false_or) #[tail])
+      else if tail == dropped then
+        compose head (← ofCore (if isAnd then ``and_true else ``or_false) #[head])
+      else
+        pure (mkApp2 (mkConst fn) head tail, congruence)
+    tail := result
+    tailProof := proof
+  return (tail, tailProof)
 
 mutual
 

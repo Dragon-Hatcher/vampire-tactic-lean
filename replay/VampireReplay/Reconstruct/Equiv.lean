@@ -178,28 +178,46 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
 Absorbing a truth value leaves a junction with fewer parts than it found, which
 is what simplifying one does wherever in a formula it sits.
 -/
-private partial def withoutUnits (fn unit : Name) (parts : Array Expr) :
+private def withoutUnits (fn unit : Name) (parts : Array Expr) :
     ReconstructM (Array Expr × Expr) := do
-  let some head := parts[0]?
-    | return (#[], ← mkAppOptM ``Iff.refl #[some (mkConst unit)])
-  if parts.size == 1 then
-    return (if head.isConstOf unit then #[] else #[head],
-      ← mkAppOptM ``Iff.refl #[some head])
+  let some last := parts.back?
+    | return (#[], mkApp (mkConst ``Iff.refl) (mkConst unit))
   let congruence := if fn == ``And then ``and_congr else ``or_congr
   let absorbHead := if fn == ``And then ``true_and else ``false_or
   let absorbTail := if fn == ``And then ``and_true else ``or_false
-  let rest := parts.extract 1 parts.size
-  let tail := junction fn unit rest
-  let (keptRest, saysRest) ← withoutUnits fn unit rest
-  if head.isConstOf unit then
-    return (keptRest, ← mkAppM ``Iff.trans
-      #[← mkAppM ``iff_of_eq #[mkApp (mkConst absorbHead) tail], saysRest])
-  let onTail ← mkAppM congruence
-    #[← mkAppOptM ``Iff.refl #[some head], saysRest]
-  if keptRest.isEmpty then
-    return (#[head], ← mkAppM ``Iff.trans
-      #[onTail, ← mkAppM ``iff_of_eq #[mkApp (mkConst absorbTail) head]])
-  return (#[head] ++ keptRest, onTail)
+  let unitE := mkConst unit
+  let iffOfEq (a b h : Expr) : Expr := mkApp3 (mkConst ``iff_of_eq) a b h
+  let iffTrans (a b c ab bc : Expr) : Expr := mkApp5 (mkConst ``Iff.trans) a b c ab bc
+  -- From the last part up: `tails[k]` is the junction of the parts from `k` on
+  -- as given, built once, and `kept` what is left of it, `says` relating the
+  -- two. Rebuilding the tail at every part is the square of the width.
+  let tails := suffixJunctions fn unit parts
+  -- What is kept, last part first.
+  let mut kept : Array Expr := if last.isConstOf unit then #[] else #[last]
+  let mut keptJunction : Expr := last
+  let mut says := mkApp (mkConst ``Iff.refl) last
+  for k in [0 : parts.size - 1] do
+    let i := parts.size - 2 - k
+    let head := parts[i]!
+    let tail := tails[i + 1]!
+    if head.isConstOf unit then
+      -- `unit ∘ tail = tail`, and the tail is what it keeps.
+      says := iffTrans (mkApp2 (mkConst fn) head tail) tail keptJunction
+        (iffOfEq (mkApp2 (mkConst fn) head tail) tail (mkApp (mkConst absorbHead) tail)) says
+    else
+      let onTail := congr2 congruence head head tail keptJunction
+        (mkApp (mkConst ``Iff.refl) head) says
+      if kept.isEmpty then
+        -- Nothing after it kept: `head ∘ unit = head`.
+        says := iffTrans (mkApp2 (mkConst fn) head tail) (mkApp2 (mkConst fn) head unitE) head
+          onTail (iffOfEq (mkApp2 (mkConst fn) head unitE) head (mkApp (mkConst absorbTail) head))
+        keptJunction := head
+      else
+        says := onTail
+        keptJunction := mkApp2 (mkConst fn) head keptJunction
+      kept := kept.push head
+  -- Collected from the last part up.
+  return (kept.reverse, says)
 
 /-- Whether a junction is the right-nested one over exactly these parts. -/
 private def rightNested (fn : Name) (e : Expr) (parts : Array Expr) : Bool :=

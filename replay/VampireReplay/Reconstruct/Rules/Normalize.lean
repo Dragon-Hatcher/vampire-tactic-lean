@@ -55,20 +55,33 @@ private def proofOf (part : Expr × Expr × Option Expr) : ReconstructM Expr :=
 
 /--
 De Morgan over a junction, one argument at a time, then the congruence of the
-arguments: what a junction at negative polarity comes to.
+arguments: what a junction at negative polarity comes to. `¬(g₀ ∘ … ∘ gₙ)` is
+`¬g₀ • ¬(g₁ ∘ …)`, the first argument's proof and the rest's give `r₀ • (r₁ • …)`,
+and so on down.
+
+Built from the last argument up, over the suffixes of what was given (`gs`) and
+of what the arguments became (`rs`), each built once: rebuilding the rest of
+the junction at every argument, and unifying a lemma with it, is the square of
+its width -- and a clause's disjunction can be a thousand literals wide.
 -/
-private partial def distributed (deMorgan congruence fn unit : Name)
-    (givens : Array Expr) (parts : Array (Expr × Expr × Option Expr)) (i : Nat) :
+private def distributed (deMorgan congruence fn unit resultFn resultUnit : Name)
+    (givens results : Array Expr) (parts : Array (Expr × Expr × Option Expr)) :
     ReconstructM Expr := do
-  let some part := parts[i]? | throwError "missing argument"
-  let proof ← proofOf part
-  if i + 1 == parts.size then return proof
-  let some head := givens[i]? | throwError "missing argument"
-  let tail := junction fn unit (givens.extract (i + 1) givens.size)
-  mkAppM ``Iff.trans
-    #[← mkAppOptM deMorgan #[some head, some tail],
-      ← mkAppM congruence
-        #[proof, ← distributed deMorgan congruence fn unit givens parts (i + 1)]]
+  let n := parts.size
+  let gs := suffixJunctions fn unit givens
+  let rs := suffixJunctions resultFn resultUnit results
+  let denied (e : Expr) : Expr := mkApp (mkConst ``Not) e
+  let some last := parts.back? | throwError "a junction with no arguments"
+  let mut proof ← proofOf last
+  for k in [0 : n - 1] do
+    let i := n - 2 - k
+    -- `¬gs[i] ↔ ¬givens[i] • ¬gs[i+1] ↔ results[i] • rs[i+1] = rs[i]`.
+    let split := mkApp2 (mkConst resultFn) (denied givens[i]!) (denied gs[i + 1]!)
+    let byParts := congr2 congruence (denied givens[i]!) results[i]! (denied gs[i + 1]!)
+      rs[i + 1]! (← proofOf parts[i]!) proof
+    proof := mkApp5 (mkConst ``Iff.trans) (denied gs[i]!) split rs[i]!
+      (mkApp2 (mkConst deMorgan) givens[i]! gs[i + 1]!) byParts
+  return proof
 
 /--
 What a formula normalised at a polarity says as it was given: the source is the
@@ -173,7 +186,7 @@ where
           else (``not_or, ``and_congr)
         let (givenFn, givenUnit) := if isAnd then (``And, ``True) else (``Or, ``False)
         return (source, result,
-          some (← distributed deMorgan congruence givenFn givenUnit givens parts 0))
+          some (← distributed deMorgan congruence givenFn givenUnit fn unit givens results parts))
   | .imp =>
     let partL ← normalizePart vars (← sub 0) !polarity
     let partR ← normalizePart vars (← sub 1) polarity
