@@ -96,32 +96,6 @@ def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
   return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])
 
 /--
-`a = b`, where the two are one term but at pairs of subterms `equal` proves
-equal, or `none` where they are not.
-
-The pairs say where the two differ, so this descends both at once and takes a
-pair wherever it meets one; nothing is searched for.
--/
-partial def equalUnder (equal : Array (Expr × Expr × Expr)) (a b : Expr) :
-    ReconstructM (Option Expr) := do
-  if a == b then return some (← mkEqRefl a)
-  for (x, y, p) in equal do
-    if x == a && y == b then return some p
-    if x == b && y == a then return some (← mkEqSymm p)
-  unless a.isApp && b.isApp do return none
-  let as := a.getAppArgs
-  let bs := b.getAppArgs
-  unless a.getAppFn == b.getAppFn && as.size == bs.size do return none
-  let mut proof ← mkEqRefl a.getAppFn
-  for (x, y) in as.zip bs do
-    if x == y then
-      proof ← mkCongrFun proof x
-    else
-      let some p ← equalUnder equal x y | return none
-      proof ← mkCongr proof p
-  return some proof
-
-/--
 Whether ALASCA's unifier reads a term as arithmetic: a sum, a product, a
 difference, a negation or a numeral, rather than an uninterpreted symbol
 applied, which it unifies argument by argument.
@@ -187,7 +161,8 @@ way round, so the other may have to be turned about first.
 
 @b equal are the pairs an abstracting unifier deferred, with what says each is
 equal, for a step that resolved two literals it did not make one: they are then
-complementary up to those pairs.
+complementary up to those pairs -- and up to arithmetic, for ALASCA's
+(`equalModuloRing`).
 -/
 def closeComplementary (target h₁ h₂ : Expr)
     (equal : Array (Expr × Expr × Expr) := #[]) : ReconstructM Expr := do
@@ -197,11 +172,12 @@ def closeComplementary (target h₁ h₂ : Expr)
     let mut candidates := #[positive]
     if let some flipped ← flipEquality positive then candidates := candidates.push flipped
     for candidate in candidates do
-      let stated ← instantiateMVars (← inferType candidate)
-      if ← isDefEq refuted stated then return some candidate
-      if !equal.isEmpty then
-        if let some same ← equalUnder equal stated refuted then
-          return some (← mkEqMP same candidate)
+      if ← isDefEq refuted (← instantiateMVars (← inferType candidate)) then
+        return some candidate
+    for candidate in candidates do
+      if let some same ←
+          equalModuloRing equal (← instantiateMVars (← inferType candidate)) refuted then
+        return some (← mkEqMP same candidate)
     return none
   for (negative, positive) in #[(h₁, h₂), (h₂, h₁)] do
     let some refuted := asNegation (← instantiateMVars (← inferType negative)) | continue

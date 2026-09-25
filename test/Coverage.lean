@@ -337,6 +337,70 @@ example (f g : ℝ → ℝ) (a : ℝ) (h1 : ∀ x, 2 * f x = x) (h2 : g (f a) �
   vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
     ("function_definition_elimination", "none")]) [*]
 
+-- ALASCA's demodulation by a unit equation, under an uninterpreted function.
+#guard_msgs (drop info) in
+example (f g : ℝ → ℝ) (p : ℝ → Prop) (a : ℝ) (h1 : ∀ x, f x = x + 1) (h2 : p (g (f a)))
+    (h3 : ¬ p (g (a + 1))) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("alasca_demodulation", "on"), ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's demodulation rewrites the whole clause: here the term is in two of
+-- its literals.
+#guard_msgs (drop info) in
+example (f g : ℝ → ℝ) (p q : ℝ → Prop) (a : ℝ) (h1 : f a = 2 * a) (h2 : p (g (f a)) ∨ q (f a))
+    (h3 : ¬ p (g (a + a))) (h4 : ¬ q (2 * a)) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("alasca_demodulation", "on"), ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's demodulation into an equation over an uninterpreted sort.
+#guard_msgs (drop info) in
+example (α : Type) (f : ℝ → ℝ) (g : ℝ → α) (a : ℝ) (b : α) (h1 : ∀ x, f x = x + 1)
+    (h2 : g (f a) = b) (h3 : g (a + 1) ≠ b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("alasca_demodulation", "on"), ("function_definition_elimination", "none")]) [*]
+
+-- Resolution by ALASCA's unifier, which solved `X + 1 = a` for `X`: the two
+-- literals are complementary as numbers.
+#guard_msgs (drop info) in
+example (p : ℝ → Prop) (a : ℝ) (h1 : ∀ x, p (x + 1)) (h2 : ¬ p a) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's Fourier–Motzkin by a unifier that solved `X + 1 = a`: the atoms
+-- are equal as numbers, not one term.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (a : ℝ) (h1 : ∀ x, f (x + 1) > 0) (h2 : f a < 0) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's inequality factoring, by a unifier that solved `X + 1 = Y + 2`.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (h1 : ∀ x y, f (x + 1) > 0 ∨ f (y + 2) > 0) (h2 : ∀ x y, f x ≤ 0 ∨ f y ≤ 0) :
+    False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("avatar", "off"), ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's equality factoring, by a unifier that solved `X + 1 = Y + 2`.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (h1 : ∀ x y, f (x + 1) = 0 ∨ f (y + 2) = 0) (h2 : ∀ x y, f x ≠ 0 ∨ f y ≠ 0) :
+    False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("avatar", "off"), ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's term factoring, by a unifier that solved `X + 1 = Y + 2`.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (h1 : ∀ x y, f (x + 1) + f (y + 2) > 0) (h2 : ∀ x y, f x + f y < 0) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("avatar", "off"), ("function_definition_elimination", "none")]) [*]
+
+-- ALASCA's superposition by a unifier that deferred `g X + g Y = g a + g b`,
+-- then term factoring under the same kind of constraint.
+#guard_msgs (drop info) in
+example (f g : ℝ → ℝ) (a b : ℝ) (h1 : ∀ x y, f (g x + g y) = x + y) (h2 : f (g a + g b) ≠ a + b) :
+    False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
 /-! ### VIRAS quantifier elimination -/
 
 -- A term and an infinitesimal: `x` just above `a`.

@@ -159,7 +159,7 @@
  *             into the clause it is building and each conjunct into a clause of
  *             its own, so a clause is one path through the conjunctions and
  *             this is that path
- *   uses      {premise, literal, term, flags, firstBinding, numBindings, to}: how a
+ *   uses      {premise, literal, term, flags, firstBinding, numBindings, other}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
  *             inference acted on or `NONE`, and `term` the index of the term it
@@ -170,10 +170,11 @@
  *             conclusion against the premises.
  *             flags: 1 = the term was rewritten throughout the premise rather
  *             than only in that literal, which is what simultaneous
- *             superposition does. `to` is what the equation acted on rewrote
- *             `term` to, when that is not its other side, or `NONE`: an
- *             arithmetic equation `k s + t = 0` rewrites `s` to `-t/k`. Like
- *             `term`, it is stated in the premise's variables
+ *             superposition does. `other` is a second term of the premise
+ *             the inference acted on, or `NONE`: what an arithmetic equation
+ *             `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; or
+ *             the atom a factoring unified `term` with. Like `term`, it is
+ *             stated in the premise's variables
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
  *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
@@ -1086,7 +1087,7 @@ struct Encoder {
         uses.push_back(use.flags);
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
         uses.push_back(static_cast<uint32_t>(use.bindings.size()));
-        uses.push_back(use.to.isEmpty() ? NONE : encodeTerm(use.to));
+        uses.push_back(use.other.isEmpty() ? NONE : encodeTerm(use.other));
         numUses++;
       }
     }
@@ -1140,7 +1141,7 @@ struct Encoder {
               boundSorts.set(term.var(), sort);
           }
         }
-        for (TermList t : {use.term, use.to})
+        for (TermList t : {use.term, use.other})
           if (t.isTerm())
             SortHelper::collectVariableSorts(const_cast<Term*>(t.term()),
               boundSorts);

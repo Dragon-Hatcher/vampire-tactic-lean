@@ -390,7 +390,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numUses] do
     optional "used term" (at_ uses 7 i 2) numTerms
     range "use bindings" (at_ uses 7 i 4) (at_ uses 7 i 5) numBindings
-    optional "rewritten-to term" (at_ uses 7 i 6) numTerms
+    optional "other used term" (at_ uses 7 i 6) numTerms
   for i in [0:numBindings] do index "binding" (at_ bindings 2 i 1) numTerms
   for i in [0:numPlacements] do
     range "placement entries" (at_ placements 4 i 2) (at_ placements 4 i 3)
@@ -591,11 +591,12 @@ structure PremiseUse where
   rewritesWholePremise : Bool
   bindings : Array (UInt32 × Term)
   /--
-  What the equation acted on rewrote `term` to, when that is not the
-  equation's other side: an arithmetic equation `k s + t = 0` rewrites `s` to
-  `-t/k`. Stated in the premise's variables, as `term` is.
+  A second term of the premise the inference acted on: what an arithmetic
+  equation `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; or the
+  atom a factoring unified `term` with. Stated in the premise's variables, as
+  `term` is.
   -/
-  to : Option Term
+  other : Option Term
 
 /--
 One step of the reasoning behind a congruence-closure conflict, which vampire
@@ -1187,7 +1188,7 @@ def premiseUses (u : Unit) : Array PremiseUse :=
     let flags := readU32 p.data (base + 12)
     let firstBinding := readU32 p.data (base + 16)
     let numBindings := readU32 p.data (base + 20)
-    let to := readU32 p.data (base + 24)
+    let other := readU32 p.data (base + 24)
     { premise := readU32 p.data base
       literal := if literal == none32 then none else some literal
       term := if term == none32 then none else some ⟨p, term⟩
@@ -1195,7 +1196,7 @@ def premiseUses (u : Unit) : Array PremiseUse :=
       bindings := Array.ofFn (n := numBindings.toNat) fun j =>
         let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
         (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩)
-      to := if to == none32 then none else some ⟨p, to⟩ }
+      other := if other == none32 then none else some ⟨p, other⟩ }
 
 /-- The steps this one was derived from. -/
 def parents (u : Unit) : Array Unit :=

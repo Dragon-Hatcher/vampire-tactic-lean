@@ -130,17 +130,21 @@ def refuteResolvedEquality (step : Step) (into : Into) (inner h : Expr) :
   let some (_, lhs, rhs) := inner.eq?
     | throwError "the literal resolved on is not an equality:{indentExpr inner}"
   if step.unit.constraints.isEmpty then
-    unless ← sameFormula lhs rhs do
+    if ← sameFormula lhs rhs then
+      return ← mkAppOptM ``absurd #[some inner, some into.whole, some (← mkEqRefl lhs), some h]
+    -- Or equal as numbers, which is what ALASCA's unifier makes of `X + 1` and
+    -- `a`.
+    let some made ← equalModuloRing #[] lhs rhs
       -- Vampire resolved an inequality between two terms no substitution
       -- makes one (https://github.com/vprover/vampire/issues/938): the premise
       -- gives the conclusion only of the terms that make them equal, so there
       -- is nothing here to replay.
-      throwError "step {step.unit.number}: vampire resolved{indentExpr inner}\n\
-        although no substitution makes its sides equal and no constraints were \
-        recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
-    return ← mkAppOptM ``absurd #[some inner, some into.whole, some (← mkEqRefl lhs), some h]
+      | throwError "step {step.unit.number}: vampire resolved{indentExpr inner}\n\
+          although no substitution makes its sides equal and no constraints were \
+          recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
+    return ← mkAppOptM ``absurd #[some inner, some into.whole, some made, some h]
   underConstraints step into fun equal => do
-    let some made ← equalUnder equal lhs rhs
+    let some made ← equalModuloRing equal lhs rhs
       | throwError "step {step.unit.number}: the sides of{indentExpr inner}\n\
           are not equal even assuming the unifier's deferred constraints"
     mkAppOptM ``absurd #[some inner, some into.whole, some made, some h]

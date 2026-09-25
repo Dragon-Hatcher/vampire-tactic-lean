@@ -82,8 +82,10 @@ def ofRule (step : Step) : ReconstructM Expr :=
   -- is left; the worker records it as equality resolution at that unifier.
   | .subsumptionEqualityResolution =>
     Resolution.equalityResolutionWithDeletion step
-  | .alascaFwdDemodulation => Arithmetic.theoryStep step
-  | .alascaBwdDemodulation => Arithmetic.theoryStep step
+  -- Backward demodulation builds its conclusion with the forward rule's name;
+  -- the two are one inference.
+  | .alascaFwdDemodulation => Rewrite.alascaDemodulation step
+  | .alascaBwdDemodulation => Rewrite.alascaDemodulation step
   | .innerRewriting => Rewrite.innerRewriting step
   | .condensation => Clause.condensation step
   | .evaluation => Arithmetic.literalwise step

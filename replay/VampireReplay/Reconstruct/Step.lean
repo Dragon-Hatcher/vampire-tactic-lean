@@ -68,6 +68,21 @@ def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   return (mkAppN proof args, ← sharedClause (← instantiateForall stated args))
 
 /--
+A term of a premise, `t`, as a step used it: at what the use bound the
+premise's variables to, and an arbitrary element for one it left unbound, as
+`instantiateAt` has them.
+-/
+def termAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars) (t : Term) :
+    ReconstructM Expr := do
+  let bound := Std.HashMap.ofList use.bindings.toList
+  let mut premiseVars : Vars := {}
+  for (v, sortName) in parent.varSorts do
+    premiseVars := premiseVars.insert v <| ← match bound[v]? with
+      | some image => term vars image
+      | none => do someElement (← sortType sortName)
+  term premiseVars t
+
+/--
 `vars`, a map of the conclusion's variables, with something of the right sort
 for each of @b bound not in it.
 

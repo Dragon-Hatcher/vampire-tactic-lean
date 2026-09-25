@@ -50,6 +50,19 @@ private def premisesOf (step : Step) (vars : Vars) :
   return out
 
 /--
+The atoms a step unified, each as the step used it: the terms its uses
+recorded, which only ALASCA's inferences record -- Fourier-Motzkin the atom of
+each premise, a factoring the two of its one premise.
+-/
+private def unifiedAtoms (step : Step) (vars : Vars) : ReconstructM (Array Expr) := do
+  let mut out := #[]
+  for (parent, i) in step.unit.parents.zipIdx do
+    let some use := step.useAt? i | continue
+    for t in #[use.term, use.other].filterMap id do
+      out := out.push (← termAt parent use vars t)
+  return out
+
+/--
 The roundings a formula speaks of: the floors and ceilings, cast back to the
 type they were taken at, and the conditionals truncation is stated with.
 
@@ -143,6 +156,7 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     return ← restate proof stated (← step.conclusion)
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
+    let atoms ← unifiedAtoms step (← coverVars vars step.unit.boundVarSorts)
     withInto target step.unit.clauseSize? fun into => do
     -- Each premise holds, so one of its literals does, which is a case; every
     -- case has to make the conclusion. A literal the step carried over is one
@@ -161,7 +175,23 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
             return ← into.placeAt placed k h
           go (facts.push (← plainly h)) (i + 1)) proof
     let statements := #[target] ++ premises.map (·.2)
-    withRoundings statements fun roundings => go roundings 0
+    let some first := atoms[0]? | return ← withRoundings statements fun roundings => go roundings 0
+    if atoms.all (· == first) then
+      return ← withRoundings statements fun roundings => go roundings 0
+    -- ALASCA's unifier works up to arithmetic, so the atoms it unified can be
+    -- equal as numbers rather than one term, which a procedure taking atoms
+    -- whole cannot see; and what it could not unify it left as literals of
+    -- the conclusion. Either one of those holds, or the atoms are equal, and
+    -- what says so is a fact for the numbers.
+    underConstraints step into fun equal => do
+      let same ← atoms.filterMapM fun a => do
+        if a == first then return none
+        let some p ← equalModuloRing equal a first
+          | throwError "step {step.unit.number}: the atoms it unified,{indentExpr a}\n\
+              and{indentExpr first}\nare not equal even up to arithmetic and the \
+              unifier's deferred constraints"
+        return some p
+      withRoundings statements fun roundings => go (roundings ++ same) 0
 
 /--
 `e` with each of its atoms replaced by what `rewrite` makes of it, and `e ↔`
