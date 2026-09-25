@@ -35,75 +35,109 @@ occurrences of that expression would replace ones the inference left alone.
 private inductive Tree where
   /-- An applied symbol, by the name TPTP gives it and what the goal has for
   it, which is nothing for a symbol TPTP interprets itself. `hash` is the
-  tree's, kept so that telling two trees apart is not walking both. -/
+  tree's, kept so that telling two trees apart is not walking both; `id` is
+  the node's own, one per term of vampire's as `TreeCache` builds them; `expr`
+  is what it states. -/
   | app (name : String) (head : Option Expr) (args : Array Tree) (hash : UInt64)
+      (id : Nat) (expr : Expr)
   | leaf (e : Expr)
 deriving Inhabited
 
 private def Tree.hash : Tree → UInt64
-  | .app _ _ _ h => h
+  | .app _ _ _ h _ _ => h
   | .leaf e => e.hash
 
-/-- An applied symbol, its hash worked out from its arguments' once. -/
-private def Tree.node (name : String) (head : Option Expr) (args : Array Tree) : Tree :=
-  .app name head args (args.foldl (fun h a => mixHash h a.hash) (Hashable.hash name))
+/-- What a tree states. -/
+private def Tree.toExpr : Tree → Expr
+  | .app _ _ _ _ _ e => e
+  | .leaf e => e
 
 /--
-Whether two trees are one. The hashes decide almost every pair that is not:
-`replacing` asks this of every node of a literal against the term rewritten,
-and comparing shapes there costs the product of their sizes.
+Whether two trees are one. The same node is, which is what one term of
+vampire's is; the hashes decide almost every other pair that is not, and only
+two trees built apart that say the same are walked.
 -/
 private partial def Tree.beq : Tree → Tree → Bool
   | .leaf a, .leaf b => a == b
-  | .app n h as ha, .app m k bs hb =>
-    ha == hb && n == m && h == k && as.size == bs.size
-      && (as.zip bs).all fun (a, b) => Tree.beq a b
+  | .app n h as ha i _, .app m k bs hb j _ =>
+    i == j || (ha == hb && n == m && h == k && as.size == bs.size
+      && (as.zip bs).all fun (a, b) => Tree.beq a b)
   | _, _ => false
 
 private instance : BEq Tree := ⟨Tree.beq⟩
 
-private partial def treeOf (vars : Vars) (bindings : Std.HashMap UInt32 Term)
-    (t : Term) : ReconstructM Tree := do
+/-- A symbol applied to what `args` state, as a term states it. -/
+private def applied (name : String) (head : Option Expr) (args : Array Expr) :
+    ReconstructM Expr := do
+  if let some interpretation ← interpreted name args then
+    return interpretation
+  let some head := head | throwIntroduced "the symbol" name
+  return mkAppN head args
+
+/--
+The trees one step builds, each term of vampire's once: by the term, and
+whether it is read through the use's bindings or is an image of them. Vampire
+shares its terms, and a tree built afresh at each occurrence of a shared
+subterm is exponential in how deep the sharing goes.
+-/
+private abbrev TreeCache := IO.Ref (Std.HashMap (UInt32 × Bool) Tree × Nat)
+
+private def TreeCache.new : ReconstructM TreeCache := IO.mkRef ({}, 0)
+
+private partial def treeOf (cache : TreeCache) (vars : Vars)
+    (bindings : Std.HashMap UInt32 Term) (t : Term) : ReconstructM Tree := do
   if t.isVar then
     match bindings[t.var]? with
-    | some image => treeOf vars {} image
+    | some image => return ← treeOf cache vars {} image
     | none =>
       let some x := vars[t.var]?
         | throwError "variable X{t.var} has no recorded sort"
       return .leaf x
-  else
-    let some symbol := t.symbol?
-      | throwError "term has unknown functor {t.functor}"
-    let head ← if ← resolvesSymbol symbol.name then some <$> symbolExpr symbol.name
-      else pure none
-    return .node symbol.name head (← t.args.mapM (treeOf vars bindings))
+  let key := (t.index, bindings.isEmpty)
+  if let some tree := (← cache.get).1[key]? then return tree
+  let some symbol := t.symbol?
+    | throwError "term has unknown functor {t.functor}"
+  let head ← if ← resolvesSymbol symbol.name then some <$> symbolExpr symbol.name
+    else pure none
+  let args ← t.args.mapM (treeOf cache vars bindings)
+  let expr ← applied symbol.name head (args.map (·.toExpr))
+  let (trees, id) ← cache.get
+  let hash := args.foldl (fun h a => mixHash h a.hash) (Hashable.hash symbol.name)
+  let tree := .app symbol.name head args hash id expr
+  cache.set (trees.insert key tree, id + 1)
+  return tree
 
-private partial def Tree.toExpr : Tree → ReconstructM Expr
-  | .leaf e => return e
-  | .app name head args _ => do
-    let args ← args.mapM Tree.toExpr
-    if let some interpretation ← interpreted name args then
-      return interpretation
-    let some head := head | throwIntroduced "the symbol" name
-    return mkAppN head args
-
-private partial def Tree.replacing (target : Tree) (x : Expr) : Tree → Tree
-  | t@(.leaf _) => if t == target then .leaf x else t
-  | t@(.app name head args _) =>
-    if t == target then .leaf x
-    else .node name head (args.map (Tree.replacing target x))
+/--
+What `tree` states with `target` replaced by `x` wherever it occurs, each node
+worked out once however often it is shared.
+-/
+private partial def replacing (target : Tree) (x : Expr) (tree : Tree) :
+    ReconstructM Expr := do
+  let seen ← IO.mkRef ({} : Std.HashMap Nat Expr)
+  let rec go (t : Tree) : ReconstructM Expr := do
+    if t == target then return x
+    match t with
+    | .leaf e => return e
+    | .app name head args _ id expr =>
+      if let some e := (← seen.get)[id]? then return e
+      let replaced ← args.mapM go
+      let e ← if (replaced.zip args).all (fun (r, a) => r == a.toExpr) then pure expr
+        else applied name head replaced
+      seen.modify (·.insert id e)
+      return e
+  go tree
 
 /--
 A premise's literal at the recorded substitution, with `hole`'s term abstracted
 where it is given.
 -/
-private def literalAt (vars : Vars) (bindings : Std.HashMap UInt32 Term)
+private def literalAt (cache : TreeCache) (vars : Vars) (bindings : Std.HashMap UInt32 Term)
     (l : Literal) (hole : Option (Tree × Expr)) : ReconstructM Expr := do
   let args ← l.args.mapM fun a => do
-    let tree ← treeOf vars bindings a
+    let tree ← treeOf cache vars bindings a
     match hole with
-    | some (target, x) => (Tree.replacing target x tree).toExpr
-    | none => tree.toExpr
+    | some (target, x) => replacing target x tree
+    | none => pure tree.toExpr
   let atom ←
     if l.isEquality then
       let some sortName := l.sort?
@@ -150,6 +184,8 @@ private structure Rewritten where
   literal : Nat
   wholePremise : Bool
   target : Tree
+  /-- The trees of the premise's terms, the target's among them. -/
+  trees : TreeCache
 
 private def rewrittenOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars) :
     ReconstructM Rewritten := do
@@ -160,9 +196,10 @@ private def rewrittenOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   let some clause := parent.clause?
     | throwError "the rewritten premise, step {parent.number}, is not a clause"
   let bindings := Std.HashMap.ofList use.bindings.toList
+  let trees ← TreeCache.new
   return { literals := clause.literals, bindings, literal := literal.toNat
            wholePremise := use.rewritesWholePremise
-           target := ← treeOf vars bindings rewritten }
+           target := ← treeOf trees vars bindings rewritten, trees }
 
 /--
 The premise's clause, with the term the inference rewrote abstracted from the
@@ -176,9 +213,9 @@ private def clauseAbstracting (rw : Rewritten) (vars : Vars) (x : Option Expr) :
     ReconstructM Expr := do
   let parts ← rw.literals.zipIdx.mapM fun (l, i) => do
     if (i == rw.literal || rw.wholePremise) && x.isSome then
-      literalAt vars rw.bindings l (x.map (rw.target, ·))
+      literalAt rw.trees vars rw.bindings l (x.map (rw.target, ·))
     else
-      literalAt vars rw.bindings l none
+      literalAt rw.trees vars rw.bindings l none
   sharedClause (junction ``Or ``False parts)
 
 /--
@@ -196,7 +233,7 @@ private def clauseRewritten (rw : Rewritten) (vars : Vars) (stated to : Expr) :
   let parts ← Clause.partsOf ``Or stated rw.literals.size
   let some l := rw.literals[rw.literal]?
     | throwError "the premise has no literal {rw.literal}"
-  let rewritten ← literalAt vars rw.bindings l (some (rw.target, to))
+  let rewritten ← literalAt rw.trees vars rw.bindings l (some (rw.target, to))
   sharedClause (junction ``Or ``False (parts.set! rw.literal rewritten))
 
 /--
@@ -206,7 +243,7 @@ the clause, where it stands, with one substitution. With what it then says.
 -/
 private def rewriteClause (rw : Rewritten) (vars : Vars) (stated proof heq to : Expr) :
     ReconstructM (Expr × Expr) := do
-  let «from» ← rw.target.toExpr
+  let «from» := rw.target.toExpr
   let τ ← inferType «from»
   let motive ← withLocalDeclD `x τ fun x => do
     mkLambdaFVars #[x] (← clauseRewritten rw vars stated x)
@@ -270,7 +307,7 @@ def superposition (step : Step) : ReconstructM Expr := do
             let (rewritten, says) ← rewriteClause rw vars mainType mainAt heq to
             carryAll says target rewritten (placed := step.placedAt 0) (into := into)
               (sourceCount := mainParent.clauseSize?)
-          let source ← rw.target.toExpr
+          let source := rw.target.toExpr
           if ← sameFormula source «from» then
             return ← rewriteBy heq
           -- An abstracting unifier did not make the rewritten term and the
@@ -325,7 +362,8 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
     let l := if leftRewritten then a else b
     let some sideTerm := use.term
       | throwError "inner rewriting did not record which side it rewrote"
-    let side ← treeOf vars {} sideTerm
+    let trees ← TreeCache.new
+    let side ← treeOf trees vars {} sideTerm
     step.withInto target fun into =>
     elimGiven parts (motive? := some target) (fun k h => do
       if k == i then return ← into.place h
@@ -336,7 +374,7 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
         -- any rewrite: the side is replaced wherever the premise's literal has
         -- that term, not wherever its Lean expression happens to appear.
         let rewritten ← withLocalDeclD `x (← inferType l) fun x => do
-          let abstracted ← literalAt vars {} literal (some (side, x))
+          let abstracted ← literalAt trees vars {} literal (some (side, x))
           unless abstracted.containsFVar x.fvarId! do return h
           let motive ← mkLambdaFVars #[x] abstracted
           mkEqMP (← mkCongrArg motive lr) h

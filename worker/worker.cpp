@@ -617,19 +617,29 @@ void subsumptionEqualityResolution(Unit* u)
   DHMap<unsigned, unsigned> back;
   DHSet<unsigned, FnvHash, IdentityHash> keptVars;
   conclusion->collectVars(keptVars);
+  unsigned fresh = 0;
   for (unsigned v : iterTraits(keptVars.iterator())) {
     TermList image = subst.apply(TermList(v, false), 0);
     if (!image.isVar())
       return;
     back.set(image.var(), v);
+    fresh = std::max(fresh, v + 1);
   }
+  // The unifier's variables back to the conclusion's; one the conclusion does
+  // not have -- it occurred only in the literal removed -- numbered after them,
+  // so that it is not taken for one of them.
   struct Undo {
     DHMap<unsigned, unsigned>* back;
+    unsigned* fresh;
     TermList apply(unsigned v) {
       unsigned w;
-      return back->find(v, w) ? TermList(w, false) : TermList(v, false);
+      if (!back->find(v, w)) {
+        w = (*fresh)++;
+        back->insert(v, w);
+      }
+      return TermList(w, false);
     }
-  } undo{&back};
+  } undo{&back, &fresh};
   Stack<std::pair<unsigned, TermList>> bindings;
   DHSet<unsigned, FnvHash, IdentityHash> vars;
   premise->collectVars(vars);

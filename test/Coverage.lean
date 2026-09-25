@@ -266,6 +266,14 @@ example {ι : Type} (f : ℤ → ι) (p : ι → Prop) (b : ι) (q r : Prop) (a 
     ("forward_subsumption_resolution", "off"), ("avatar", "off"),
     ("function_definition_elimination", "none")]) [*]
 
+-- A rewrite inside a shared term that mentions a variable: each of vampire's
+-- terms is rebuilt once, and rewritten once, however often it is shared.
+#guard_msgs (drop info) in
+example {ι : Type} (p : ι → Prop) (h : ι → ι → ι) (g : ι → ι) (a : ι)
+    (h1 : ∀ x, p (h (h (h (h (g x) (g x)) (h (g x) (g x))) (h (h (g x) (g x)) (h (g x) (g x)))) (h (h (h (g x) (g x)) (h (g x) (g x))) (h (h (g x) (g x)) (h (g x) (g x))))))
+    (h2 : ∀ x, g x = x) (h3 : ¬ p (h (h (h (h (a) (a)) (h (a) (a))) (h (h (a) (a)) (h (a) (a)))) (h (h (h (a) (a)) (h (a) (a))) (h (h (a) (a)) (h (a) (a)))))) : False := by
+  vampire [*]
+
 -- Backward demodulation, with forward demodulation off.
 #guard_msgs (drop info) in
 example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a : ι) (hp : p (f (f a)))
