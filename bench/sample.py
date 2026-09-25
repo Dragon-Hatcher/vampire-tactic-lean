@@ -22,6 +22,8 @@ import json
 import random
 import re
 import shutil
+import os
+import signal
 import subprocess
 import sys
 import tarfile
@@ -52,11 +54,16 @@ def statable(stmt: str) -> bool:
     represent, and then no tactic can be run on them, so they are no problem to draw."""
     path = REPO / "BenchStatable.lean"
     path.write_text(STATABLE + stmt.replace("TACTIC", "sorry"))
+    # In a process group of its own, so that a timeout kills the `lean` that
+    # `lake` started too, rather than leaving it running on its own.
+    proc = subprocess.Popen(["lake", "lean", path.name], cwd=REPO, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        r = subprocess.run(["lake", "lean", path.name], cwd=REPO, capture_output=True,
-                           text=True, timeout=600)
-        return r.returncode == 0 and ": error:" not in r.stdout + r.stderr
+        out, err = proc.communicate(timeout=600)
+        return proc.returncode == 0 and ": error:" not in out + err
     except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
         return False
     finally:
         path.unlink(missing_ok=True)
