@@ -213,7 +213,9 @@ def interpreted (name : String) (args : Array Expr) :
     if n.multiplies then
       let #[a] := args | return none
       let τ ← inferType a
-      return some (mkApp2 (← headAt ``HMul.hMul τ 2) (← numeralAt τ) a)
+      let timesK := mkApp (← headAt ``HMul.hMul τ 2) (← numeralAt τ)
+      if (← read).markIntroduced then return some (mkApp (markedLinMul timesK) a)
+      return some (mkApp timesK a)
     unless args.isEmpty do return none
     let some τ ← sortType? n.sort | throwUnknownSort n.sort
     return some (← numeralAt τ)

@@ -219,6 +219,9 @@ local for each, and the equation is instantiated at them after.
 -/
 def ringEq (a b : Expr) : MetaM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
+  -- ALASCA's `k * t` is the product it is stated as, metadata aside.
+  let a := Vampire.Reconstruct.unmarkLinMul a
+  let b := Vampire.Reconstruct.unmarkLinMul b
   let inA := introducedIn a
   let symbols := inA ++ (introducedIn b).filter fun t => !inA.contains t
   if symbols.isEmpty then return ← ringEqNormal a b

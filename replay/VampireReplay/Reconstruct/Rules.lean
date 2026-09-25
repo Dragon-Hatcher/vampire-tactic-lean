@@ -96,7 +96,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   -- A literal equating two numbers that are not equal, dropped.
   | .distinctEqualityRemoval => Arithmetic.theoryStep step
   | .gaussianVariableEliminiation => Arithmetic.theoryStep step
-  | .arithmeticSubtermGeneralization => Arithmetic.theoryStep step
+  | .arithmeticSubtermGeneralization => Arithmetic.literalwise step
   | .alascaVirasQe => Arithmetic.theoryStep step
   | .constrainedResolution => Arithmetic.theoryStep step
   -- Constrained superposition is superposition with the pairs the unifier

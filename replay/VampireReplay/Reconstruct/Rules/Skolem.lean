@@ -74,7 +74,8 @@ partial def walk (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt3
   | .«exists» =>
     let some premiseBody := premise.subformulas[0]?
       | throwError "quantifier without a body"
-    peel (boundVars premise).toList vars premiseBody
+    let block := boundVars premise
+    peel block (← blockPredicates true sorts block vars premiseBody) 0 #[] vars premiseBody
   | _ =>
     -- A literal, or a constant: rebuilt on both sides and related directly.
     let p ← Reconstruct.formula sorts vars premise
@@ -106,21 +107,21 @@ where
       prop := mkApp2 (mkConst fn) p prop
     return (prop, proof)
 
-  /-- Takes the existential variables of a block one at a time. -/
-  peel (bound : List (UInt32 × String)) (vars : Vars) (body : Formula) :
+  /-- Takes the existential variables of a block one at a time, the `i`th
+  chosen from `qs[i]` at the witnesses before it. -/
+  peel (block : Array (UInt32 × String)) (qs : Array Expr) (i : Nat)
+      (witnesses : Array Expr) (vars : Vars) (body : Formula) :
       ReconstructM (Expr × Expr) := do
-    match bound with
-    | [] => walk sorts skolems vars body conclusion
-    | (v, sortName) :: rest => do
-      let τ ← sortType sortName
-      -- The predicate the witness is chosen from, as a function of `v`.
-      let p ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-        mkLambdaFVars #[x] (← blockProp true sorts rest (vars.insert v x) body)
-      let (witness, choice) ← epsilon τ p
-      registerSkolem skolems vars v witness
-      let (prop, rest') ← peel rest (vars.insert v witness) body
-      -- (∃ v, p v) ↔ p ε ↔ prop
-      return (prop, ← mkAppM ``Iff.trans #[choice, rest'])
+    let some (v, sortName) := block[i]? | walk sorts skolems vars body conclusion
+    let τ ← sortType sortName
+    let predicate := blockPredicate qs i witnesses
+    let (chosen, choice) ← epsilon τ predicate
+    let witness ← registerSkolem skolems vars v chosen
+    let choice ← choiceAt τ predicate choice witness
+    let (prop, rest') ← peel block qs (i + 1) (witnesses.push witness)
+      (vars.insert v witness) body
+    -- (∃ v, p v) ↔ p ε ↔ prop
+    return (prop, ← mkAppM ``Iff.trans #[choice, rest'])
 
 /-- `skolemize`: drops the existentials of a formula for chosen witnesses. -/
 def skolemize (step : Step) : ReconstructM Expr := do

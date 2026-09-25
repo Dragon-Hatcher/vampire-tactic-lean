@@ -27,6 +27,7 @@ private def _root_.Vampire.Reconstruct.LiteralRewrite.name : LiteralRewrite → 
   | .pushUnaryMinus => "pushing unary minus"
   | .alascaNormalization => "ALASCA normalization"
   | .cancellation => "cancellation"
+  | .generalization => "arithmetic subterm generalization"
 
 /-- What one of the procedures that rewrite a term an operation at a time makes
 of a literal. -/
@@ -55,6 +56,18 @@ private def deniedIfTurned (rule : LiteralRewrite) (b : Expr) : MetaM (Expr × E
   return (denied, ← mkAppOptM ``not_lt #[some c.sort, none, some c.rhs, some c.lhs])
 
 /--
+`arithmetic_subterm_generalization`: the premise, instantiated at the
+substitution the step recorded (replay has done that), is the conclusion up to
+the identities of a ring -- a variable standing for `x - y` is `x - y` again
+once `x` is replaced by `x + y`.
+-/
+private def generalization (a b : Expr) : MetaM Expr := do
+  let some same ← ringEq a b
+    | throwError "arithmetic subterm generalization made{indentExpr b}\nof{indentExpr a}, \
+        which are not one up to the identities of a ring"
+  iffOfEq same
+
+/--
 `a ↔ b`, where the procedure `rule` rewrote the literal `a` into `b`, `factor`
 being what the step recorded against it.
 -/
@@ -73,6 +86,7 @@ def literalIff (rule : LiteralRewrite) (a b : Expr) (factor : Int × Nat) : Meta
     | none => match rule with
       | .polynomialEvaluation => polynomialEvaluation a' b'
       | .alascaNormalization => alascaNormalization a' b' factor
+      | .generalization => generalization a' b'
       | _ => cancellation a' b'
   mkExpectedTypeHint h (← mkAppM ``Iff #[a, b])
 

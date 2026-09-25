@@ -19,6 +19,8 @@ evaluation is whichever of three evaluators the options chose.
 * `pushUnaryMinus` (`PushUnaryMinus`).
 * `alascaNormalization` (ALASCA's `InequalityNormalizer`).
 * `cancellation` (`Cancellation`).
+* `generalization` (`ArithmeticSubtermGeneralization`): each literal is the
+  premise's at the substitution the step recorded, up to ring identities.
 -/
 inductive LiteralRewrite
   | theoryNormalization
@@ -27,6 +29,7 @@ inductive LiteralRewrite
   | pushUnaryMinus
   | alascaNormalization
   | cancellation
+  | generalization
   deriving Inhabited, BEq, Repr
 
 /-- The procedure the worker recorded as the number `n`: `InferenceStore::LiteralProcedure`. -/
@@ -38,6 +41,7 @@ def LiteralRewrite.ofRecorded? : Nat → Option LiteralRewrite
   | 4 => some .pushUnaryMinus
   | 5 => some .alascaNormalization
   | 6 => some .cancellation
+  | 7 => some .generalization
   | _ => none
 
 /-- What reconstruction needs to read a proof back into Lean. -/
@@ -300,6 +304,36 @@ def markedIntroduced (name : String) (e : Expr) : Expr :=
 def isMarkedIntroduced : Expr → Bool
   | .mdata d _ => (d.find introducedKey).isSome
   | _ => false
+
+/-- The key `markedLinMul` annotates ALASCA's multiplication by a numeral with. -/
+def linMulKey : Name := `vampire.linMul
+
+/--
+ALASCA's multiplication by a numeral, `$lin_mul`, which replay states as the
+product `k * t`, marked as that symbol around `k * ·`: to polynomial
+normalization it is the product, but interpreted evaluation takes it for a
+symbol of its own, and leaves it be.
+-/
+def markedLinMul (timesK : Expr) : Expr :=
+  .mdata (KVMap.empty.insert linMulKey (.ofBool true)) timesK
+
+/-- Whether `e` is ALASCA's `k * ·`, marked as such. -/
+def isMarkedLinMul : Expr → Bool
+  | .mdata d _ => (d.find linMulKey).isSome
+  | _ => false
+
+/-- `e` with every mark `markedLinMul` put on it taken off. -/
+partial def unmarkLinMul (e : Expr) : Expr :=
+  match e with
+  | .app f a =>
+    let f := if isMarkedLinMul f then f.mdataExpr! else f
+    .app (unmarkLinMul f) (unmarkLinMul a)
+  | .mdata d b => if isMarkedLinMul e then unmarkLinMul b else .mdata d (unmarkLinMul b)
+  | .lam n d b bi => .lam n (unmarkLinMul d) (unmarkLinMul b) bi
+  | .forallE n d b bi => .forallE n (unmarkLinMul d) (unmarkLinMul b) bi
+  | .letE n τ v b nd => .letE n (unmarkLinMul τ) (unmarkLinMul v) (unmarkLinMul b) nd
+  | .proj s i b => .proj s i (unmarkLinMul b)
+  | _ => e
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

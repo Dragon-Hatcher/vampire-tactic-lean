@@ -205,7 +205,18 @@ def literalwise (step : Step) : ReconstructM Expr := do
     -- metadata, and the literals the ones the clauses state.
     let premiseLiterals := (parent.clause?.map (·.literals)).getD #[]
     let conclusionLiterals := (step.unit.clause?.map (·.literals)).getD #[]
-    let premiseVars ← coverVars parent vars
+    -- The premise's variables at what `premisesOf` instantiated them at: the
+    -- substitution the step recorded, if it recorded one.
+    let premiseVars ← withReader ({ · with markIntroduced := true }) do
+      let covered ← coverVars parent vars step.unit.boundVarSorts
+      let some use := step.useAt? 0 | pure covered
+      let bound := Std.HashMap.ofList use.bindings.toList
+      let mut out : Vars := {}
+      for (v, sortName) in parent.varSorts do
+        out := out.insert v (← match bound[v]? with
+          | some image => term covered image
+          | none => do someElement (← sortType sortName))
+      pure out
     let marked (vars : Vars) (l : Vampire.Literal) (stated : Expr) : ReconstructM Expr := do
       let e ← withReader ({ · with markIntroduced := true }) (literal vars l)
       unless ← isDefEq e stated do

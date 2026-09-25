@@ -61,28 +61,25 @@ private def registerBlock (sorts : Array (UInt32 × String)) (positive : Bool)
     (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) :
     ReconstructM PUnit := do
   let some body := f.subformulas[0]? | throwError "a quantifier without a body"
-  let rec go (rest : List (UInt32 × String)) (vars : Vars) : ReconstructM PUnit := do
-    match rest with
-    | [] => return
-    | (v, sortName) :: rest =>
-      let some skolemTerm := skolems[v]?
-        | throwError "no skolem recorded for X{v}"
-      let some symbol := skolemTerm.symbol?
-        | throwError "the skolem term for X{v} has no symbol"
-      -- Several clauses come out of one clausification and share its steps, so
-      -- a symbol is bound once and read back afterwards.
-      let witness ←
-        if ← resolvesSymbol symbol.name then
-          term vars skolemTerm
-        else
-          let τ ← sortType sortName
-          let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-            mkLambdaFVars #[x] (← blockProp positive sorts rest (vars.insert v x) body)
-          let (witness, _) ← epsilon τ predicate
-          registerSkolem skolems vars v witness
-          pure witness
-      go rest (vars.insert v witness)
-  go (boundOf sorts f).toList vars
+  let block := boundOf sorts f
+  let qs ← blockPredicates positive sorts block vars body
+  let mut witnesses := #[]
+  let mut vars := vars
+  for ((v, sortName), i) in block.zipIdx do
+    let some skolemTerm := skolems[v]?
+      | throwError "no skolem recorded for X{v}"
+    let some symbol := skolemTerm.symbol?
+      | throwError "the skolem term for X{v} has no symbol"
+    -- Several clauses come out of one clausification and share its steps, so
+    -- a symbol is bound once and read back afterwards.
+    let witness ←
+      if ← resolvesSymbol symbol.name then
+        term vars skolemTerm
+      else
+        let (witness, _) ← epsilon (← sortType sortName) (blockPredicate qs i witnesses)
+        registerSkolem skolems vars v witness
+    witnesses := witnesses.push witness
+    vars := vars.insert v witness
 
 /--
 A proof of the body of a skolemised block, at the symbols that were chosen for
@@ -92,38 +89,45 @@ The witnesses are the same terms `registerBlock` bound those symbols to, so
 what the block says of them is what Hilbert choice says.
 -/
 private def peelBlock (sorts : Array (UInt32 × String)) (positive : Bool)
-    (vars : Vars) (f : Formula) (h : Expr) : ReconstructM (Vars × Expr) := do
+    (skolems : Std.HashMap UInt32 Term) (vars : Vars) (f : Formula) (h : Expr) :
+    ReconstructM (Vars × Expr) := do
   let some body := f.subformulas[0]? | throwError "a quantifier without a body"
-  let rec go (rest : List (UInt32 × String)) (vars : Vars) (h : Expr) :
-      ReconstructM (Vars × Expr) := do
-    match rest with
-    | [] => return (vars, h)
-    | (v, sortName) :: rest =>
-      let τ ← sortType sortName
-      let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-        mkLambdaFVars #[x] (← blockProp positive sorts rest (vars.insert v x) body)
-      let (witness, choice) ← epsilon τ predicate
-      let level ← getLevel τ
-      let existenceProp := mkApp2 (mkConst ``Exists [level]) τ predicate
-      -- At negative polarity what is at hand refutes a universal, and that a
-      -- universal fails is that something fails it.
-      let existence ←
-        if positive then pure h
-        else
-          let some quantified := (← instantiateMVars (← inferType h)).not?
-            | throwError "expected the refutation of a universal block, got{indentExpr h}"
-          let .forallE n τ' inner bi := quantified
-            | throwError "expected a universal quantifier, got{indentExpr quantified}"
-          let over := Expr.lam n τ' inner bi
-          pure (mkApp4 (mkConst ``Iff.mp)
-            (mkApp (mkConst ``Not) quantified)
-            (mkApp2 (mkConst ``Exists [← getLevel τ'])
-              τ' (.lam n τ' (mkApp (mkConst ``Not) inner) bi))
-            (mkApp2 (mkConst ``Classical.not_forall [← getLevel τ']) τ' over) h)
-      go rest (vars.insert v witness)
-        (mkApp4 (mkConst ``Iff.mp) existenceProp (predicate.beta #[witness])
-          choice existence)
-  go (boundOf sorts f).toList vars h
+  let block := boundOf sorts f
+  let qs ← blockPredicates positive sorts block vars body
+  let mut witnesses := #[]
+  let mut vars := vars
+  let mut h := h
+  for ((v, sortName), i) in block.zipIdx do
+    let τ ← sortType sortName
+    let predicate := blockPredicate qs i witnesses
+    let (_, choice) ← epsilon τ predicate
+    -- The symbol `registerBlock` bound to that choice.
+    let some skolemTerm := skolems[v]?
+      | throwError "no skolem recorded for X{v}"
+    let witness ← term vars skolemTerm
+    let choice ← choiceAt τ predicate choice witness
+    let level ← getLevel τ
+    let existenceProp := mkApp2 (mkConst ``Exists [level]) τ predicate
+    -- At negative polarity what is at hand refutes a universal, and that a
+    -- universal fails is that something fails it.
+    let existence ←
+      if positive then pure h
+      else
+        let some quantified := (← instantiateMVars (← inferType h)).not?
+          | throwError "expected the refutation of a universal block, got{indentExpr h}"
+        let .forallE n τ' inner bi := quantified
+          | throwError "expected a universal quantifier, got{indentExpr quantified}"
+        let over := Expr.lam n τ' inner bi
+        pure (mkApp4 (mkConst ``Iff.mp)
+          (mkApp (mkConst ``Not) quantified)
+          (mkApp2 (mkConst ``Exists [← getLevel τ'])
+            τ' (.lam n τ' (mkApp (mkConst ``Not) inner) bi))
+          (mkApp2 (mkConst ``Classical.not_forall [← getLevel τ']) τ' over) h)
+    h := mkApp4 (mkConst ``Iff.mp) existenceProp (mkApp predicate witness).headBeta
+      choice existence
+    witnesses := witnesses.push witness
+    vars := vars.insert v witness
+  return (vars, h)
 
 /--
 The parts of a signed subformula, taken apart rather than built again.
@@ -196,6 +200,8 @@ private structure Replay where
   something said of these rather than of those.
   -/
   locals : Array Expr := #[]
+  /-- The skolem terms the clausification and its premise recorded. -/
+  skolems : Std.HashMap UInt32 Term := {}
 
 mutual
 
@@ -425,7 +431,15 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
     let some negation := against[0]?
       | throwError "a quantifier replaced by nothing"
     if skolemises connective sign then
-      let (_, body) ← peelBlock r.sorts sign r.vars g h
+      -- Which symbols this occurrence of the quantifier introduced, read off
+      -- the clause it left its variables bound in, as `registerAlong` reads
+      -- them: the step records every occurrence's under the one variable.
+      let occurrence := Std.HashMap.ofList c.bindings.toList
+      let skolems := bound.foldl (init := r.skolems) fun acc (v, _) =>
+        match occurrence[v]? with
+        | some image => acc.insert v image
+        | none => acc
+      let (_, body) ← peelBlock r.sorts sign skolems r.vars g h
       -- What the block leaves and what the step recorded in its place can meet
       -- with a double negation between them, for the same reason a literal can:
       -- the record is taken before the clausifier's own normalisation.
@@ -437,7 +451,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         return mkApp negation body
       let some says ← sameUpToDoubleNegation stated refuted
         | throwError "a skolemised block leaves{indentExpr stated}\nwhich is \
-          not what the step put in its place"
+          not what the step put in its place:{indentExpr refuted}"
       return mkApp negation (← mkAppM ``Iff.mp #[says, body])
     else
       -- The quantifier is instantiated, at the variables the clause keeps.
@@ -455,14 +469,12 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         let mut instantiated := r.vars
         for ((v, _), arg) in bound.zip args do
           instantiated := instantiated.insert v arg
+        let qs ← blockPredicates true r.sorts bound r.vars body
         let mut witnessed ← held false negation
         for j in (List.range bound.size).reverse do
-          let some (v, sortName) := bound[j]? | throwError "a quantifier has no variable {j}"
+          let some (_, sortName) := bound[j]? | throwError "a quantifier has no variable {j}"
           let τ ← sortType sortName
-          let rest := (bound.extract (j + 1) bound.size).toList
-          let predicate ← withLocalDeclD (Name.mkSimple s!"X{v}") τ fun x => do
-            mkLambdaFVars #[x]
-              (← blockProp true r.sorts rest (instantiated.insert v x) body)
+          let predicate := blockPredicate qs j (args.extract 0 j)
           witnessed ← mkAppOptM ``Exists.intro
             #[some τ, some predicate, some args[j]!, some witnessed]
         return mkApp h witnessed
@@ -527,8 +539,11 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
 
 def registerSkolemsOf (u : Vampire.Unit) : ReconstructM PUnit := do
   let some clause := u.genClause? | return
+  -- The unit's own records last, so that they win: a parent numbers its
+  -- variables independently, and one of its variables can have the number of
+  -- one of the unit's.
   let skolems := Std.HashMap.ofList
-    (u.skolems ++ u.parents.flatMap (·.skolems)).toList
+    (u.parents.flatMap (·.skolems) ++ u.skolems).toList
   if skolems.isEmpty then return
   registerAlong (u.parents.flatMap (·.varSorts) ++ u.varSorts) skolems clause
 
@@ -702,7 +717,10 @@ def clausify (step : Step) : ReconstructM Expr := do
       -- one the clause kept stands for the local the conclusion binds for it.
       for (v, image) in clause.bindings do
         vars := vars.insert v (← term vars image)
-      let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs }
+      -- As `registerSkolemsOf` reads them: the unit's own records win.
+      let skolems := Std.HashMap.ofList
+        (step.unit.parents.flatMap (·.skolems) ++ step.unit.skolems).toList
+      let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs, skolems }
         (chainTo clause) 0 none #[]
       mkLambdaFVars xs
         (← carryAll (junction ``Or ``False (← genParts sorts vars clause))

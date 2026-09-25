@@ -198,6 +198,9 @@ def floorArg? (e : Expr) : Option Expr :=
 vampire's normalizer is, which only matters to where it looks.
 -/
 partial def normalize (e : Expr) : MetaM (Expr × Normalized) := do
+  -- ALASCA's `k * t` is a product to the normalizer.
+  let e := if e.isApp && Vampire.Reconstruct.isMarkedLinMul e.appFn! then
+    mkApp e.appFn!.mdataExpr! e.appArg! else e
   let α ← instantiateMVars (← inferType e)
   let rendered (t : Expr) : MetaM Nf := do
     let (β, n) ← normalize t
@@ -413,6 +416,7 @@ with the numeral), and the factors as a product to the right, a power as the
 factor that many times.
 -/
 partial def parse (e : Expr) : MetaM Nf := do
+  let e := Vampire.Reconstruct.unmarkLinMul e
   let α ← instantiateMVars (← inferType e)
   if numeric α then
     if let some c := numeral? e then return numeralNf α c
