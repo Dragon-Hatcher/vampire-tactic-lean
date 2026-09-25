@@ -148,16 +148,17 @@ partial def implies (source target : Expr) : ReconstructM Expr := do
     -- `l : d` becomes a proof of the target, if `d` is among its disjuncts or
     -- is refutable on its own. An equality can be stated either way round, so
     -- the flipped form is looked up too rather than searched for.
+    withShapeDisjunction target fun inject => do
     let branchFor (d : Expr) : ReconstructM Expr := do
       if let some i := index[d]? then
         return ← withLocalDeclD `l d fun l => do
-          mkLambdaFVars #[l] (← injectPart target i l)
+          mkLambdaFVars #[l] (inject i l)
       if let some (α, a, b, negated) := equalityLiteral? d then
         let equation ← mkAppOptM ``Eq #[some α, some b, some a]
         let flipped := if negated then mkApp (mkConst ``Not) equation else equation
         if let some i := index[flipped]? then
           return ← withLocalDeclD `l d fun l => do
-            mkLambdaFVars #[l] (← injectPart target i (← symmLiteral α a b negated l))
+            mkLambdaFVars #[l] (inject i (← symmLiteral α a b negated l))
       -- Absent, so it has to be refutable on its own.
       withLocalDeclD `l d fun l => do
         let some refuted ← refuteDropped? target l
@@ -398,19 +399,19 @@ partial def equivNormal (a b : Expr) : ReconstructM Expr := do
             mkApp4 (mkConst ``Iff.mpr) ap[i]! bp[i]! parts[i]! h
           if fn == ``And then
             let forward ← withLocalDeclD `h a fun h => do
-              mkLambdaFVars #[h] (← introParts b fun j => do
-                return mp j (← projectPart a j h))
+              let parts := projectParts a h
+              mkLambdaFVars #[h] (← introParts b fun j => return mp j parts[j]!)
             let backward ← withLocalDeclD `h b fun h => do
-              mkLambdaFVars #[h] (← introParts a fun j => do
-                return mpr j (← projectPart b j h))
+              let parts := projectParts b h
+              mkLambdaFVars #[h] (← introParts a fun j => return mpr j parts[j]!)
             return mkApp4 (mkConst ``Iff.intro) a b forward backward
           else
             let forward ← withLocalDeclD `h a fun h => do
-              mkLambdaFVars #[h] (← elimParts a (fun i hi =>
-                injectPart b i (mp i hi)) h)
+              mkLambdaFVars #[h] (← withShapeDisjunction b fun inject =>
+                elimParts a (fun i hi => return inject i (mp i hi)) h)
             let backward ← withLocalDeclD `h b fun h => do
-              mkLambdaFVars #[h] (← elimParts b (fun i hi =>
-                injectPart a i (mpr i hi)) h)
+              mkLambdaFVars #[h] (← withShapeDisjunction a fun inject =>
+                elimParts b (fun i hi => return inject i (mpr i hi)) h)
             return mkApp4 (mkConst ``Iff.intro) a b forward backward
     throwError "cannot relate{indentExpr a}\nto{indentExpr b}"
 

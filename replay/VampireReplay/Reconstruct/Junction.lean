@@ -38,6 +38,72 @@ partial def injectPart (chain : Expr) (i : Nat) (h : Expr) : ReconstructM Expr :
     return mkApp3 (mkConst ``Or.inr) left right (← injectPart right (i - n) h)
 
 /--
+Every part of a conjunction, read off its shape as `projectPart` reads them,
+from a proof `h` of the whole.
+
+Each part's proof is built on the proof of the conjunction it is a part of, so
+all of them share one tree the size of the conjunction. Projecting each part on
+its own takes a chain as long as its depth, which over a conjunction nested
+along one side is the square of its width -- the same chains, built again for
+every part.
+-/
+partial def projectParts (chain h : Expr) (acc : Array Expr := #[]) : Array Expr :=
+  if chain.isAppOfArity ``And 2 then
+    let l := chain.appFn!.appArg!
+    let r := chain.appArg!
+    projectParts r (mkApp3 (mkConst ``And.right) l r h)
+      (projectParts l (mkApp3 (mkConst ``And.left) l r h) acc)
+  else acc.push h
+
+/--
+`¬pᵢ` for every part of a disjunction read off its shape, from `against`,
+which denies the whole and mentions no bound variable: `refutationsOf` for a
+disjunction nested any way. Each part's refutation is built on its enclosing
+disjunction's, so all of them share one tree the size of the disjunction.
+-/
+partial def refutationsOfShape (chain against : Expr) (acc : Array Expr := #[]) : Array Expr :=
+  if chain.isAppOfArity ``Or 2 then
+    let l := chain.appFn!.appArg!
+    let r := chain.appArg!
+    let deniesL := Expr.lam `h l (mkApp against (mkApp3 (mkConst ``Or.inl) l r (.bvar 0))) .default
+    let deniesR := Expr.lam `h r (mkApp against (mkApp3 (mkConst ``Or.inr) l r (.bvar 0))) .default
+    refutationsOfShape r deniesR (refutationsOfShape l deniesL acc)
+  else acc.push against
+
+/--
+The lifts of `withShapeDisjunction` below `node`: `up` proves the whole from a
+proof of `node`. A disjunction under `node` gets a lift of its own, let-bound;
+a part is lifted by `up` and one introduction.
+-/
+private partial def bindShapeLifts (whole node : Expr) (up : Expr → Expr)
+    (parts : Array (Expr → Expr)) (lets : Array Expr)
+    (k : Array (Expr → Expr) → Array Expr → ReconstructM Expr) : ReconstructM Expr := do
+  unless node.isAppOfArity ``Or 2 do return ← k (parts.push up) lets
+  let l := node.appFn!.appArg!
+  let r := node.appArg!
+  let child (side : Name) (c : Expr) (parts : Array (Expr → Expr)) (lets : Array Expr)
+      (k : Array (Expr → Expr) → Array Expr → ReconstructM Expr) : ReconstructM Expr := do
+    let lifted (x : Expr) : Expr := up (mkApp3 (mkConst side) l r x)
+    unless c.isAppOfArity ``Or 2 do return ← k (parts.push lifted) lets
+    let value := Expr.lam `h c (lifted (.bvar 0)) .default
+    withLetDecl `lift (← mkArrow c whole) value fun f =>
+      bindShapeLifts whole c (mkApp f) parts (lets.push f) k
+  child ``Or.inl l parts lets fun parts lets => child ``Or.inr r parts lets k
+
+/--
+`k` given, for a disjunction read off its shape, a proof of the whole from a
+proof of its `i`th part at a cost that does not grow with the part's depth:
+each disjunction inside it has a lift to the whole, let-bound once around what
+`k` builds and defined by the one enclosing it. `injectPart` for every part of
+a disjunction, without the square of its depth.
+-/
+def withShapeDisjunction (chain : Expr)
+    (k : (Nat → Expr → Expr) → ReconstructM Expr) : ReconstructM Expr :=
+  bindShapeLifts chain chain id #[] #[] fun parts lets => do
+    let inject (i : Nat) (h : Expr) : Expr := parts[i]! h
+    mkLetFVars lets (← instantiateMVars (← k inject))
+
+/--
 A closed `chain → motive` sending each part of `chain` to `handler`, along with
 the motive, which the leftmost part's proof settles.
 
