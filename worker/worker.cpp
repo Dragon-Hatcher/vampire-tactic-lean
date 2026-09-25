@@ -235,12 +235,10 @@
 
 #include "CASC/PortfolioMode.hpp"
 #include "Kernel/Clause.hpp"
-#include "Kernel/EqHelper.hpp"
 #include "Kernel/Formula.hpp"
 #include "Kernel/Inference.hpp"
 #include "Kernel/InferenceStore.hpp"
 #include "Kernel/Problem.hpp"
-#include "Kernel/RobSubstitution.hpp"
 #include "Kernel/Signature.hpp"
 #include "Kernel/SortHelper.hpp"
 #include "Kernel/SubstHelper.hpp"
@@ -556,151 +554,6 @@ private:
 
 }  // namespace congruence
 
-/*
- * How a step used its one premise, for the simplifications that record nothing
- * of it themselves. Each is worked out from the premise and the conclusion
- * alone, the way the inference itself would have, and recorded as any other
- * use is -- so replay reads it rather than looking for it.
- */
-namespace recovered {
-
-/** The step's one premise, if it has exactly one and it is a clause. */
-Clause* onlyPremise(Unit* u)
-{
-  Inference& inference = u->inference();
-  Inference::Iterator it = inference.iterator();
-  if (!inference.hasNext(it))
-    return nullptr;
-  Unit* premise = inference.next(it);
-  if (inference.hasNext(it) || !premise->isClause())
-    return nullptr;
-  return premise->asClause();
-}
-
-/**
- * `subsumption_equality_resolution` drops a disequality whose sides unify,
- * where the unifier only renames the literals kept. The conclusion is those
- * literals as they were, so the premise is used at the unifier with that
- * renaming undone: the literals kept come out as themselves, and the
- * disequality as a term unequal to itself.
- */
-void subsumptionEqualityResolution(Unit* u)
-{
-  InferenceStore* store = InferenceStore::instance();
-  if (store->premiseUses(u) || !u->isClause())
-    return;
-  Clause* premise = onlyPremise(u);
-  if (!premise)
-    return;
-  Clause* conclusion = u->asClause();
-  // The literals kept are the premise's own, so the one dropped is the one
-  // the conclusion does not share.
-  unsigned removed = premise->length();
-  for (unsigned i = 0; i < premise->length(); i++) {
-    bool kept = false;
-    for (unsigned j = 0; j < conclusion->length(); j++)
-      kept = kept || (*conclusion)[j] == (*premise)[i];
-    if (kept)
-      continue;
-    if (removed != premise->length())
-      return;
-    removed = i;
-  }
-  if (removed == premise->length())
-    return;
-  Literal* lit = (*premise)[removed];
-  if (!lit->isEquality() || lit->isPositive())
-    return;
-  RobSubstitution subst;
-  if (!subst.unify(*lit->nthArgument(0), 0, *lit->nthArgument(1), 0))
-    return;
-  DHMap<unsigned, unsigned> back;
-  DHSet<unsigned, FnvHash, IdentityHash> keptVars;
-  conclusion->collectVars(keptVars);
-  unsigned fresh = 0;
-  for (unsigned v : iterTraits(keptVars.iterator())) {
-    TermList image = subst.apply(TermList(v, false), 0);
-    if (!image.isVar())
-      return;
-    back.set(image.var(), v);
-    fresh = std::max(fresh, v + 1);
-  }
-  // The unifier's variables back to the conclusion's; one the conclusion does
-  // not have -- it occurred only in the literal removed -- numbered after them,
-  // so that it is not taken for one of them.
-  struct Undo {
-    DHMap<unsigned, unsigned>* back;
-    unsigned* fresh;
-    TermList apply(unsigned v) {
-      unsigned w;
-      if (!back->find(v, w)) {
-        w = (*fresh)++;
-        back->insert(v, w);
-      }
-      return TermList(w, false);
-    }
-  } undo{&back, &fresh};
-  Stack<std::pair<unsigned, TermList>> bindings;
-  DHSet<unsigned, FnvHash, IdentityHash> vars;
-  premise->collectVars(vars);
-  for (unsigned v : iterTraits(vars.iterator()))
-    bindings.push({v, SubstHelper::apply(subst.apply(TermList(v, false), 0), undo)});
-  store->recordPremiseUse(u, premise, lit, TermList::empty(), 0, bindings);
-}
-
-
-/**
- * `inner_rewriting` takes a disequality `l != r` of a clause and rewrites `l`
- * to `r` in every other literal. Which disequality and which way round is
- * settled by what the rewriting gives: the one that gives the conclusion,
- * literal for literal. Recorded as the literal and the side rewritten away.
- */
-void innerRewriting(Unit* u)
-{
-  InferenceStore* store = InferenceStore::instance();
-  if (store->premiseUses(u) || !u->isClause())
-    return;
-  Clause* premise = onlyPremise(u);
-  if (!premise)
-    return;
-  Clause* conclusion = u->asClause();
-  unsigned len = premise->length();
-  if (conclusion->length() != len)
-    return;
-  // Literal selection reorders a clause after the inference has built it, so
-  // the rewritten literals are compared with the conclusion's as a multiset.
-  auto givesConclusion = [&](unsigned i, TermList lhs, TermList rhs) {
-    std::vector<Literal*> wanted;
-    for (unsigned j = 0; j < len; j++)
-      wanted.push_back((*conclusion)[j]);
-    for (unsigned k = 0; k < len; k++) {
-      Literal* got = k == i ? (*premise)[k]
-                            : EqHelper::replace((*premise)[k], lhs, rhs);
-      auto at = std::find(wanted.begin(), wanted.end(), got);
-      if (at == wanted.end())
-        return false;
-      wanted.erase(at);
-    }
-    return true;
-  };
-  for (unsigned i = 0; i < len; i++) {
-    Literal* eq = (*premise)[i];
-    if (!eq->isEquality() || eq->isPositive())
-      continue;
-    for (unsigned side = 0; side < 2; side++) {
-      TermList lhs = *eq->nthArgument(side);
-      TermList rhs = *eq->nthArgument(1 - side);
-      if (givesConclusion(i, lhs, rhs)) {
-        store->recordPremiseUse(u, premise, eq, lhs, 0,
-          Stack<std::pair<unsigned, TermList>>());
-        return;
-      }
-    }
-  }
-}
-
-}  // namespace recovered
-
 /**
  * What each of @b premise's literals became in the literal-wise simplification
  * @b u, in the order the premise's literals are in now, or empty where @b u
@@ -715,8 +568,12 @@ std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause
   std::vector<const InferenceStore::LiteralImage*> out;
   const InferenceStore::LiteralRewriting* rewriting =
     InferenceStore::instance()->literalImages(u);
-  if (!rewriting || rewriting->images.size() != premise->length())
+  if (!rewriting)
     return out;
+  if (rewriting->images.size() != premise->length())
+    throw UserErrorException("unit " + std::to_string(u->number()) + " recorded " +
+      std::to_string(rewriting->images.size()) + " literal images for a premise of " +
+      std::to_string(premise->length()) + " literals");
   const Stack<InferenceStore::LiteralImage>* images = &rewriting->images;
   std::vector<bool> taken(images->size(), false);
   for (unsigned i = 0; i < premise->length(); i++) {
@@ -727,7 +584,8 @@ std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause
         found = &(*images)[k];
       }
     if (!found)
-      return {};
+      throw UserErrorException("unit " + std::to_string(u->number()) +
+        " recorded no image of its premise's literal " + std::to_string(i));
     out.push_back(found);
   }
   return out;
@@ -1195,10 +1053,6 @@ struct Encoder {
         inference.rule() == InferenceRule::BACKWARD_SUBSUMPTION_RESOLUTION) {
       InferenceStore::instance()->recoverSubsumptionResolutionUses(u);
     }
-    if (inference.rule() == InferenceRule::SUBSUMPTION_EQUALITY_RESOLUTION)
-      recovered::subsumptionEqualityResolution(u);
-    if (inference.rule() == InferenceRule::INNER_REWRITING)
-      recovered::innerRewriting(u);
 
     uint32_t firstUse = static_cast<uint32_t>(uses.size() / 6);
     uint32_t numUses = 0;
@@ -1215,12 +1069,14 @@ struct Encoder {
         // where it sits in the clause as serialised is settled here, with
         // nothing further to move it.
         uint32_t literal = NONE;
-        if (use.on)
-          for (unsigned i = 0; i < use.in->length(); i++)
-            if ((*use.in)[i] == use.on) {
+        if (use.on) {
+          for (unsigned i = 0; i < use.in->length() && literal == NONE; i++)
+            if ((*use.in)[i] == use.on)
               literal = i;
-              break;
-            }
+          if (literal == NONE)
+            throw UserErrorException("unit " + std::to_string(u->number()) +
+              " recorded a use of a literal its premise does not have");
+        }
         uses.push_back(use.premise);
         uses.push_back(literal);
         uses.push_back(use.term.isEmpty() ? NONE : encodeTerm(use.term));
@@ -1378,6 +1234,11 @@ struct Encoder {
           for (unsigned j = 0; image->to && j < into->length() && entry == NONE; j++)
             if ((*into)[j] == image->to)
               entry = j;
+          // `NONE` says the literal was found false and dropped, and nothing
+          // else: an image the conclusion does not have is a wrong record.
+          if (image->to && entry == NONE)
+            throw UserErrorException("unit " + std::to_string(u->number()) +
+              " recorded a literal image its conclusion does not have");
           placementEntries.push_back(entry);
         }
         placements.push_back(position);
@@ -1504,11 +1365,14 @@ struct Encoder {
       }
     }
     if (u->isClause() && inference.rule() == InferenceRule::GENERAL_SPLITTING_COMPONENT) {
-      Clause* cl = static_cast<Clause*>(u);
-      if (Literal* name = InferenceStore::instance()->splittingNameLiteral(u))
-        for (unsigned j = 0; j < cl->length(); j++)
-          if ((*cl)[j] == name)
-            units[UNIT_WIDTH * idx + 30] = j;
+      Clause* cl = u->asClause();
+      Literal* name = InferenceStore::instance()->splittingNameLiteral(u);
+      for (unsigned j = 0; name && j < cl->length(); j++)
+        if ((*cl)[j] == name)
+          units[UNIT_WIDTH * idx + 30] = j;
+      if (units[UNIT_WIDTH * idx + 30] == NONE)
+        throw UserErrorException("general splitting component " +
+          std::to_string(u->number()) + " has no recorded name literal");
     }
 
     uint32_t firstCongruence = static_cast<uint32_t>(congruences.size() / 5);
