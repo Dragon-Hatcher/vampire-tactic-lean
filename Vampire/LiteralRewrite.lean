@@ -1,4 +1,5 @@
 import Vampire.LiteralRewrite.Polynomial
+import Vampire.LiteralRewrite.Viras
 
 /-!
 The literal-wise simplifications: theory normalization, the three evaluations,

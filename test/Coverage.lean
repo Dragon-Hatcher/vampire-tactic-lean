@@ -226,3 +226,21 @@ example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a : ι) (hp : p (f (f a
 #guard_msgs (drop info) in
 example (f : ℝ → ℝ) (a : ℝ) (h1 : ∀ x, f x = x + 1) (h2 : f a = a) : False := by
   vampire (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+/-! ### VIRAS quantifier elimination -/
+
+-- A term and an infinitesimal: `x` just above `a`.
+#guard_msgs (drop info) in
+example (p : Prop) (a b : ℝ) (h : ∀ x : ℝ, x ≤ a ∨ x ≥ b ∨ p) (hab : a < b) (hp : ¬ p) :
+    False := by
+  vampire (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- The bottom of the order: `x` below every place a literal changes.
+#guard_msgs (drop info) in
+example (p : Prop) (a : ℝ) (h : ∀ x : ℝ, x > a ∨ p) (hp : ¬ p) : False := by
+  vampire (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- An infinitesimal past an equation's zero, wherever that zero lies.
+#guard_msgs (drop info) in
+example (p : Prop) (a b : ℝ) (h : ∀ x : ℝ, 3 * x ≤ a ∨ 2 * x = b ∨ p) (hp : ¬ p) : False := by
+  vampire (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]

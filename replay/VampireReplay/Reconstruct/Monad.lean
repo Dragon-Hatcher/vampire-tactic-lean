@@ -125,6 +125,14 @@ structure Context where
   literalRewritten : LiteralRewrite → Expr → MetaM (Expr × Expr) :=
     fun _ _ => throwError "replay was not given a way to prove literal rewrites"
   /--
+  `False`, from a premise `∀ x, C x` (`clauseAt` is `C`) whose clause has `n`
+  literals, and the conclusion VIRAS made of it failing: `images[i]` is what
+  the premise's `i`th literal became and `denials[i]` a proof it fails.
+  Handed in for the same reason as `contradiction`.
+  -/
+  virasRefute : Expr → Expr → Nat → Array Expr → Array Expr → MetaM Expr :=
+    fun _ _ _ _ _ => throwError "replay was not given a way to replay VIRAS"
+  /--
   `x ≠ 0 → x * z = x * w → z = w` at three numbers, and none where their sort
   does not cancel.
 

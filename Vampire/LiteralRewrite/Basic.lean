@@ -185,7 +185,10 @@ private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
   let state ← IO.mkRef {}
   let ra ← ringNormal state a
   let rb ← ringNormal state b
-  unless ra.expr == rb.expr do return none
+  -- Up to instances: a numeral in the normal form is built from whichever
+  -- instance path its side came with.
+  unless ra.expr == rb.expr || (← withReducibleAndInstances (isDefEq ra.expr rb.expr)) do
+    return none
   return some (← mkEqTrans (← ra.getProof) (← mkEqSymm (← rb.getProof)))
 
 /--

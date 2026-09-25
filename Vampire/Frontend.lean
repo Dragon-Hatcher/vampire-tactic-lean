@@ -303,7 +303,7 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
       query.preprocessed.goal.withContext
         (Reconstruct.run query.proof query.symbols Arith.contradiction
           LiteralRewrite.literalIff LiteralRewrite.literalFalse
-          LiteralRewrite.literalRewritten Arith.cancelling
+          LiteralRewrite.literalRewritten LiteralRewrite.Viras.refute Arith.cancelling
           cfg.checkSteps)
     catch e =>
       throwError "vampire refuted the goal but the proof could not be \

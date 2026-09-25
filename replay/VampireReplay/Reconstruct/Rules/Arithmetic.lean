@@ -263,6 +263,61 @@ def literalwise (step : Step) : ReconstructM Expr := do
         let refuted ← (← read).literalFalse procedure parts[i]! factor
         return mkApp2 (mkConst ``False.elim [.zero]) target (mkApp refuted h)) premise
 
+/--
+`alasca_viras_qe`: VIRAS eliminated a variable `x` from the premise, taking a
+virtual term for it -- a term, a term and an infinitesimal, or the order's
+bottom -- in each literal it reads. The worker records the variable (as a
+term the step acted on) and what each premise literal became.
+
+Suppose the conclusion fails: each of its literals does. `virasRefute` finds
+which virtual term gave it and a point every premise literal fails at, which
+the premise, holding for every `x`, denies.
+-/
+def viras (step : Step) : ReconstructM Expr := do
+  let #[(proof, stated)] := step.premises
+    | throwError "alasca_viras_qe should have one premise, got {step.premises.size}"
+  let some parent := step.unit.parents[0]?
+    | throwError "alasca_viras_qe should have one premise, got none"
+  let some images := step.placedAt 0
+    | throwError "step {step.unit.number} (alasca_viras_qe) recorded nothing of what \
+      its literals became"
+  let some use := step.useAt? 0
+    | throwError "step {step.unit.number} (alasca_viras_qe) recorded no eliminated variable"
+  let some eliminated := use.term
+    | throwError "step {step.unit.number} (alasca_viras_qe) recorded no eliminated variable"
+  unless eliminated.isVar do
+    throwError "step {step.unit.number} (alasca_viras_qe) eliminated {eliminated}, not a variable"
+  let x := eliminated.var
+  let some (_, sortName) := parent.varSorts.find? (·.1 == x)
+    | throwError "the eliminated variable X{x} has no recorded sort"
+  let n := (parent.clauseSize?).getD 0
+  step.underVars fun vars target => do
+    let into := step.into target
+    let τ ← sortType sortName
+    -- The premise with `x` left free, its other variables the conclusion's.
+    let covered ← coverVars parent vars step.unit.boundVarSorts
+    let (clauseAt, premiseAll) ← withLocalDeclD (Name.mkSimple s!"X{x}") τ fun xv => do
+      let args := parent.varSorts.map fun (v, _) => if v == x then xv else covered.getD v xv
+      let statedAt ← instantiateForall stated args
+      return (← mkLambdaFVars #[xv] statedAt, ← mkLambdaFVars #[xv] (mkAppN proof args))
+    -- The conclusion failing, each of its literals failing.
+    let refuted ← withLocalDeclD `h (mkNot target) fun h => do
+      let denials ← into.parts.mapIdxM fun j part => do
+        let some placed := into.inject 0 j (.bvar 0)
+          | throwError "step {step.unit.number} has no literal {j}"
+        -- Stated as `¬part`, the shape linear arithmetic reads a denial in.
+        mkExpectedTypeHint (.lam `l part (mkApp h placed) .default) (mkNot part)
+      let mut imagesOf := #[]
+      let mut denialsOf := #[]
+      for image in images do
+        let some (j, _) := image
+          | throwError "step {step.unit.number}: VIRAS dropped a literal, which it never does"
+        imagesOf := imagesOf.push into.parts[j]!
+        denialsOf := denialsOf.push denials[j]!
+      let falsity ← (← read).virasRefute clauseAt premiseAll n imagesOf denialsOf
+      mkLambdaFVars #[h] falsity
+    mkAppOptM ``Classical.byContradiction #[some target, some refuted]
+
 /-- `a * b`, whichever numbers those are. -/
 private def asProduct (e : Expr) : Option (Expr × Expr) :=
   match e.getAppFnArgs with
