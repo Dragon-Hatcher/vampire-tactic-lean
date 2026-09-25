@@ -1207,7 +1207,8 @@ struct Encoder {
     uint32_t numPlacements = 0;
     auto place = [&](uint32_t position, uint32_t useIndex,
                      const std::vector<Literal*>& from, Clause* into,
-                     const Stack<std::pair<unsigned, TermList>>* useBindings) {
+                     const Stack<std::pair<unsigned, TermList>>* useBindings,
+                     const Stack<InferenceStore::RewrittenLiteral>* rewritten) {
       struct Bound {
         DHMap<unsigned, TermList> map;
         TermList apply(unsigned v) {
@@ -1249,6 +1250,23 @@ struct Encoder {
         return;
       }
       for (Literal* lit : from) {
+        // A literal the inference rewrote became what it recorded; any other
+        // is the premise's literal substituted into.
+        const InferenceStore::RewrittenLiteral* became = nullptr;
+        for (unsigned k = 0; rewritten && k < rewritten->size() && !became; k++)
+          if ((*rewritten)[k].from == lit)
+            became = &(*rewritten)[k];
+        if (became) {
+          uint32_t entry = NONE;
+          for (unsigned j = 0; j < into->length() && entry == NONE; j++)
+            if ((*into)[j] == became->to)
+              entry = j;
+          if (entry == NONE)
+            throw UserErrorException("unit " + std::to_string(u->number()) +
+              " recorded a rewritten literal its conclusion does not have");
+          placementEntries.push_back(became->turned ? entry | 0x80000000u : entry);
+          continue;
+        }
         Literal* image = SubstHelper::apply(lit, bound);
         uint32_t entry = NONE;
         for (unsigned j = 0; j < into->length() && entry == NONE; j++)
@@ -1299,7 +1317,8 @@ struct Encoder {
             lits.push_back((*premise->asClause())[i]);
           const auto* use =
             occurrence < premiseUses.size() ? premiseUses[occurrence] : nullptr;
-          place(pos, occurrence, lits, u->asClause(), use ? &use->bindings : nullptr);
+          place(pos, occurrence, lits, u->asClause(), use ? &use->bindings : nullptr,
+                use ? &use->rewritten : nullptr);
         } else if (splitClause && !premise->isClause() && pos > 0
                    && premisesInOrder[0]->isClause()) {
           // A component's definition, `name <=> component`: its literals, under
@@ -1329,7 +1348,7 @@ struct Encoder {
             continue;
           for (uint32_t k = 0; k < premiseUses.size(); k++)
             place(pos, k, lits, premisesInOrder[0]->asClause(),
-                  &premiseUses[k]->bindings);
+                  &premiseUses[k]->bindings, nullptr);
         }
       }
     }

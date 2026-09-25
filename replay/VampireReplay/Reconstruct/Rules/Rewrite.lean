@@ -266,8 +266,8 @@ def demodulation (step : Step) : ReconstructM Expr := do
     -- What the premise says once rewritten is what the conclusion says, up to
     -- the order its literals come in.
     let (rewritten, says) ← rewriteClause rw vars mainType mainAt heq to
-    carryAll says target rewritten (sourceCount := mainParent.clauseSize?)
-      (targetCount := step.unit.clauseSize?)
+    carryAll says target rewritten (placed := step.placedAt 0)
+      (sourceCount := mainParent.clauseSize?) (targetCount := step.unit.clauseSize?)
 
 /--
 `superposition`: the clause being rewritten and the equation rewriting it, both
@@ -324,8 +324,8 @@ occurs in them.
 
 Either the disequality holds, and it is a literal of the conclusion, or `l = r`
 and each other literal becomes what it was rewritten to. Which disequality and
-which way round come recorded; literal selection reorders the conclusion
-afterwards, so each literal is then placed where it went.
+which way round come recorded, and so does where each literal -- rewritten or
+not -- went.
 -/
 def innerRewriting (step : Step) : ReconstructM Expr := do
   let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
@@ -353,9 +353,10 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
       | throwError "inner rewriting did not record which side it rewrote"
     let trees ← TreeCache.new
     let side ← treeOf trees vars {} sideTerm
+    let placed := step.placedAt 0
     step.withInto target fun into =>
     elimGiven parts (motive? := some target) (fun k h => do
-      if k == i then return ← into.place h
+      if k == i then return ← into.placeAt placed i h
       let holds ← withLocalDeclD `h equation fun heq => do
         let lr ← if leftRewritten then pure heq else mkEqSymm heq
         let some literal := clause.literals[k]? | throwError "a missing literal"
@@ -369,9 +370,9 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
           mkEqMP (← mkCongrArg motive lr) h
         let rewritten ← mkExpectedTypeHint rewritten
           (← instantiateMVars (← inferType rewritten)).headBeta
-        mkLambdaFVars #[heq] (← into.place rewritten)
+        mkLambdaFVars #[heq] (← into.placeAt placed k rewritten)
       let fails ← withLocalDeclD `h (mkApp (mkConst ``Not) equation) fun hne => do
-        mkLambdaFVars #[hne] (← into.place hne)
+        mkLambdaFVars #[hne] (← into.placeAt placed i hne)
       mkAppM ``Classical.byCases #[holds, fails]) premiseAt
 
 end Vampire.Reconstruct.Rewrite
