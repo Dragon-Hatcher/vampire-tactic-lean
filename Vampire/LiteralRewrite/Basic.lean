@@ -175,10 +175,19 @@ def Comparison.atom (c : Comparison) : MetaM Expr :=
 def Comparison.statement (c : Comparison) : MetaM Expr := do
   return signed c.positive (← c.atom)
 
-/-- `e` in ring normal form throughout -- every ring subterm, inside uninterpreted
-symbols too -- with the atoms numbered by `state`. -/
-def ringNormal (state : IO.Ref AtomM.State) (e : Expr) : MetaM Simp.Result :=
-  AtomM.recurse state {} true RingNF.evalExpr (RingNF.cleanup {}) e
+/--
+`e` in ring normal form throughout -- every ring subterm, inside uninterpreted
+symbols too -- with the atoms numbered by `state`.
+
+ALASCA's `$lin_mul` is read as the product it is: `linMul` is unfolded here, the
+one place a term is put into ring normal form, so that nothing that does so
+sees `linMul k t` as an atom.
+-/
+def ringNormal (state : IO.Ref AtomM.State) (e : Expr) : MetaM Simp.Result := do
+  let e' ← Vampire.Reconstruct.unfoldDefinitions e (only := (· == ``Vampire.Reconstruct.linMul))
+  let r ← AtomM.recurse state {} true RingNF.evalExpr (RingNF.cleanup {}) e'
+  -- `e' = nf` is `e = nf`: `linMul` unfolds to the product.
+  return { expr := r.expr, proof? := some (← mkExpectedTypeHint (← r.getProof) (← mkEq e r.expr)) }
 
 /-- `a = b` by putting both into ring normal form, the atoms numbered alike. -/
 private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
@@ -195,16 +204,11 @@ private def ringEqNormal (a b : Expr) : MetaM (Option Expr) := do
 `a = b` for two terms, or two statements, that are one up to the identities
 of a commutative ring: both are put into ring normal form, the atoms numbered
 alike, and have to come out as one term. What certifies a rewrite a port of
-vampire's has already decided on, never what decides it. ALASCA's `$lin_mul`
-is read as the product it is.
+vampire's has already decided on, never what decides it.
 -/
 def ringEq (a b : Expr) : MetaM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
-  let a' ← Vampire.Reconstruct.unfoldDefinitions a (only := (· == ``Vampire.Reconstruct.linMul))
-  let b' ← Vampire.Reconstruct.unfoldDefinitions b (only := (· == ``Vampire.Reconstruct.linMul))
-  let some h ← ringEqNormal a' b' | return none
-  -- `a' = b'` is `a = b`: `linMul` unfolds to the product.
-  return some (← mkExpectedTypeHint h (← mkEq a b))
+  ringEqNormal a b
 
 /-- `ringEq`, failing where the two are not one. -/
 def ringEq! (a b : Expr) : MetaM Expr := do

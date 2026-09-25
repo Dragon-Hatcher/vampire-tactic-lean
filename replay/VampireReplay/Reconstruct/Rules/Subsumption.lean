@@ -47,7 +47,7 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
   step.underVars fun kept target => do
     -- The removed literal can be the only one mentioning a variable, which the
     -- conclusion then does not keep; σ may still mention it.
-    let vars ← coverVars mainParent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let into := step.into target

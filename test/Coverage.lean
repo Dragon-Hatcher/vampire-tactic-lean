@@ -108,6 +108,20 @@ example (f : ℝ → ℝ) (x : ℝ) (h : f (⌊x + 1⌋) = 0) : f (⌊x⌋ + 1) 
 example (f : ℤ → ℤ) (h : f (7 / 2 + 7 % 2) = 0) : f 4 = 0 := by
   vampire (options := #[("evaluation", "force")]) [*]
 
+-- Polynomial evaluation leaves a literal it changes nothing in as written, not
+-- in normal form, while it evaluates the clause's other literal.
+#guard_msgs (drop info) in
+example (x y u z w : ℝ) (h : 27 = 36 * x + 19 * y + 24 * u ∨ (-3) * z + 17 * z < w)
+    (h1 : 27 ≠ 36 * x + 19 * y + 24 * u) (h2 : w ≤ 14 * z) : False := by
+  vampire (options := #[("evaluation", "force")]) [*]
+
+-- Polynomial evaluation refutes a literal of numerals written with `$lin_mul`:
+-- `9/10 < x - y` evaluated to `x + -1·y`, and `y` rewritten into `x`.
+#guard_msgs (drop info) in
+example {ι : Type} (f : ι → ℝ) (a : ι) (p : Prop) (x y : ℝ) (hp : ¬p)
+    (h1 : 9/10 < 2 * x - y - x ∨ p) (h2 : f a = x) (h3 : f a = y) : False := by
+  vampire (options := #[("evaluation", "force")]) [*]
+
 -- Pushing unary minus.
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (x y : ℤ) (h : f (-(x + -y)) = 0) : f (-x + y) = 0 := by
@@ -117,6 +131,11 @@ example (f : ℤ → ℤ) (x y : ℤ) (h : f (-(x + -y)) = 0) : f (-x + y) = 0 :
 #guard_msgs (drop info) in
 example (x y : ℤ) (h : x + y < y + 3) (h2 : 3 ≤ x) : False := by
   vampire (options := #[("cancellation", "force")]) [*]
+
+-- Cancellation leaves a literal that compares no numbers as it is.
+#guard_msgs (drop info) in
+example (p : Prop) (x y : ℝ) (hp : ¬p) (h : p ∨ x + 3 < y + 3) (h2 : y ≤ x) : False := by
+  vampire (options := #[("cancellation", "force"), ("evaluation", "force")]) [*]
 
 -- ALASCA normalization: a comparison scaled by the gcd of its coefficients.
 #guard_msgs (drop info) in
@@ -215,6 +234,23 @@ example (x y z : ℝ) (h1 : x ≤ y) (h2 : y ≤ z) (h3 : z < x) : False := by v
 #guard_msgs (drop info) in
 example (f : ℚ → ℚ) (a : ℚ) (h1 : ∀ x, f x > x) (h2 : f a < a) : False := by
   vampire (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- A literal dropped with the last occurrence of a variable, by a rule that
+-- substitutes nothing: the premise is read in the conclusion's numbering, the
+-- dropped variable at an element of its sort.
+#guard_msgs (drop info) in
+example {ι κ : Type} (p : ι → Prop) (f : κ → κ) (h : ∀ (x : κ) (y : ι), p y ∨ f x ≠ f x)
+    (k : κ) (a : ι) (ha : ¬ p a) : False := by
+  vampire [*]
+
+-- Superposition over several sorts: the equation's `x : A` is left out of the
+-- conclusion, whose own variable is the equation's `y : B`, and what `x` is
+-- bound to is read in the conclusion's numbering, not the equation's.
+#guard_msgs (drop info) in
+example {A B C D : Type} (R : B → Prop) (m : C → B) (k : D → B → C) (g : A → D)
+    (h1 : ∀ (x : A) (y : B), m (k (g x) y) = y) (h2 : ∀ u : C, ¬ R (m u)) (a : A) (b : B)
+    (hb : R b) : False := by
+  vampire [*]
 
 -- Backward demodulation, with forward demodulation off.
 #guard_msgs (drop info) in

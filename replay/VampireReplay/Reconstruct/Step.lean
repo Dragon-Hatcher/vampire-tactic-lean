@@ -52,9 +52,10 @@ def conclusionOf (u : Vampire.Unit) : ReconstructM Expr := do
 /--
 Instantiates a premise at what the inference bound its variables to.
 
-A variable the inference left alone is bound to itself, and one the conclusion
-did not keep stands for nothing in particular, so `vars` has to cover the
-premise's variables before this is called.
+The images are terms of the conclusion's variables, so `vars` is the map of
+those -- the ones the conclusion kept and the ones only an image mentions
+(`coverVars`). A premise variable with no image stands for nothing in
+particular: it is instantiated at an element of its own sort.
 -/
 def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
     (proof stated : Expr) : ReconstructM (Expr × Expr) := do
@@ -67,21 +68,23 @@ def instantiateAt (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   return (mkAppN proof args, ← sharedClause (← instantiateForall stated args))
 
 /--
-Something of the right sort for each of a premise's variables the conclusion
-did not keep, and for each of @b bound.
+`vars`, a map of the conclusion's variables, with something of the right sort
+for each of @b bound not in it.
 
-Such a variable is instantiated at an arbitrary element, and both premises have
-to agree on which: a substitution recorded against the premise can mention it.
+@b bound is the step's `boundVarSorts`: the variables of the conclusion's
+numbering that an image recorded against a premise mentions and the conclusion
+does not have. Each is instantiated at an arbitrary element, which cannot
+matter to the conclusion, and every premise has to agree on which: two
+premises' images can mention the same one.
 
-@b bound is the step's `boundVarSorts`: a unifier's image can mention a
-variable that neither the premise nor the conclusion has, and reading that term
-back needs its sort too. The conclusion does not speak of it, so which element
-is taken for it cannot matter either.
+Only the conclusion's numbering goes in here. A premise of a step that
+substituted numbers its variables its own way, so its variables are never keys
+of this map: `instantiateAt` reads them through the images recorded against
+it. A step that applied no substitution is the other case, `premiseVars`.
 -/
-def coverVars (parent : Vampire.Unit) (vars : Vars)
-    (bound : Array (UInt32 × String) := #[]) : ReconstructM Vars := do
+def coverVars (vars : Vars) (bound : Array (UInt32 × String)) : ReconstructM Vars := do
   let mut vars := vars
-  for (v, sortName) in parent.varSorts ++ bound do
+  for (v, sortName) in bound do
     unless vars.contains v do
       vars := vars.insert v (← someElement (← sortType sortName))
   return vars
@@ -96,6 +99,20 @@ def argsFor (parent : Vampire.Unit) (vars : Vars) : ReconstructM (Array Expr) :=
     match vars[v]? with
     | some x => pure x
     | none => someElement (← sortType sortName)
+
+/--
+For a step that applied no substitution: its premise speaks of the very
+variables its conclusion does, one numbering for both, so `vars` is extended to
+the premise's variables -- one the conclusion dropped, with the literal it was
+the last in, at an element of its sort -- and the premise is instantiated at
+them. The premise's own literals can then be read through the map too.
+-/
+def premiseVars (parent : Vampire.Unit) (vars : Vars) : ReconstructM (Vars × Array Expr) := do
+  let args ← argsFor parent vars
+  let mut vars := vars
+  for ((v, _), x) in parent.varSorts.zip args do
+    vars := vars.insert v x
+  return (vars, args)
 
 /-- A step of vampire's proof, with everything needed to justify it. -/
 structure Step where
@@ -227,8 +244,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
         (← step.conclusion)) premiseProof
   step.underVars fun kept target => do
     -- Dropping a literal can drop the last occurrence of a variable with it.
-    let vars ← coverVars parent kept step.unit.boundVarSorts
-    let args ← argsFor parent vars
+    let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
     -- The premise's literals are read as the premise means them: polarity
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))

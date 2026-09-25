@@ -322,8 +322,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
     | throwError "definition_unfolding should be given a clause"
   let defs ← definitions step
   step.underVars fun kept target => do
-    let vars ← coverVars parent kept step.unit.boundVarSorts
-    let args ← argsFor parent vars
+    let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
     let body ← carryWith (← instantiateForall (← conclusionOf parent) args) target
       (mkAppN clauseProof args)
       (fun i h => do
@@ -492,7 +491,7 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
   step.underVars fun kept target => do
     -- Splitting substitutes nothing, so the conclusion keeps the premise's
     -- variables; it records no unifier because there is none to record.
-    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       Clause.instantiateKept parent vars proof stated
     carryAll premiseType target premiseAt

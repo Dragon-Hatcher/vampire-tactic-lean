@@ -83,7 +83,7 @@ def condensation (step : Step) : ReconstructM Expr := do
     | throwError "condensation should have one premise, got none"
   let use ← step.useAt 0
   step.underVars fun kept target => do
-    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     -- Every literal of the instance is one of the conclusion's, the two that

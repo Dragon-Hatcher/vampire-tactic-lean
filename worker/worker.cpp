@@ -631,7 +631,7 @@ void subsumptionEqualityResolution(Unit* u)
   premise->collectVars(vars);
   for (unsigned v : iterTraits(vars.iterator()))
     bindings.push({v, SubstHelper::apply(subst.apply(TermList(v, false), 0), undo)});
-  store->recordPremiseUse(u, premise, removed, TermList::empty(), 0, bindings);
+  store->recordPremiseUse(u, premise, lit, TermList::empty(), 0, bindings);
 }
 
 
@@ -677,7 +677,7 @@ void innerRewriting(Unit* u)
       TermList lhs = *eq->nthArgument(side);
       TermList rhs = *eq->nthArgument(1 - side);
       if (givesConclusion(i, lhs, rhs)) {
-        store->recordPremiseUse(u, premise, i, lhs, 0,
+        store->recordPremiseUse(u, premise, eq, lhs, 0,
           Stack<std::pair<unsigned, TermList>>());
         return;
       }
@@ -1197,21 +1197,18 @@ struct Encoder {
           bindings.push_back(encodeTerm(term));
         }
         // Literal selection permutes a clause's literals in place after an
-        // inference has run, so the index the inference saw is not the index
-        // the clause is serialised with. The literal itself was kept; where it
-        // sits now is settled here, with nothing further to move it.
-        unsigned literal = use.literal;
-        if (use.on && use.premiseClause) {
-          literal = InferenceStore::literalNone;
-          for (unsigned i = 0; i < use.premiseClause->length(); i++)
-            if ((*use.premiseClause)[i] == use.on) {
+        // inference has run, so the store keeps the literal, never an index;
+        // where it sits in the clause as serialised is settled here, with
+        // nothing further to move it.
+        uint32_t literal = NONE;
+        if (use.on)
+          for (unsigned i = 0; i < use.in->length(); i++)
+            if ((*use.in)[i] == use.on) {
               literal = i;
               break;
             }
-        }
         uses.push_back(use.premise);
-        uses.push_back(literal == InferenceStore::literalNone ? NONE
-                                                              : literal);
+        uses.push_back(literal);
         uses.push_back(use.term.isEmpty() ? NONE : encodeTerm(use.term));
         uses.push_back(use.flags);
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);

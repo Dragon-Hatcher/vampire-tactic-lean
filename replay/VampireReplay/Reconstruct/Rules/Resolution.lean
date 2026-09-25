@@ -33,7 +33,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- Resolving away the last literal a variable occurs in leaves it out of
     -- the conclusion, while the unifier still speaks of it; such a variable
     -- stands for an arbitrary element, the same one wherever it is met.
-    let vars ← coverVars parent₂ (← coverVars parent₁ kept) step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (p₁, t₁) ← instantiateAt parent₁ use₁ vars proof₁ stated₁
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
     -- Every literal but the resolved one carries over, so the conclusion keeps
@@ -68,9 +68,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
   step.underVars fun kept target => do
     -- Every literal but one is resolved away, and with it any variable it was
     -- the last to mention.
-    let mut vars ← coverVars main kept step.unit.boundVarSorts
-    for parent in step.unit.parents do
-      vars ← coverVars parent vars
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (mainAt, mainType) ← instantiateAt main mainUse vars mainProof mainStated
     -- Which unit resolved away which of the clause's literals.
     let mut units : Std.HashMap Nat (Expr × Expr) := {}
@@ -108,7 +106,7 @@ def factoring (step : Step) : ReconstructM Expr := do
     | throwError "factoring should have one premise, got none"
   let use ← step.useAt 0
   step.underVars fun kept target => do
-    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     carryAll premiseType target premiseAt (placed := step.placedAt 0)
@@ -165,7 +163,7 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     | throwError "equality resolution with deletion did not record the \
       inequality it resolved"
   step.underVars fun kept target => do
-    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
@@ -217,7 +215,7 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
     | throwError "equality factoring did not record the equality it factored \
       against"
   step.underVars fun kept target => do
-    let vars ← coverVars parent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent selected vars premiseProof premiseStated
     -- Either side of an equality can be the one that was unified, and which

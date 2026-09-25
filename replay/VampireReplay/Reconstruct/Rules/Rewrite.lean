@@ -221,7 +221,7 @@ def demodulation (step : Step) : ReconstructM Expr := do
   let sideUse ← step.useAt 1
   step.underVars fun kept target => do
     -- Rewriting can be what removes a variable from the clause.
-    let vars ← coverVars mainParent kept step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
@@ -253,8 +253,7 @@ def superposition (step : Step) : ReconstructM Expr := do
   let some equationLiteral := sideUse.literal
     | throwError "{step.rule.name} did not record which literal is the equation"
   step.underVars fun kept target => do
-    let vars ← coverVars sideParent (← coverVars mainParent kept)
-      step.unit.boundVarSorts
+    let vars ← coverVars kept step.unit.boundVarSorts
     let rw ← rewrittenOf mainParent mainUse vars
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
@@ -317,8 +316,7 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
   let count := clause.literals.size
   step.underVars fun kept target => do
     -- Rewriting substitutes nothing, but it can rewrite a variable away.
-    let vars ← coverVars parent kept step.unit.boundVarSorts
-    let args ← argsFor parent vars
+    let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
     let premiseAt := mkAppN premiseProof args
     let parts ← Clause.partsOf ``Or (← instantiateForall premiseStated args) count
 

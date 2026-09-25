@@ -36,7 +36,7 @@ private def premisesOf (step : Step) (vars : Vars) :
     -- took the premise as it stands recorded nothing, and then it is taken so.
     match step.useAt? i with
     | some use =>
-      out := out.push (← instantiateAt parent use (← coverVars parent vars step.unit.boundVarSorts) proof stated)
+      out := out.push (← instantiateAt parent use (← coverVars vars step.unit.boundVarSorts) proof stated)
     | none =>
       -- Nothing recorded: a simplifying inference that applies no substitution
       -- states its premise of the very variables its conclusion speaks of, so
@@ -218,6 +218,14 @@ A literal-wise simplification: each literal of the premise became the literal
 of the conclusion the worker recorded, by the rewrites of the procedure it
 recorded, or was found false and dropped.
 
+A literal the procedure gave back as it was is the conclusion's as it stands,
+whatever the procedure would make of it: a rule applies its procedure only
+where it changes something (`tryCancel` passes over what compares no numbers,
+polynomial evaluation over a literal nothing in which evaluates). Vampire's
+test is that the result is the literal itself; the worker writes each literal
+once, so the premise's literal and its image being one literal on the wire is
+that test.
+
 Before clausification the step states a formula, and its atoms are rewritten
 where they stand, which is a congruence down to them; only theory
 normalization rewrites formulas.
@@ -241,6 +249,8 @@ def literalwise (step : Step) : ReconstructM Expr := do
     | throwError "step {step.unit.number} ({step.rule.name}) recorded nothing of \
       what its literals became"
   let factors := step.unit.literalFactors?
+  let premiseLiterals := (parent.clause?.map (·.literals)).getD #[]
+  let literals := (step.unit.clause?.map (·.literals)).getD #[]
   step.underVars fun vars target => do
     let #[(premise, premiseStated)] ← premisesOf step vars
       | throwError "{step.rule.name} should have one premise"
@@ -255,8 +265,16 @@ def literalwise (step : Step) : ReconstructM Expr := do
       | some (some (j, _)) =>
         let some goal := into.parts[j]?
           | throwError "step {step.unit.number} has no literal {j}"
-        let iff ← (← read).literalIff procedure parts[i]! goal factor
-        let some placed := into.inject 0 j (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
+        let kept := premiseLiterals[i]?.isSome && premiseLiterals[i]? == literals[j]?
+        let proof ← if kept then
+            unless ← isDefEq parts[i]! goal do
+              throwError "step {step.unit.number} kept its premise's literal {i} as its \
+                literal {j}, but they are stated{indentExpr parts[i]!}\nand{indentExpr goal}"
+            pure h
+          else
+            let iff ← (← read).literalIff procedure parts[i]! goal factor
+            pure (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
+        let some placed := into.inject 0 j proof
           | throwError "step {step.unit.number} has no literal {j}"
         return placed
       | _ =>
@@ -295,9 +313,8 @@ def viras (step : Step) : ReconstructM Expr := do
     let into := step.into target
     let τ ← sortType sortName
     -- The premise with `x` left free, its other variables the conclusion's.
-    let covered ← coverVars parent vars step.unit.boundVarSorts
     let (clauseAt, premiseAll) ← withLocalDeclD (Name.mkSimple s!"X{x}") τ fun xv => do
-      let args := parent.varSorts.map fun (v, _) => if v == x then xv else covered.getD v xv
+      let args ← argsFor parent (vars.insert x xv)
       let statedAt ← instantiateForall stated args
       return (← mkLambdaFVars #[xv] statedAt, ← mkLambdaFVars #[xv] (mkAppN proof args))
     -- The conclusion failing, each of its literals failing.
