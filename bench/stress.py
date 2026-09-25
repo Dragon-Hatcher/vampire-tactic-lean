@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Rerun problems that replay with options that steer vampire into other rules:
 
-    ./stress.py <results.jsonl> <audit.jsonl>... [--per-suite N]
+    ./stress.py <results.jsonl> <audit.jsonl>... [--sets NAME...]
 
 Each problem an audit found `replayed` is run again under each option set that
 fits it -- the arithmetic ones for SMT-LIB problems over numbers, the others for
 the rest -- and what happened is appended to `results.jsonl`, one run a line.
+The options are forced, holding in every slice of the portfolio; `--sets` runs
+only the sets named.
 A run already in the results is skipped, so a run can be resumed. Runs one at a
 time, with the audit's time and memory limits.
 """
@@ -46,6 +48,7 @@ def main() -> None:
     ap.add_argument("results", type=Path)
     ap.add_argument("audits", type=Path, nargs="+")
     ap.add_argument("--timeout", type=int, default=10)
+    ap.add_argument("--sets", nargs="+", help="only these option sets")
     args = ap.parse_args()
     done = set()
     if args.results.exists():
@@ -63,11 +66,17 @@ def main() -> None:
             stmt = (d / "stmt.lean").read_text()
             sets = ARITHMETIC if NUMBERS.search(stmt) else LOGIC
             for name, opts in sets.items():
+                if args.sets and name not in args.sets:
+                    continue
                 if (r["problem"], name) not in done:
                     todo.append((d, stmt, name, opts))
     print(f"{len(todo)} runs", flush=True)
     for d, stmt, name, opts in todo:
-        options = ", ".join(f'("{k}", "{v}")' for k, v in opts)
+        # Forced, so that they hold in every slice of the portfolio: a slice's
+        # own options are read over the ones given, and most of the schedule's
+        # slices say what they want of these.
+        forced = ":".join(f"{k}={v}" for k, v in opts)
+        options = f'("forced_options", "{forced}")'
         res = run.lean_run(run.REPO, "Stress_" + re.sub(r"[^A-Za-z0-9]", "_", d.name),
                            "import Vampire", stmt,
                            f"vampire (timeout := {args.timeout}) (wallLimit := {3 * args.timeout}) "
