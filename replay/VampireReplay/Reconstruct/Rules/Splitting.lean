@@ -102,7 +102,7 @@ def component (step : Step) : ReconstructM Expr := do
     | throwError "a general splitting component is not a clause"
   step.underVars fun vars _target => do
     let parts ← clause.literals.mapM (Reconstruct.literal vars)
-    let suffix := suffixJunctions ``Or ``False parts
+    withDisjunction parts fun d => do
     let halves ← rest.mapM (Reconstruct.literal vars)
     -- What the name denies, at the variables it is applied to.
     let quantified ← halfHolds (splitVars step.unit arguments) rest vars
@@ -117,13 +117,11 @@ def component (step : Step) : ReconstructM Expr := do
             -- Where each literal of the half is in the clause was settled
             -- when the clause was read.
             let some i := restAt[j]? | throwError "a missing literal"
-            injectGiven parts i hj (suffix? := some suffix))
+            pure (d.inject i hj))
           (mkAppN h args))
     let failed ← withLocalDeclD `h (mkApp (mkConst ``Not) quantified) fun h => do
       -- Which is what the name stands for.
-      mkLambdaFVars #[h]
-        (← injectGiven parts nameAt (← mkExpectedTypeHint h (parts[nameAt]!))
-          (suffix? := some suffix))
+      mkLambdaFVars #[h] (d.inject nameAt (← mkExpectedTypeHint h (parts[nameAt]!)))
     mkAppM ``Or.elim #[← mkAppOptM ``Classical.em #[some quantified], held, failed]
 
 /--
@@ -149,6 +147,7 @@ def general (step : Step) : ReconstructM Expr := do
   let split := splitVars component arguments
   step.underVars fun vars target => do
     let parts ← conclusion.literals.mapM (Reconstruct.literal vars)
+    withDisjunction parts fun d => do
     -- What the name denies, at the variables it is applied to.
     let quantified ← halfHolds split rest vars
     -- The conclusion denies the name; the rest of it is the other half.
@@ -162,7 +161,7 @@ def general (step : Step) : ReconstructM Expr := do
       | throwError "the conclusion does not deny the name `{name}`"
     -- The half holds throughout, which is the denial of the name.
     let held ← withLocalDeclD `h quantified fun h => do
-      mkLambdaFVars #[h] (← injectGiven parts i
+      mkLambdaFVars #[h] (d.inject i
         (← mkAppM ``Iff.mpr
           #[← mkAppOptM ``Classical.not_not #[some quantified], h]))
     -- Or it fails somewhere, and the clause gives the other half there.
@@ -178,18 +177,11 @@ def general (step : Step) : ReconstructM Expr := do
       for (v, witness) in witnesses do
         halves := halves.insert v witness
       let refutedParts ← rest.mapM (Reconstruct.literal halves)
-      let refutedSuffix := suffixJunctions ``Or ``False refutedParts
-      let mut negations : Array Expr := #[]
-      for (part, j) in refutedParts.zipIdx do
-        let negation ← withLocalDeclD `l part fun l => do
-          mkLambdaFVars #[l]
-            (mkApp against (← injectGiven refutedParts j l (suffix? := some refutedSuffix)))
-        negations := negations.push negation
+      let negations := refutationsOf refutedParts against
       -- The clause at those witnesses says one of its literals holds, and the
       -- ones of that half do not.
       let args ← argsFor parent halves
       let sourceParts ← source.literals.mapM (Reconstruct.literal halves)
-      let suffix := suffixJunctions ``Or ``False parts
       -- The two halves are built from the source clause's own literals, which
       -- vampire shares, so where each went is found by which literal it is.
       let conclusionLiterals := conclusion.literals
@@ -200,7 +192,7 @@ def general (step : Step) : ReconstructM Expr := do
           let some negation := negations[j]? | throwError "a missing literal"
           return ← mkAppOptM ``False.elim #[some target, some (mkApp negation hl)]
         if let some j := conclusionLiterals.findIdx? (· == l) then
-          return ← injectGiven parts j hl (suffix? := some suffix)
+          return d.inject j hl
         throwError "the literal{indentExpr (← instantiateMVars (← inferType hl))}\n\
           is in neither the split-off half nor the conclusion")
         (mkAppN clauseProof args))

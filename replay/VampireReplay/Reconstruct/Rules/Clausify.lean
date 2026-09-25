@@ -221,7 +221,7 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
   let target := junction ``Or ``False parts
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
-      let suffix := suffixJunctions ``Or ``False parts
+      let refutations := refutationsOf parts n
       -- The clause's parts with their double negations stripped, to find a
       -- part by what it says without comparing it with each of them.
       let strippedParts := parts.map stripped
@@ -229,13 +229,9 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
         -- The clause usually says just what the step put in it, so that is
         -- looked for first: a clause of a few hundred literals is refuted a
         -- literal at a time, once for every step of the clausification.
-        -- `fun p => n (inject p)`, written with the variable in place: the
-        -- injection is constructors applied to the clause's parts, which have
-        -- nothing to abstract, and abstracting walks the whole clause.
         let refuting (i : Nat) : ReconstructM Expr := do
-          let some part := parts[i]? | throwError "the clause has no part {i}"
-          return .lam `p part
-            (mkApp n (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
+          let some refutation := refutations[i]? | throwError "the clause has no part {i}"
+          return refutation
         if let some i := parts.findIdx? (· == e) then
           return ← refuting i
         -- What a step put in a clause is recorded before the clausifier's own
@@ -685,7 +681,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       return !((← connectiveOf g) matches .«forall» | .and | .or | .«false»)
     if literals then
       return ← withLocalDeclD `h stated fun h => do
-        mkLambdaFVars #[h] (← carryAll stated target h)
+        mkLambdaFVars #[h] (← carryAll stated target h (into := into))
     let branches ← f.subformulas.zipIdx.mapM fun (g, i) => do
       let some part := parts[i]? | throwError "a missing disjunct"
       descend sorts choices vars g part target into
@@ -700,7 +696,7 @@ private partial def descend (sorts : Array (UInt32 × String))
   | _ =>
     -- A literal, which the clause has to contain.
     withLocalDeclD `h stated fun h => do
-      mkLambdaFVars #[h] (← into.place target h)
+      mkLambdaFVars #[h] (← into.place h)
 
 /-- `clausify`: one clause of a formula's conjunctive normal form. -/
 def clausify (step : Step) : ReconstructM Expr := do
@@ -726,13 +722,16 @@ def clausify (step : Step) : ReconstructM Expr := do
         (step.unit.parents.flatMap (·.skolems) ++ step.unit.skolems).toList
       let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs, skolems }
         (chainTo clause) 0 none #[]
+      let generalised ← genParts sorts vars clause
       mkLambdaFVars xs
-        (← carryAll (junction ``Or ``False (← genParts sorts vars clause))
-          target proof)
+        (← carryAll (junction ``Or ``False generalised) target proof
+          (sourceCount := some generalised.size)
+          (targetCount := step.unit.clause?.map (·.size)))
     | none =>
-      let implication ← descend sorts
-        (Std.HashMap.ofList (step.unit.conjunctChoices.toList.map fun (f, i) => (f.index, i)))
-        vars premise
-        (← instantiateMVars premiseStated) target (step.into target)
-      mkLambdaFVars xs (mkApp implication premiseProof)
+      let proof ← step.withInto target fun into => do
+        let implication ← descend sorts
+          (Std.HashMap.ofList (step.unit.conjunctChoices.toList.map fun (f, i) => (f.index, i)))
+          vars premise (← instantiateMVars premiseStated) target into
+        return mkApp implication premiseProof
+      mkLambdaFVars xs proof
 end Vampire.Reconstruct.Clausify

@@ -98,7 +98,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .gaussianVariableEliminiation => Arithmetic.theoryStep step
   | .arithmeticSubtermGeneralization => Arithmetic.literalwise step
   | .alascaVirasQe => Arithmetic.viras step
-  | .constrainedResolution => Arithmetic.theoryStep step
+  | .constrainedResolution => Resolution.resolution step
   -- Constrained superposition is superposition with the pairs the unifier
   -- could not unify left among the conclusion's literals.
   | .constrainedSuperposition => Rewrite.superposition step

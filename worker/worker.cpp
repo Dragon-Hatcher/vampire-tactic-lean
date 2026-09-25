@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    44 words, see `write`:
+ *   header    45 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -35,7 +35,8 @@
  *                  against
  *              41  how many records `placements` holds, and 42
  *                  `placementEntries`
- *              43  how many words `literalFactors` holds
+ *              43  how many words `literalFactors` holds, and 44
+ *                  `constraintLits`
  *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
@@ -69,14 +70,15 @@
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
  *              splittingName, firstFactor, numFactors, procedure}
- *             `firstConstraint` and `numConstraints` say which of a clause's
- *             literals are the disequalities an abstracting unifier left
- *             behind: what it could not unify it defers into literals the
- *             inference puts into its conclusion, and the step is sound
- *             because the conclusion failing makes each of those pairs equal.
- *             Binary resolution puts them before the literals it carried over
- *             and every other rule after, so a count alone would not say which
- *             literals they are.
+ *             `firstConstraint` and `numConstraints` are the entries of
+ *             `constraintLits` that say which of a clause's literals are the
+ *             disequalities an abstracting unifier left behind: what it could
+ *             not unify it defers into literals the inference puts into its
+ *             conclusion, and the step is sound because the conclusion failing
+ *             makes each of those pairs equal. Where the inference put them
+ *             says nothing by the time the clause is written out -- literal
+ *             selection permutes it in place -- so each is found by which
+ *             literal it is.
  *             `genState` is the generalised clause a clause came out of, and
  *             the choices are the conjuncts its clausification went into.
  *             `firstFactor` and `numFactors` are, for a literal-wise
@@ -206,6 +208,8 @@
  *   literalFactors string offsets of rationals, `n` or `n/d`: the number the
  *             difference of a comparison's sides is its normal form's term
  *             times, see `InferenceStore::LiteralImage`
+ *   constraintLits literal positions within their unit's clause, the entries
+ *             of a unit's constraints
  *   strings   NUL-terminated names, padded to a 4-byte boundary
  *   proofText vampire's own rendering of the proof, padded likewise
  */
@@ -264,7 +268,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 27;
+const uint32_t VERSION = 28;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 34;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -724,7 +728,7 @@ struct Encoder {
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
-      placementEntries, literalFactors;
+      placementEntries, literalFactors, constraintLits;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -1285,8 +1289,24 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 8] =
       numVarSorts == 0 && numBoundSorts == 0 ? NONE : firstVarSort;
     units[UNIT_WIDTH * idx + 25] = numBoundSorts;
-    auto [firstConstraint, numConstraints] =
-      InferenceStore::instance()->constraints(u);
+    // Where each constraint sits now, with nothing further to move it.
+    uint32_t firstConstraint = static_cast<uint32_t>(constraintLits.size());
+    uint32_t numConstraints = 0;
+    if (const Stack<Literal*>* constraints =
+          InferenceStore::instance()->constraints(u)) {
+      Clause* clause = u->asClause();
+      for (Literal* constraint : iterTraits(constraints->iter())) {
+        uint32_t at = NONE;
+        for (unsigned i = 0; i < clause->length() && at == NONE; i++)
+          if ((*clause)[i] == constraint)
+            at = i;
+        if (at == NONE)
+          throw UserErrorException("a unification constraint of unit " +
+            std::to_string(u->number()) + " is not among its literals");
+        constraintLits.push_back(at);
+        numConstraints++;
+      }
+    }
     units[UNIT_WIDTH * idx + 26] = numConstraints == 0 ? NONE : firstConstraint;
     units[UNIT_WIDTH * idx + 27] = numConstraints;
 
@@ -1596,6 +1616,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.placements.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
   putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
+  putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1627,6 +1648,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.placements);
   putWords(buf, enc.placementEntries);
   putWords(buf, enc.literalFactors);
+  putWords(buf, enc.constraintLits);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

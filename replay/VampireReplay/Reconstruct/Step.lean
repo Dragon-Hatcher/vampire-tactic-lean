@@ -191,9 +191,10 @@ def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
   let (_, earlier) ← step.occurrence? i
   step.unit.placement? i earlier
 
-/-- The conclusion's literals, `target` being what it says, to place into. -/
-def Step.into (step : Step) (target : Expr) : Into :=
-  Into.of target ((step.unit.clause?.map (·.size)).getD 0)
+/-- `k` given the conclusion's literals to place into, `target` being what it says. -/
+def Step.withInto (step : Step) (target : Expr) (k : Into → ReconstructM Expr) :
+    ReconstructM Expr :=
+  Reconstruct.withInto target step.unit.clauseSize? k
 
 /--
 Whether the term a use recorded is the left side of the equation it acted on,
@@ -239,7 +240,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
       -- formula's shape is what it says.
       return mkApp (← implies (← instantiateMVars premiseStated)
         (← step.conclusion)) premiseProof
-  let some conclusion := step.unit.clause?
+  let some _ := step.unit.clause?
     | return mkApp (← implies (← instantiateMVars premiseStated)
         (← step.conclusion)) premiseProof
   step.underVars fun kept target => do
@@ -248,73 +249,30 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- The premise's literals are read as the premise means them: polarity
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
-    -- The conclusion's literals, by the count of them: a literal can itself be
-    -- a disjunction, which taking the clause apart by its shape would split.
-    let into := step.into target
-    -- A proof of the conclusion from its `start`th literal on, from one of
-    -- those literals.
-    let placeIn (start : Nat) (candidate : Expr) : ReconstructM (Option Expr) := do
-      let some k ← findPart? into.parts (← instantiateMVars (← inferType candidate)) start
-        | return none
-      return into.inject start k candidate
-    -- Every literal the step kept is one of the conclusion's; one it dropped
-    -- has to be refutable on its own, as `t ≠ t` is.
-    let stating (candidate : Expr) : ReconstructM Expr := do
-      instantiateMVars (← inferType candidate)
-    -- A literal the clause repeats is left where it is until its last
-    -- occurrence, so that the earlier ones still have it to be placed at.
-    let recurs := sourceParts.mapIdx fun i part =>
-      (sourceParts.extract (i + 1) sourceParts.size).contains part
     -- Where the worker recorded each literal went, which is where it goes;
     -- one it did not is looked for.
     let position? := position? <|> step.unit.parents.findIdx? (·.number == parent.number)
     let placed := position?.bind step.placedAt
-    let inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j h t => do
-      if recurs[i]?.getD true then return none
-      if let some placed := placed then
-        if let some (some (k, flipped)) := placed[i]? then
-          unless k == j do return none
-          if flipped then return ← flipEquality h else return some h
-      for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
-        if ← isDefEq (← stating candidate) t then
-          return some candidate
-      return none
-    -- `rest` is what is left of the conclusion from its `start`th literal on.
-    let accountedFor (h rest : Expr) (start : Nat) : ReconstructM (Option Expr) := do
-      let stated ← stating h
-      for candidate in #[h] ++ (← doubleNegations h) ++ (← flipEquality h).toArray do
-        if let some placed ← placeIn start candidate then
-          return some placed
-      if let some inner := asNegation stated then
-        if let some (_, lhs, rhs) := inner.eq? then
-          if ← isDefEq lhs rhs then
-            return some (← mkAppOptM ``absurd
-              #[some inner, some rest, some (← mkEqRefl lhs), some h])
-      if stated.isConstOf ``False then
-        return some (← mkAppOptM ``False.elim #[some rest, some h])
-      return none
-    -- The literals usually run in step, and then the clause is carried across
-    -- following the shape of both rather than put back a literal at a time.
-    let whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) :=
-      fun i j h rest => do
-        if let some placed := placed then
-          if let some done ← placeAt into placed i j h then return some done
-        accountedFor h rest j
-    if let some carried ←
-        carrying (junction ``Or ``False sourceParts) target 0 0 inStep whole
-          (sourceLeft := some sourceParts.size)
-          (targetLeft := some conclusion.literals.size) then
-      return mkApp carried (mkAppN premiseProof args)
-    let body ← elimGiven sourceParts (fun i h => do
-      if let some placed := placed then
-        if let some done ← placeAt into placed i 0 h then return done
-      match ← accountedFor h target 0 with
-      | some placed => return placed
-      | none =>
-        throwError "the literal{indentExpr (← stating h)}\nis neither among\
+    -- The conclusion's literals, by the count of them: a literal can itself be
+    -- a disjunction, which taking the clause apart by its shape would split.
+    step.withInto target fun into => do
+      elimGiven sourceParts (motive? := some target) (fun i h => do
+        if let some (some _) := placed.bind (·[i]?) then
+          return ← into.placeAt placed i h
+        if let some done ← into.place? h (hint := i) then return done
+        -- Every literal the step kept is one of the conclusion's; one it
+        -- dropped has to be refutable on its own, as `t ≠ t` is.
+        let stated ← instantiateMVars (← inferType h)
+        if let some inner := asNegation stated then
+          if let some (_, lhs, rhs) := inner.eq? then
+            if ← isDefEq lhs rhs then
+              return ← mkAppOptM ``absurd
+                #[some inner, some target, some (← mkEqRefl lhs), some h]
+        if stated.isConstOf ``False then
+          return ← mkAppOptM ``False.elim #[some target, some h]
+        throwError "the literal{indentExpr stated}\nis neither among\
           {indentExpr target}\nnor refutable on its own")
-      (mkAppN premiseProof args)
-    pure body
+        (mkAppN premiseProof args)
 
 /--
 A rule that cannot reach a proof the tactic asked for, and says why.

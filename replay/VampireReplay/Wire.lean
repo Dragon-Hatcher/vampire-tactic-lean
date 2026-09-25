@@ -12,7 +12,7 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 44
+private def headerWords : Nat := 45
 
 /-- A unit's record's length, in words. -/
 private def unitWidth : Nat := 34
@@ -61,6 +61,7 @@ private structure Layout where
   placements : Nat
   placementEntries : Nat
   literalFactors : Nat
+  constraintLits : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -147,7 +148,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 27
+private def version : UInt32 := 28
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -206,6 +207,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numPlacements := word 41
   let numPlacementEntries := word 42
   let numLiteralFactors := word 43
+  let numConstraintLits := word 44
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -236,7 +238,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let placements := congruenceArgs + numCongruenceArgs * 4
   let placementEntries := placements + numPlacements * 4 * 4
   let literalFactors := placementEntries + numPlacementEntries * 4
-  let strings := literalFactors + numLiteralFactors * 4
+  let constraintLits := literalFactors + numLiteralFactors * 4
+  let strings := constraintLits + numConstraintLits * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -322,7 +325,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     optional "generalised clause" (u 20) numGenStates
     range "conjunct choices" (u 21) (u 22) numChoices
     range "congruence steps" (u 23) (u 24) numCongruences
-    range "constraints" (u 26) (u 27) (u 5)
+    range "constraints" (u 26) (u 27) numConstraintLits
+    for k in [0:u 27] do
+      index "constraint" (at_ constraintLits 1 (u 26 + k) 0) (u 5)
     range "placements" (u 28) (u 29) numPlacements
     -- A unit's congruence steps are a run of their own: a step names the
     -- clause's literals, and the steps of the run recorded before it, by
@@ -428,7 +433,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, strings, stringsLen, proofText, numFunctions,
+      literalFactors, constraintLits, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -964,19 +969,22 @@ def boundVarSorts (u : Unit) : Array (UInt32 × String) :=
   u.varSortsFrom (u.field 9).toNat (u.field 25).toNat
 
 /--
-Where this step's unification constraints are among its literals, and how many
-of them there are.
+Which of this step's literals are its unification constraints, by where they
+stand in its clause; empty where it has none.
 
 Under unification with abstraction the substitution does not make the two terms
 one: what it could not unify it defers into disequality literals the inference
 puts into its conclusion. The step is sound because the conclusion failing
-makes each of those pairs equal, and then the two terms really are one. Binary
-resolution puts them before the literals it carried over and every other rule
-after, so where they are has to be said rather than counted from one end.
+makes each of those pairs equal, and then the two terms really are one. Where
+the inference put them says nothing by the time the clause is written out --
+literal selection permutes it in place -- so the worker finds each by which
+literal it is.
 -/
-def constraints (u : Unit) : Option (Nat × Nat) :=
-  let count := u.field 27
-  if count == 0 then none else some ((u.field 26).toNat, count.toNat)
+def constraints (u : Unit) : Array Nat :=
+  let p := u.proof
+  let first := (u.field 26).toNat
+  Array.ofFn (n := (u.field 27).toNat) fun k =>
+    (readU32 p.data (p.layout.constraintLits + (first + k.val) * 4)).toNat
 
 /--
 The skolem symbols this step introduced: the existential variable each replaced,

@@ -11,27 +11,16 @@ it: `Unit.placement?`.
 abbrev Placement := Array (Option (Nat × Bool))
 
 /--
-A conclusion's literals, to place a premise's literals into by index: the
-literals, the junction of each suffix of them, and which of them the target a
-carry has reached starts at.
--/
-structure Into where
-  parts : Array Expr
-  suffix : Array Expr
-  offset : Nat := 0
+A conclusion's literals, to place a premise's literals into: a `Disjunction`,
+so that placing one costs the same wherever it lands.
 
-/-- A clause of `count` literals, to place literals into. -/
-def Into.of (target : Expr) (count : Nat) : Into :=
-  let parts := Id.run do
-    if count == 0 then return #[]
-    let mut parts := #[]
-    let mut rest := target
-    for _ in [0 : count - 1] do
-      unless rest.isAppOfArity ``Or 2 do return #[]
-      parts := parts.push rest.appFn!.appArg!
-      rest := rest.appArg!
-    return parts.push rest
-  { parts, suffix := suffixJunctions ``Or ``False parts }
+Every carry proves the whole conclusion from each literal it is handed, one
+elimination of the premise with the conclusion as its motive. Where a literal
+lands then says nothing about the cost: a clause is carried in its length
+whatever order its literals come out in -- which literal selection changes, a
+resolvent interleaves and factoring merges.
+-/
+abbrev Into := Disjunction
 
 /--
 The literals of `stated`, which says what a clause of `count` literals does,
@@ -41,323 +30,133 @@ formula's by its shape, which is what it says.
 -/
 def clauseLiterals (stated : Expr) (count : Option Nat) : Array Expr :=
   match count with
-  | some n => (Into.of stated n).parts
+  | some 0 => #[]
+  | some n => Id.run do
+    let mut parts := #[]
+    let mut rest := stated
+    for _ in [0 : n - 1] do
+      unless rest.isAppOfArity ``Or 2 do return parts.push rest
+      parts := parts.push rest.appFn!.appArg!
+      rest := rest.appArg!
+    return parts.push rest
   | none => junctionParts ``Or stated
 
-/-- The same conclusion, from its `offset`th literal on. -/
-def Into.from (into : Into) (offset : Nat) : Into := { into with offset }
-
 /--
-A proof of what is left of the conclusion from its `start`th literal, from a
-proof of its `k`th: disjunction introductions, and no search.
+`k` given `target`, a clause of `count` literals (or a formula, where `count`
+is `none`), to place literals into; see `Into`.
 -/
-def Into.inject (into : Into) (start k : Nat) (h : Expr) : Option Expr := do
-  let n := into.parts.size
-  guard (start ≤ k && k < n)
-  let mut acc :=
-    if k + 1 == n then h
-    else mkApp3 (mkConst ``Or.inl) into.parts[k]! into.suffix[k + 1]! h
-  for d in [0 : k - start] do
-    let j := k - 1 - d
-    acc := mkApp3 (mkConst ``Or.inr) into.parts[j]! into.suffix[j + 1]! acc
-  return acc
+def withInto (target : Expr) (count : Option Nat) (k : Into → ReconstructM Expr) :
+    ReconstructM Expr := do
+  let parts := clauseLiterals target count
+  if let some n := count then
+    unless parts.size == n do
+      throwError "the conclusion{indentExpr target}\nis not a clause of {n} literals"
+  withDisjunction parts k
 
 /--
 A proof of the conclusion from one of its literals, found among them, or
 `none` where it is not among them in any of the ways it can be stated.
 
-Found among the conclusion's literals as it counts them, not as its shape
-has them: a literal naming a subformula stands for that formula, and where the
-formula is a disjunction, the shape splits it into disjuncts that are not
-literals of the clause.
+@b hint is where the literal is likely to be, looked at first: a literal
+carried in order sits where it sat, and comparing it with every literal before
+it would make placing a clause cost its square.
 -/
-def Into.place? (into : Into) (h : Expr) : ReconstructM (Option Expr) :=
-  placeAmong? (into.parts.extract into.offset) (fun k h => do
-    let some placed := into.inject into.offset (into.offset + k) h
-      | throwError "the conclusion has no literal {into.offset + k}"
-    return placed) h
-
-/-- `Into.place?`, for a caller that cannot go on without the literal placed. -/
-def Into.place (into : Into) (target h : Expr) : ReconstructM Expr := do
-  let some placed ← into.place? h
-    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
-        \nis not among{indentExpr target}"
-  return placed
-
-/--
-How many literals `into` has from its offset on: `none` where it has none to
-count, the target not having the shape its count says.
--/
-def Into.left? (into : Into) : Option Nat :=
-  if into.parts.isEmpty then none else some (into.parts.size - into.offset)
-
-/--
-A proof of what is left of a conclusion, `rest`, from one of its literals:
-found among `into`'s literals, by the clause's count, where the caller has
-them, and among `rest`'s by its shape where it does not.
--/
-def placeInto? (rest : Expr) (into : Option Into) (h : Expr) :
-    ReconstructM (Option Expr) :=
-  match into with
-  | some into => if into.parts.isEmpty then placeLiteral? rest h else into.place? h
-  | none => placeLiteral? rest h
-
-/-- `placeInto?`, for a caller that cannot go on without the literal placed. -/
-def placeInto (rest : Expr) (into : Option Into) (h : Expr) : ReconstructM Expr := do
-  let some placed ← placeInto? rest into h
-    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
-        \nis not among{indentExpr rest}"
-  return placed
-
-/--
-A proof of `source → motive`, sending each of its `count` literals to
-`handler`, or each part its shape has where the count is not known.
--/
-def elimLiterals (source : Expr) (count : Option Nat)
-    (handler : Nat → Expr → ReconstructM Expr) (h : Expr) : ReconstructM Expr :=
-  match count with
-  | some n => elimGiven (Into.of source n).parts handler h
-  | none => elimParts source 0 handler h
-
-/--
-A premise literal placed where the worker recorded, turned round if it was:
-`none` where nothing is recorded, or where that literal is behind the part of
-the conclusion a carry has reached.
--/
-def placeAt (into : Into) (placed : Placement) (i start : Nat) (h : Expr) :
+def Into.place? (into : Into) (h : Expr) (hint : Option Nat := none) :
     ReconstructM (Option Expr) := do
-  let some (some (k, flipped)) := placed[i]? | return none
-  let some h ← (if flipped then flipEquality h else pure (some h)) | return none
-  return into.inject start k h
-
-/--
-`source → target`, following the shape of both at once.
-
-Putting a clause's literals back into the conclusion one at a time writes out
-a constructor for each literal before the one being placed, so carrying a
-clause of `k` literals costs `k²` -- at every step that clause takes part in.
-Walking the two disjunctions together costs `k`.
-
-`inStep i j a t` says what the `i`th literal of `source` gives for `t`, the
-`j`th literal of `target`, which the walk has reached. A literal that gives
-something else is left to `whole`, which has to account for it against all of
-`target` from the `j`th literal on; where it cannot, the two do not run in step
-and `none` says so.
-
-@b sourceLeft and @b targetLeft are how many literals each has from the one the
-walk has reached on, where the caller knows. A literal can itself be a
-disjunction -- a name defined as one, unfolded -- and at the end of a clause
-nothing in the shape tells it from the literals before it: without the count
-the walk goes on into it, and its indices run past the clause's. Without a
-count, each is walked by its shape.
--/
-partial def carrying (source target : Expr) (i j : Nat)
-    (inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr))
-    (whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr))
-    (sourceLeft targetLeft : Option Nat := none) :
-    ReconstructM (Option Expr) := do
-  -- Whether a clause has a literal after the one the walk has reached.
-  let continues (e : Expr) (left : Option Nat) : Bool :=
-    e.isAppOfArity ``Or 2 && (match left with
-      | some n => decide (2 ≤ n)
-      | none => true)
-  let sourceNext := sourceLeft.map (· - 1)
-  let targetNext := targetLeft.map (· - 1)
-  let stepping (from_ t : Expr) : ReconstructM (Option Expr) :=
-    withLocalDeclD `a from_ fun a => do
-      match ← inStep i j a t with
-      | some p => return some (← mkLambdaFVars #[a] p)
-      | none => return none
-  let accounting (from_ : Expr) : ReconstructM (Option Expr) :=
-    withLocalDeclD `a from_ fun a => do
-      match ← whole i j a target with
-      | some p => return some (← mkLambdaFVars #[a] p)
-      | none => return none
-  unless continues source sourceLeft do
-    if continues target targetLeft then
-      let t := target.appFn!.appArg!
-      let restT := target.appArg!
-      if let some f ← stepping source t then
-        return some (.lam `x source
-          (mkApp3 (mkConst ``Or.inl) t restT (mkApp f (.bvar 0))) .default)
-    return ← accounting source
-  let s := source.appFn!.appArg!
-  let restS := source.appArg!
-  if continues target targetLeft then
-    let t := target.appFn!.appArg!
-    let restT := target.appArg!
-    if let some f ← stepping s t then
-      let some rest ← carrying restS restT (i + 1) (j + 1) inStep whole
-          sourceNext targetNext
-        | return none
-      return some (mkApp6 (mkConst ``Or.imp) s t restS restT f rest)
-  -- Not the literal the target has reached: this one has to be accounted for
-  -- against what is left of it, which stays where it is.
-  let some f ← accounting s | return none
-  let some rest ← carrying restS target (i + 1) j inStep whole sourceNext targetLeft
-    | return none
-  return some (.lam `x source
-    (mkApp6 (mkConst ``Or.elim) s restS target (.bvar 0) f rest) .default)
-
-/--
-`x`, or `none` where it fails.
-
-For a caller's own account of a literal, asked on the way the carry tries
-first: a literal the caller cannot account for against the part of the
-conclusion the walk has reached is what that failing means, and the caller has
-no other way to say so. A genuine error is not lost by it -- where the walk
-gives up, the carry asks the same caller again and lets what it throws through
--- and neither an interrupt nor a runtime limit is caught.
--/
-private def attempt (x : ReconstructM α) : ReconstructM (Option α) := do
-  try
-    return some (← x)
-  catch _ =>
-    return none
-
-/--
-`target` from a proof of `source`, whose literals the step carried into it.
-
-The two say the same thing unless the step changed a literal, so the common
-case is that nothing has to be done at all.
--/
-def carryWith (source target proof : Expr)
-    (carried : Nat → Expr → ReconstructM Expr)
-    (placed : Option Placement := none) (into : Option Into := none)
-    (sourceCount : Option Nat := none) :
-    ReconstructM Expr := do
-  let placedAt (i start : Nat) (h : Expr) : ReconstructM (Option Expr) := do
-    let (some placed, some into) := (placed, into) | return none
-    placeAt into placed i (into.offset + start) h
-  let inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j a t => do
-    let some given ← attempt (carried i a) | return none
-    -- Where the worker recorded the literal went, it goes there and nowhere
-    -- else; the rest is looked for.
-    if let (some placed, some into) := (placed, into) then
-      if let some (some (k, flipped)) := placed[i]? then
-        unless k == into.offset + j do return none
-        if flipped then return ← flipEquality given else return some given
-    let says ← instantiateMVars (← inferType given)
-    -- The literal is usually the conclusion's own, which what the two are
-    -- settles before what they mean is asked about.
-    if says == t then
-      return some given
-    if ← isDefEq says t then
-      return some given
-    -- An equality is stated either way round, and an inference reorients the
-    -- one it rewrote; a literal that is the conclusion's the other way round
-    -- still runs in step with it.
-    let some flipped ← flipEquality given | return none
-    if ← isDefEq (← instantiateMVars (← inferType flipped)) t then
-      return some flipped
-    return none
-  let whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j a rest => do
-    let some given ← attempt (carried i a) | return none
-    if let some placed ← placedAt i j given then return some placed
-    placeInto? rest (into.map fun into => into.from (into.offset + j)) given
-  match ← carrying source target 0 0 inStep whole sourceCount
-      (into.bind (·.left?)) with
-  | some f => return mkApp f proof
-  | none =>
-    elimLiterals source sourceCount (fun i h => do
-      let given ← carried i h
-      if let some placed ← placedAt i 0 given then return placed
-      placeInto target into given) proof
-
-/--
-`target` from a proof of `source`, where the step acted on some of its
-literals and carried the rest.
-
-`onSpecial i h rest at` accounts for one it acted on against all of `target`
-that is left, which starts at the conclusion's `at`th literal; `onKept i h`
-says what one it carried gives. Where `placed` says where a carried literal
-went among `into`'s literals, it is put there.
-
-@b sourceCount is how many literals `source` has, where it is a clause: a
-literal naming a subformula stands for that formula, and where the formula is a
-disjunction, the shape of `source` does not say where the clause's literals
-end. `into` does the same for `target`.
--/
-def carryPast (source target proof : Expr) (special : Nat → Bool)
-    (onSpecial : Nat → Expr → Expr → Nat → ReconstructM Expr)
-    (onKept : Nat → Expr → ReconstructM Expr := fun _ h => pure h)
-    (placed : Option Placement := none) (into : Option Into := none)
-    (sourceCount : Option Nat := none) :
-    ReconstructM Expr := do
-  let offset := (into.map (·.offset)).getD 0
-  let placedAt (i start : Nat) (h : Expr) : ReconstructM (Option Expr) := do
-    let (some placed, some into) := (placed, into) | return none
-    placeAt into placed i (offset + start) h
-  let inStep : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j a t => do
-    if special i then return none
-    let some given ← attempt (onKept i a) | return none
-    if let some placed := placed then
-      if let some (some (k, flipped)) := placed[i]? then
-        unless k == offset + j do return none
-        if flipped then return ← flipEquality given else return some given
-    if ← isDefEq (← instantiateMVars (← inferType given)) t then
-      return some given
-    return none
-  let whole : Nat → Nat → Expr → Expr → ReconstructM (Option Expr) := fun i j a rest => do
-    if special i then
-      return ← attempt (onSpecial i a rest (offset + j))
-    let some given ← attempt (onKept i a) | return none
-    if let some placed ← placedAt i j given then return some placed
-    placeInto? rest (into.map fun into => into.from (offset + j)) given
-  match ← carrying source target 0 0 inStep whole sourceCount
-      (into.bind (·.left?)) with
-  | some f => return mkApp f proof
-  | none =>
-    elimLiterals source sourceCount (fun i h => do
-      if special i then onSpecial i h target offset
-      else
-        let given ← onKept i h
-        if let some placed ← placedAt i 0 given then return placed
-        placeInto target into given) proof
-
-/--
-`s → t` for one literal a step carried, or `none` if it did not carry it
-there.
-
-Built with the bound variable in place: a clause of a few hundred literals is
-carried by every step it takes part in, and introducing a local to stand for
-each literal of each of them costs more than everything else the carry does.
--/
-private def carriedAlike (s t : Expr) : ReconstructM (Option Expr) := do
-  if s == t then
-    return some (.lam `a s (.bvar 0) .default)
-  -- An equality is stated either way round.
-  if let (some (τ, lhs, rhs, negated), some (τ', lhs', rhs', negated')) :=
-      (equalityLiteral? s, equalityLiteral? t) then
-    if τ == τ' && lhs == rhs' && rhs == lhs' && negated == negated' then
-      return some (.lam `a s (← symmLiteral τ lhs rhs negated (.bvar 0)) .default)
-  if ← sameFormula s t then
-    return some (.lam `a s (.bvar 0) .default)
+  let place (candidate : Expr) : ReconstructM (Option Expr) := do
+    let stated ← instantiateMVars (← inferType candidate)
+    if let some i := hint then
+      if into.parts[i]? == some stated then return some (into.inject i candidate)
+    let some k ← findPart? into.parts stated | return none
+    return some (into.inject k candidate)
+  if let some placed ← place h then return placed
+  if let some flipped ← flipEquality h then
+    if let some placed ← place flipped then return placed
+  for candidate in ← doubleNegations h do
+    if let some placed ← place candidate then return placed
   return none
 
-/--
-`carryWith`, for a step that left every literal as it was.
+/-- `Into.place?`, for a caller that cannot go on without the literal placed. -/
+def Into.place (into : Into) (h : Expr) (hint : Option Nat := none) :
+    ReconstructM Expr := do
+  let some placed ← into.place? h hint
+    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
+        \nis not among{indentExpr into.whole}"
+  return placed
 
-The literals of the two clauses are walked together, which is all the carry is
-when nothing was done to any of them.
+/--
+A premise's `i`th literal placed where the worker recorded it went, turned
+round if it was; looked for, where nothing is recorded for it.
 -/
-partial def carryAll (source target proof : Expr)
-    (placed : Option Placement := none) (into : Option Into := none) :
+def Into.placeAt (into : Into) (placed : Option Placement) (i : Nat) (h : Expr) :
+    ReconstructM Expr := do
+  let some (some (k, flipped)) := placed.bind (·[i]?) | into.place h (hint := i)
+  let some h ← (if flipped then flipEquality h else pure (some h))
+    | throwError "the worker recorded literal {i} as turned round, but\
+        {indentExpr (← instantiateMVars (← inferType h))}\nis no equality"
+  let some part := into.parts[k]?
+    | throwError "the worker placed literal {i} at literal {k} of a conclusion of \
+        {into.parts.size}"
+  let stated ← instantiateMVars (← inferType h)
+  unless stated == part || (← isDefEq stated part) do
+    throwError "the worker placed{indentExpr stated}\nat literal {k} of the \
+      conclusion, which is{indentExpr part}"
+  return into.inject k h
+
+/--
+A proof of `motive` from a proof `h` of `source`, a clause of `count` literals
+(or a formula's disjunction, where `count` is `none`), sending each literal to
+`handler`, which proves `motive` from it.
+-/
+def elimLiterals (source : Expr) (count : Option Nat)
+    (handler : Nat → Expr → ReconstructM Expr) (h : Expr) (motive? : Option Expr := none) :
+    ReconstructM Expr :=
+  elimGiven (clauseLiterals source count) handler h (motive? := motive?)
+
+/--
+`target` from a proof of `source`, whose literals the step carried into it:
+`carried i h` says what the `i`th gives, which is put where the worker
+recorded it went (`placed`), and looked for where nothing is recorded.
+-/
+def carryWith (source target proof : Expr) (into : Into)
+    (carried : Nat → Expr → ReconstructM Expr)
+    (placed : Option Placement := none) (sourceCount : Option Nat := none) :
+    ReconstructM Expr :=
+  elimLiterals source sourceCount (motive? := some target) (fun i h => do
+    into.placeAt placed i (← carried i h)) proof
+
+/--
+`target` from a proof of `source`, a step having acted on the literals
+`special` picks out and carried the rest.
+
+`onSpecial i h` proves all of `target` from one it acted on; `onKept i h` says
+what one it carried gives, which is placed as `carryWith` places it.
+-/
+def carryPast (source target proof : Expr) (into : Into) (special : Nat → Bool)
+    (onSpecial : Nat → Expr → ReconstructM Expr)
+    (onKept : Nat → Expr → ReconstructM Expr := fun _ h => pure h)
+    (placed : Option Placement := none) (sourceCount : Option Nat := none) :
+    ReconstructM Expr :=
+  elimLiterals source sourceCount (motive? := some target) (fun i h => do
+    if special i then onSpecial i h
+    else into.placeAt placed i (← onKept i h)) proof
+
+/--
+`carryWith`, for a step that left every literal as it was: nothing to do where
+the two say the same thing, which is the common case.
+
+@b into is the conclusion's, where the caller has it; otherwise `target` is
+taken apart by @b targetCount, or by its shape where that is `none`.
+-/
+def carryAll (source target proof : Expr) (placed : Option Placement := none)
+    (into : Option Into := none) (sourceCount targetCount : Option Nat := none) :
     ReconstructM Expr := do
   if ← sameFormula source target then
     return proof
-  let rec alike (source target : Expr) : ReconstructM (Option Expr) := do
-    if source.isAppOfArity ``Or 2 && target.isAppOfArity ``Or 2 then
-      let s := source.appFn!.appArg!
-      let restS := source.appArg!
-      let t := target.appFn!.appArg!
-      let restT := target.appArg!
-      let some here ← carriedAlike s t | return none
-      let some rest ← alike restS restT | return none
-      return some (mkApp6 (mkConst ``Or.imp) s t restS restT here rest)
-    carriedAlike source target
-  match ← alike source target with
-  | some f => return mkApp f proof
-  | none => carryWith source target proof (fun _ h => pure h) placed into
+  match into with
+  | some into => carryWith source target proof into (fun _ h => pure h) placed sourceCount
+  | none =>
+    withInto target targetCount fun into =>
+      carryWith source target proof into (fun _ h => pure h) placed sourceCount
 
 end Vampire.Reconstruct

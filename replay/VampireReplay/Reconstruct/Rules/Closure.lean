@@ -36,13 +36,12 @@ def conflict (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let literals := clause.literals
     let parts ← literals.mapM (literal vars)
-    let suffix := suffixJunctions ``Or ``False parts
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
       -- What says the `i`th literal fails, the whole disjunction having failed.
+      let refutations := refutationsOf parts h
       let refuting (i : Nat) : ReconstructM Expr := do
-        let some part := parts[i]? | throwError "no literal {i} in the clause"
-        pure (.lam `l part
-          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default)
+        let some refutation := refutations[i]? | throwError "no literal {i} in the clause"
+        pure refutation
       -- The atom of a literal that denies one, and what says the atom holds.
       let denied (i : Nat) : ReconstructM (Expr × Expr) := do
         let some part := parts[i]? | throwError "no literal {i} in the clause"

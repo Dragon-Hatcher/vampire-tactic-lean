@@ -96,28 +96,62 @@ def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
   return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])
 
 /--
+`a = b`, where the two are one term but at pairs of subterms `equal` proves
+equal, or `none` where they are not.
+
+The pairs say where the two differ, so this descends both at once and takes a
+pair wherever it meets one; nothing is searched for.
+-/
+partial def equalUnder (equal : Array (Expr × Expr × Expr)) (a b : Expr) :
+    ReconstructM (Option Expr) := do
+  if a == b then return some (← mkEqRefl a)
+  for (x, y, p) in equal do
+    if x == a && y == b then return some p
+    if x == b && y == a then return some (← mkEqSymm p)
+  unless a.isApp && b.isApp do return none
+  let as := a.getAppArgs
+  let bs := b.getAppArgs
+  unless a.getAppFn == b.getAppFn && as.size == bs.size do return none
+  let mut proof ← mkEqRefl a.getAppFn
+  for (x, y) in as.zip bs do
+    if x == y then
+      proof ← mkCongrFun proof x
+    else
+      let some p ← equalUnder equal x y | return none
+      proof ← mkCongr proof p
+  return some proof
+
+/--
 `target` from two complementary literals.
 
-Which of the two is the negation of the other is settled by comparing them, and
-an equality can be stated either way round, so one of them may have to be
-turned about first.
+Either can be the negation of the other -- both can be negations, `¬¬a` and
+`¬a` -- so each is tried as the negative one. An equality can be stated either
+way round, so the other may have to be turned about first.
+
+@b equal are the pairs an abstracting unifier deferred, with what says each is
+equal, for a step that resolved two literals it did not make one: they are then
+complementary up to those pairs.
 -/
-def closeComplementary (target h₁ h₂ : Expr) : ReconstructM Expr := do
-  let (positive, negative) ←
-    if (asNegation (← instantiateMVars (← inferType h₁))).isSome then pure (h₂, h₁)
-    else pure (h₁, h₂)
-  let stated ← instantiateMVars (← inferType positive)
-  let some refuted := asNegation (← instantiateMVars (← inferType negative))
-    | throwError "the literals resolved on are not complementary"
-  let positive ←
-    if ← isDefEq refuted stated then pure positive
-    else
-      let some flipped ← flipEquality positive
-        | throwError "the literals{indentExpr stated}\nand{indentExpr refuted}\n\
-          are not complementary"
-      pure flipped
-  mkAppOptM ``absurd
-    #[some (← inferType positive), some target, some positive, some negative]
+def closeComplementary (target h₁ h₂ : Expr)
+    (equal : Array (Expr × Expr × Expr) := #[]) : ReconstructM Expr := do
+  -- A proof of `refuted` from `positive`, turned about or through the deferred
+  -- pairs where it has to be.
+  let asRefuted (positive refuted : Expr) : ReconstructM (Option Expr) := do
+    let mut candidates := #[positive]
+    if let some flipped ← flipEquality positive then candidates := candidates.push flipped
+    for candidate in candidates do
+      let stated ← instantiateMVars (← inferType candidate)
+      if ← isDefEq refuted stated then return some candidate
+      if !equal.isEmpty then
+        if let some same ← equalUnder equal stated refuted then
+          return some (← mkEqMP same candidate)
+    return none
+  for (negative, positive) in #[(h₁, h₂), (h₂, h₁)] do
+    let some refuted := asNegation (← instantiateMVars (← inferType negative)) | continue
+    if let some positive ← asRefuted positive refuted then
+      return ← mkAppOptM ``absurd #[some refuted, some target, some positive, some negative]
+  throwError "the literals{indentExpr (← instantiateMVars (← inferType h₁))}\nand\
+    {indentExpr (← instantiateMVars (← inferType h₂))}\nare not complementary"
 
 /--
 Which of `parts`, from the `start`th on, a literal stating `stated` is.
@@ -270,9 +304,7 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
     -- decision procedure, once per disjunct, what this asks it once.
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
       let mut extended := facts
-      for (part, i) in parts.zipIdx do
-        let refuting := Expr.lam `l part
-          (mkApp h (← injectGiven parts i (.bvar 0) (suffix? := some suffix))) .default
+      for refuting in refutationsOf parts h do
         extended := extended.push (← plainly refuting)
       mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
     return ofNotNot goal refuted

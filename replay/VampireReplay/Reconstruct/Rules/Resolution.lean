@@ -15,7 +15,23 @@ namespace Vampire.Reconstruct.Resolution
 
 open Lean Meta
 
-/-- `resolution`: both premises but for the complementary pair resolved on. -/
+/--
+The conclusion from the two literals a resolution resolved on: complementary,
+or -- where an abstracting unifier could not make them so -- complementary up
+to the pairs it deferred into constraint literals of the conclusion.
+-/
+def closeResolved (step : Step) (vars : Vars) (into : Into) (h₁ h₂ : Expr) :
+    ReconstructM Expr := do
+  if step.unit.constraints.isEmpty then
+    return ← closeComplementary into.whole h₁ h₂
+  underConstraints step vars into fun equal => closeComplementary into.whole h₁ h₂ equal
+
+/--
+`resolution`: both premises but for the complementary pair resolved on.
+
+`constrained_resolution` is the same inference under an abstracting unifier:
+the pair resolved on is complementary up to what it deferred.
+-/
 def resolution (step : Step) : ReconstructM Expr := do
   let #[(proof₁, stated₁), (proof₂, stated₂)] := step.premises
     | throwError "resolution should have two premises, got {step.premises.size}"
@@ -41,14 +57,12 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- The resolved pair is complementary, which closes that case -- against
     -- what the two carries have left of the conclusion, which is what the
     -- innermost of them says it is and not what the outer one was given.
-    let into := step.into target
-    let body ← carryPast t₁ target p₁ (· == resolved₁.toNat)
-      (fun _ h₁ rest at_ => carryPast t₂ rest p₂ (· == resolved₂.toNat)
-        (fun _ h₂ inner _ => closeComplementary inner h₁ h₂)
-        (placed := step.placedAt 1) (into := into.from at_)
-        (sourceCount := parent₂.clauseSize?))
-      (placed := step.placedAt 0) (into := into) (sourceCount := parent₁.clauseSize?)
-    pure body
+    step.withInto target fun into =>
+      carryPast t₁ target p₁ into (· == resolved₁.toNat)
+        (fun _ h₁ => carryPast t₂ target p₂ into (· == resolved₂.toNat)
+          (fun _ h₂ => closeResolved step vars into h₁ h₂)
+          (placed := step.placedAt 1) (sourceCount := parent₂.clauseSize?))
+        (placed := step.placedAt 0) (sourceCount := parent₁.clauseSize?)
 
 /--
 `unit_resulting_resolution`: a clause every literal of which but one is
@@ -82,15 +96,13 @@ def unitResulting (step : Step) : ReconstructM Expr := do
         | throwError "nothing says which literal the unit in step \
           {parent.number} resolved away"
       units := units.insert literal.toNat (← instantiateAt parent use vars proof stated)
-    let body ← carryPast mainType target mainAt (units.contains ·)
-      (fun i h rest _ => do
-        let some (unitAt, unitType) := units[i]?
-          | throwError "no unit resolved literal {i} away"
-        carryPast unitType rest unitAt (fun _ => true)
-          (fun _ hu inner _ => closeComplementary inner h hu) (sourceCount := some 1))
-      (placed := step.placedAt 0) (into := step.into target)
-      (sourceCount := main.clauseSize?)
-    pure body
+    step.withInto target fun into =>
+      carryPast mainType target mainAt into (units.contains ·)
+        (fun i h => do
+          let some (unitAt, _) := units[i]?
+            | throwError "no unit resolved literal {i} away"
+          closeComplementary target h unitAt)
+        (placed := step.placedAt 0) (sourceCount := main.clauseSize?)
 
 /--
 `factoring`: the premise at the unifier that makes two of its literals one.
@@ -109,11 +121,12 @@ def factoring (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    carryAll premiseType target premiseAt (placed := step.placedAt 0)
-      (into := step.into target)
+    step.withInto target fun into =>
+      carryAll premiseType target premiseAt (placed := step.placedAt 0) (into := into)
+        (sourceCount := parent.clauseSize?)
 
 /--
-`rest`, where an abstracting unifier left constraints among the conclusion's
+The conclusion `into`, where an abstracting unifier left constraints among its
 literals and `h` denies the equality the step resolved on.
 
 The unifier does not make the two terms one: what it could not unify it defers
@@ -122,9 +135,9 @@ because one of those disequalities does -- and then it is that literal -- or
 because none does, and then the pairs deferred are equal, the two terms are one
 by congruence at those pairs, and `h` denies it.
 -/
-def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
+def fromConstraints (step : Step) (vars : Vars) (into : Into) (inner h : Expr) :
     ReconstructM Expr := do
-  if step.unit.constraints.isNone then
+  if step.unit.constraints.isEmpty then
     -- Equality resolution either unifies the two sides or defers what it
     -- could not unify into constraints. Neither here: the step resolved an
     -- inequality between two terms that no substitution makes one, which is
@@ -136,11 +149,11 @@ def fromConstraints (step : Step) (vars : Vars) (rest inner h : Expr) :
       recorded (vampire bug https://github.com/vprover/vampire/issues/938)"
   let some (_, lhs, rhs) := inner.eq?
     | throwError "the literal resolved on is not an equality:{indentExpr inner}"
-  underConstraints step vars rest fun equal => do
+  underConstraints step vars into fun equal => do
     let some made ← equalUnder equal lhs rhs
       | throwError "step {step.unit.number}: the sides of{indentExpr inner}\n\
           are not equal even assuming the unifier's deferred constraints"
-    mkAppOptM ``absurd #[some inner, some rest, some made, some h]
+    mkAppOptM ``absurd #[some inner, some into.whole, some made, some h]
 
 /--
 `equality_resolution_with_deletion`: the premise at the binding one of its
@@ -166,10 +179,10 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
-    let body ← carryPast premiseType target premiseAt (· == resolved.toNat)
-      (placed := step.placedAt 0) (into := step.into target)
-      (sourceCount := parent.clauseSize?)
-      (fun _ h rest _ => do
+    step.withInto target fun into =>
+    carryPast premiseType target premiseAt into (· == resolved.toNat)
+      (placed := step.placedAt 0) (sourceCount := parent.clauseSize?)
+      (fun _ h => do
         -- The binding is what makes the two sides of the inequality one term,
         -- unless the unifier abstracted: then what it could not unify it left
         -- as disequalities among the conclusion's own literals, and the two
@@ -181,10 +194,9 @@ def equalityResolutionWithDeletion (step : Step) : ReconstructM Expr := do
           | throwError "the literal resolved on is not an equality:{indentExpr inner}"
         if ← sameFormula lhs rhs then
           mkAppOptM ``absurd
-            #[some inner, some rest, some (← mkEqRefl lhs), some h]
+            #[some inner, some target, some (← mkEqRefl lhs), some h]
         else
-          fromConstraints step vars rest inner h)
-    pure body
+          fromConstraints step vars into inner h)
 
 /--
 `equality_factoring`: one of the premise's equalities factored against another.
@@ -229,10 +241,10 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
       | throwError "the equality factored against is not an equality:\
         {indentExpr sideLit}"
     let (fLHS, fRHS) := if sideLeft then (fa, fb) else (fb, fa)
-    let body ← carryPast premiseType target premiseAt (· == selectedIdx.toNat)
-      (placed := step.placedAt 0) (into := step.into target)
-      (sourceCount := parent.clauseSize?)
-      (fun _ h rest _ => do
+    step.withInto target fun into =>
+    carryPast premiseType target premiseAt into (· == selectedIdx.toNat)
+      (placed := step.placedAt 0) (sourceCount := parent.clauseSize?)
+      (fun _ h => do
         let stated ← instantiateMVars (← inferType h)
         let some (α, sa, sb) := stated.eq?
           | throwError "the equality factored is not an equality:\
@@ -245,12 +257,11 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
         -- either way round.
         let equal ← mkAppOptM ``Eq #[some α, some sRHS, some fRHS]
         let differ ← withLocalDeclD `h (mkApp (mkConst ``Not) equal) fun hne => do
-          mkLambdaFVars #[hne] (← placeLiteral rest hne)
+          mkLambdaFVars #[hne] (← into.place hne)
         let agree ← withLocalDeclD `h equal fun he => do
             let chain ← mkAppM ``Eq.trans #[h, he]
             let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
-            mkLambdaFVars #[he] (← placeLiteral rest (← mkExpectedTypeHint chain stated))
+            mkLambdaFVars #[he] (← into.place (← mkExpectedTypeHint chain stated))
         mkAppM ``Classical.byCases #[agree, differ])
-    pure body
 
 end Vampire.Reconstruct.Resolution

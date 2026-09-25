@@ -50,7 +50,6 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
-    let into := step.into target
     -- The side premise's literals at σ are the conclusion's but for the one
     -- that is the removed literal's complement, and the worker recorded where
     -- each went: the literals placed are carried, and the one that is not is
@@ -60,13 +59,13 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
       match sidePlaced with
       | some placed => (placed[k]?.join).isNone
       | none => true
-    let body ← carryPast mainType target mainAt (· == resolved.toNat)
-      (placed := step.placedAt 0) (into := into) (sourceCount := mainParent.clauseSize?)
-      (fun _ h rest at_ =>
-        carryPast sideType rest sideAt unplaced
-          (placed := sidePlaced) (into := into.from at_)
-          (sourceCount := sideParent.clauseSize?)
-          (fun _ hSide inner _ => do
+    step.withInto target fun into =>
+    carryPast mainType target mainAt into (· == resolved.toNat)
+      (placed := step.placedAt 0) (sourceCount := mainParent.clauseSize?)
+      (fun _ h =>
+        carryPast sideType target sideAt into unplaced
+          (placed := sidePlaced) (sourceCount := sideParent.clauseSize?)
+          (fun _ hSide => do
             let removed ← instantiateMVars (← inferType h)
             -- The one literal of the side premise the substitution makes
             -- complementary to the removed one closes the case; the rest are
@@ -84,9 +83,8 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
               let (positive, negative) :=
                 if (asNegation stated).isSome then (h, candidate) else (candidate, h)
               return ← mkAppOptM ``absurd
-                #[some (← inferType positive), some inner, some positive,
+                #[some (← inferType positive), some target, some positive,
                   some negative]
-            placeLiteral inner hSide))
-    pure body
+            into.place hSide))
 
 end Vampire.Reconstruct.Subsumption

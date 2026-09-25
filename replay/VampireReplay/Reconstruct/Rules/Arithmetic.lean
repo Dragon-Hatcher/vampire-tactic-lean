@@ -107,9 +107,11 @@ private partial def withRoundings (formulas : Array Expr)
       let bound ← mkAppM lemma_ #[x]
       -- Stated of the very term the step speaks of: the lemma reaches the cast
       -- through instances of its own, and a procedure that tells terms apart
-      -- by their shape would take the two for two numbers.
+      -- by their shape would take the two for two numbers. Only this rounding's
+      -- own cast is replaced: `x` can hold other roundings, a floor of a floor.
       let stated := (← instantiateMVars (← inferType bound)).replace fun s =>
         if s.isAppOfArity ``Int.cast 3 && s.appArg!.getAppFn == inner.getAppFn
+            && s.appArg!.appArg! == x
           then some e else none
       bounds := bounds.push (← mkExpectedTypeHint bound stated)
   let rec cases (i : Nat) (facts : Array Expr) : ReconstructM Expr := do
@@ -143,8 +145,7 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
     return ← restate proof stated (← step.conclusion)
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
-    let targetParts := clauseLiterals target step.unit.clauseSize?
-    let suffix := suffixJunctions ``Or ``False targetParts
+    withInto target step.unit.clauseSize? fun into => do
     -- Each premise holds, so one of its literals does, which is a case; every
     -- case has to make the conclusion. A literal the step carried over is one
     -- of the conclusion's own -- the premise is instantiated at the step's
@@ -159,8 +160,8 @@ partial def theoryStep (step : Step) : ReconstructM Expr := do
       elimGiven premiseParts[i]! (motive? := some target)
         (fun _ h => do
           let says ← instantiateMVars (← inferType h)
-          if let some j := targetParts.findIdx? (· == says) then
-            return ← injectGiven targetParts j h (suffix? := some suffix)
+          if let some j := into.parts.findIdx? (· == says) then
+            return into.inject j h
           go (facts.push (← plainly h)) (i + 1)) proof
     let statements := #[target] ++ premises.map (·.2)
     withRoundings statements fun roundings => go roundings 0
@@ -258,7 +259,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
     unless images.size == parts.size do
       throwError "step {step.unit.number} recorded {images.size} literals' \
         images for a premise of {parts.size}"
-    let into := step.into target
+    step.withInto target fun into =>
     elimGiven parts (motive? := some target) (fun i h => do
       let factor := (factors.bind (·[i]?)).getD (1, 1)
       match images[i]? with
@@ -274,9 +275,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
           else
             let iff ← (← read).literalIff procedure parts[i]! goal factor
             pure (mkApp4 (mkConst ``Iff.mp) parts[i]! goal iff h)
-        let some placed := into.inject 0 j proof
-          | throwError "step {step.unit.number} has no literal {j}"
-        return placed
+        return into.inject j proof
       | _ =>
         let refuted ← (← read).literalFalse procedure parts[i]! factor
         return mkApp2 (mkConst ``False.elim [.zero]) target (mkApp refuted h)) premise
@@ -309,8 +308,7 @@ def viras (step : Step) : ReconstructM Expr := do
   let some (_, sortName) := parent.varSorts.find? (·.1 == x)
     | throwError "the eliminated variable X{x} has no recorded sort"
   let n := (parent.clauseSize?).getD 0
-  step.underVars fun vars target => do
-    let into := step.into target
+  step.underVars fun vars target => step.withInto target fun into => do
     let τ ← sortType sortName
     -- The premise with `x` left free, its other variables the conclusion's.
     let (clauseAt, premiseAll) ← withLocalDeclD (Name.mkSimple s!"X{x}") τ fun xv => do
@@ -320,8 +318,7 @@ def viras (step : Step) : ReconstructM Expr := do
     -- The conclusion failing, each of its literals failing.
     let refuted ← withLocalDeclD `h (mkNot target) fun h => do
       let denials ← into.parts.mapIdxM fun j part => do
-        let some placed := into.inject 0 j (.bvar 0)
-          | throwError "step {step.unit.number} has no literal {j}"
+        let placed := into.inject j (.bvar 0)
         -- Stated as `¬part`, the shape linear arithmetic reads a denial in.
         mkExpectedTypeHint (.lam `l part (mkApp h placed) .default) (mkNot part)
       let mut imagesOf := #[]

@@ -164,17 +164,6 @@ private def rewrittenOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
            wholePremise := use.rewritesWholePremise
            target := ← treeOf vars bindings rewritten }
 
-/-- `heq : t = to` turns a proof of a literal into one of the literal rewritten. -/
-private def rewriteWith (rw : Rewritten) (vars : Vars) (heq to : Expr) (i : Nat)
-    (h : Expr) : ReconstructM Expr := do
-  let some l := rw.literals[i]?
-    | throwError "the premise has no literal {i}"
-  let «from» ← rw.target.toExpr
-  let τ ← inferType «from»
-  let motive ← withLocalDeclD `x τ fun x => do
-    mkLambdaFVars #[x] (← literalAt vars rw.bindings l (some (rw.target, x)))
-  mkAppOptM ``Eq.subst #[some τ, some motive, some «from», some to, some heq, some h]
-
 /--
 The premise's clause, with the term the inference rewrote abstracted from the
 literal it rewrote it in.
@@ -210,6 +199,21 @@ private def clauseRewritten (rw : Rewritten) (vars : Vars) (stated to : Expr) :
   let rewritten ← literalAt vars rw.bindings l (some (rw.target, to))
   sharedClause (junction ``Or ``False (parts.set! rw.literal rewritten))
 
+/--
+The rewritten premise, from a proof `proof` of what it says, `stated`, and
+`heq : t = to` for the term `t` the inference rewrote: the rewrite made inside
+the clause, where it stands, with one substitution. With what it then says.
+-/
+private def rewriteClause (rw : Rewritten) (vars : Vars) (stated proof heq to : Expr) :
+    ReconstructM (Expr × Expr) := do
+  let «from» ← rw.target.toExpr
+  let τ ← inferType «from»
+  let motive ← withLocalDeclD `x τ fun x => do
+    mkLambdaFVars #[x] (← clauseRewritten rw vars stated x)
+  let rewritten ← mkAppOptM ``Eq.subst
+    #[some τ, some motive, some «from», some to, some heq, some proof]
+  return (rewritten, ← clauseRewritten rw vars stated to)
+
 /-- `forward_demodulation`: the premise with one literal rewritten. -/
 def demodulation (step : Step) : ReconstructM Expr := do
   let #[(mainProof, mainStated), (sideProof, sideStated)] := step.premises
@@ -226,17 +230,11 @@ def demodulation (step : Step) : ReconstructM Expr := do
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     let (_, to, heq) ← orientedEquation sideParent sideUse sideAt sideType
-    -- The rewrite happens inside the clause, so it is made where it stands.
-    let «from» ← rw.target.toExpr
-    let τ ← inferType «from»
-    let motive ← withLocalDeclD `x τ fun x => do
-      mkLambdaFVars #[x] (← clauseRewritten rw vars mainType x)
-    let rewritten ← mkAppOptM ``Eq.subst
-      #[some τ, some motive, some «from», some to, some heq, some mainAt]
-    -- What the premise says once rewritten, which is what the conclusion says
-    -- up to the order its literals come in.
-    let says ← clauseRewritten rw vars mainType to
-    carryAll says target rewritten
+    -- What the premise says once rewritten is what the conclusion says, up to
+    -- the order its literals come in.
+    let (rewritten, says) ← rewriteClause rw vars mainType mainAt heq to
+    carryAll says target rewritten (sourceCount := mainParent.clauseSize?)
+      (targetCount := step.unit.clause?.map (·.size))
 
 /--
 `superposition`: the clause being rewritten and the equation rewriting it, both
@@ -258,38 +256,37 @@ def superposition (step : Step) : ReconstructM Expr := do
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     -- The equation is a literal of its own premise, so the case where it holds
-    -- is the one that rewrites; its other literals are literals of the
-    -- conclusion, as are the ones the rewritten premise keeps.
-    let into := step.into target
-    let body ← carryPast mainType target mainAt
-      (placed := step.placedAt 0) (into := into) (sourceCount := mainParent.clauseSize?)
-      (fun i => i == rw.literal || rw.wholePremise)
-      (fun i h rest at_ =>
-        carryPast sideType rest sideAt (· == equationLiteral.toNat)
-          (placed := step.placedAt 1) (into := into.from at_)
-          (sourceCount := sideParent.clauseSize?)
-          (fun _ hSide inner _ => do
-            let («from», to, heq) ←
-              orientedEquation sideParent sideUse hSide (← inferType hSide)
-            let source ← rw.target.toExpr
-            if ← sameFormula source «from» then
-              return ← placeLiteral inner (← rewriteWith rw vars heq to i h)
-            -- An abstracting unifier did not make the rewritten term and the
-            -- equation's side one: what it could not unify it left as
-            -- disequalities among the conclusion's literals, between subterms
-            -- of the two. So either one of those holds, and it is the
-            -- conclusion, or each pair is equal, the two terms are equal by
-            -- congruence at those pairs, and the equation rewrites the premise
-            -- once composed with that.
-            underConstraints step vars inner fun equal => do
-              let some same ← equalUnder equal source «from»
-                | throwError "step {step.unit.number}: the rewritten term\
-                    {indentExpr source}\nand the side of the equation\
-                    {indentExpr «from»}\nare not equal even assuming the \
-                    unifier's deferred constraints"
-              let bridged ← mkEqTrans same heq
-              placeLiteral inner (← rewriteWith rw vars bridged to i h)))
-    pure body
+    -- is the one that rewrites -- the premise rewritten where it stands, as a
+    -- demodulation rewrites it, and then carried; its other literals are
+    -- literals of the conclusion. The equation is cased on once, however
+    -- many of the rewritten premise's literals the rewrite reaches.
+    step.withInto target fun into =>
+      carryPast sideType target sideAt into (· == equationLiteral.toNat)
+        (placed := step.placedAt 1) (sourceCount := sideParent.clauseSize?)
+        (fun _ hSide => do
+          let («from», to, heq) ←
+            orientedEquation sideParent sideUse hSide (← inferType hSide)
+          let rewriteBy (heq : Expr) : ReconstructM Expr := do
+            let (rewritten, says) ← rewriteClause rw vars mainType mainAt heq to
+            carryAll says target rewritten (placed := step.placedAt 0) (into := into)
+              (sourceCount := mainParent.clauseSize?)
+          let source ← rw.target.toExpr
+          if ← sameFormula source «from» then
+            return ← rewriteBy heq
+          -- An abstracting unifier did not make the rewritten term and the
+          -- equation's side one: what it could not unify it left as
+          -- disequalities among the conclusion's literals, between subterms
+          -- of the two. So either one of those holds, and it is the
+          -- conclusion, or each pair is equal, the two terms are equal by
+          -- congruence at those pairs, and the equation rewrites the premise
+          -- once composed with that.
+          underConstraints step vars into fun equal => do
+            let some same ← equalUnder equal source «from»
+              | throwError "step {step.unit.number}: the rewritten term\
+                  {indentExpr source}\nand the side of the equation\
+                  {indentExpr «from»}\nare not equal even assuming the \
+                  unifier's deferred constraints"
+            rewriteBy (← mkEqTrans same heq))
 
 /--
 `inner_rewriting`: a clause with one of its own disequalities `l ≠ r` used to
@@ -329,8 +326,9 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
     let some sideTerm := use.term
       | throwError "inner rewriting did not record which side it rewrote"
     let side ← treeOf vars {} sideTerm
-    let body ← elimGiven parts (motive? := some target) (fun k h => do
-      if k == i then return ← placeLiteral target h
+    step.withInto target fun into =>
+    elimGiven parts (motive? := some target) (fun k h => do
+      if k == i then return ← into.place h
       let holds ← withLocalDeclD `h equation fun heq => do
         let lr ← if leftRewritten then pure heq else mkEqSymm heq
         let some literal := clause.literals[k]? | throwError "a missing literal"
@@ -344,10 +342,9 @@ def innerRewriting (step : Step) : ReconstructM Expr := do
           mkEqMP (← mkCongrArg motive lr) h
         let rewritten ← mkExpectedTypeHint rewritten
           (← instantiateMVars (← inferType rewritten)).headBeta
-        mkLambdaFVars #[heq] (← placeLiteral target rewritten)
+        mkLambdaFVars #[heq] (← into.place rewritten)
       let fails ← withLocalDeclD `h (mkApp (mkConst ``Not) equation) fun hne => do
-        mkLambdaFVars #[hne] (← placeLiteral target hne)
+        mkLambdaFVars #[hne] (← into.place hne)
       mkAppM ``Classical.byCases #[holds, fails]) premiseAt
-    pure body
 
 end Vampire.Reconstruct.Rewrite

@@ -76,7 +76,7 @@ def component (step : Step) : ReconstructM Expr := do
       return x
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
-    carryAll stated target instance_
+    carryAll stated target instance_ (targetCount := step.unit.clause?.map (·.size))
 
 /--
 `avatar_contradiction_clause`: the names a refuted clause held under cannot all
@@ -95,25 +95,27 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
   -- One disjunct per name the premise held under, whatever the formula each
   -- stands for is: the conclusion is a formula, not a clause with a count of
   -- its own, and a name's formula can itself be a disjunction.
-  let into := Into.of target parent.splits.size
-  let parts := into.parts
+  let parts := clauseLiterals target (some parent.splits.size)
   -- Were every one of those names to fail, nothing would follow from the
   -- premise; so suppose the disjunction fails and read each name off that.
   let contradiction ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
+    let refutations := refutationsOf parts h
     let mut proof := premiseProof
-    for name in parent.splits do
+    for (name, k) in parent.splits.zipIdx do
       let (flipped, says) ← flipName name
+      -- The disjunct is usually the name's own place among them.
       let mut found := none
-      for (part, i) in parts.zipIdx do
-        if ← sameFormula part flipped then
-          found := some i
-          break
+      if let some part := parts[k]? then
+        if ← sameFormula part flipped then found := some k
+      if found.isNone then
+        for (part, i) in parts.zipIdx do
+          if ← sameFormula part flipped then
+            found := some i
+            break
       let some i := found
         | throwError "the negation of `{name}`{indentExpr flipped}\nis not \
           among{indentExpr target}"
-      let some injected := into.inject 0 i (.bvar 0)
-        | throwError "the conclusion has no literal {i}"
-      let refuted : Expr := .lam `d flipped (mkApp h injected) .default
+      let refuted ← mkExpectedTypeHint refutations[i]! (mkApp (mkConst ``Not) flipped)
       let body ← namedFormula name
       proof := mkApp proof
         (← mkAppM ``Iff.mp
@@ -282,7 +284,8 @@ private def satClause (states : Stated)
       -- The first-order clause's literals in the order of the names, and then
       -- all of them false.
       let disjunction := junction ``Or ``False parts
-      let carried ← carryAll stated disjunction proof
+      let carried ← carryAll stated disjunction proof (sourceCount := origin.clauseSize?)
+        (targetCount := some parts.size)
       if parts.isEmpty then return carried
       let suffix := suffixJunctions ``Or ``False parts
       return ← mkLambdaFVars refutations
@@ -340,12 +343,12 @@ def splitClause (step : Step) : ReconstructM Expr := do
       continue
     definitions := definitions.insert name (parent, uses, position)
   -- One disjunct per name, whatever the formula each stands for is.
-  let into := Into.of target disjuncts.size
+  let disjunctParts := clauseLiterals target (some disjuncts.size)
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
+    let refutations := refutationsOf disjunctParts h
     let refuted (i : Nat) (of : Expr) : ReconstructM Expr := do
-      let some injected := into.inject 0 i (.bvar 0)
-        | throwError "the conclusion has no disjunct {i}"
-      pure (.lam `d of (mkApp h injected) .default)
+      let some refutation := refutations[i]? | throwError "the conclusion has no disjunct {i}"
+      mkExpectedTypeHint refutation (mkApp (mkConst ``Not) of)
     -- What the clause held under: the disjunct for each of those names is its
     -- negation, so failing means the name holds and the clause can be used.
     let mut proof := clauseProof
@@ -431,13 +434,11 @@ def splitClause (step : Step) : ReconstructM Expr := do
           literals.mapM (Reconstruct.formula definition.varSorts componentVars)
       -- Injected by the count of the component's literals, which can
       -- themselves be disjunctions.
-      let components := Into.of (junction ``Or ``False parts) parts.size
+      let refutations := refutationsOf parts against
       let placed := if isNegatedName name then none
         else step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
-        let some injected := components.inject 0 j (.bvar 0)
-          | throwError "the component of `{name}` has no literal {j}"
-        let negation : Expr := .lam `l part (mkApp against injected) .default
+        let negation := refutations[j]!
         negations := negations.push (part, negation)
         if let some placed := placed then
           if let some (some (k, flipped)) := placed[j]? then

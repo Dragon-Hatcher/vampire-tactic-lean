@@ -134,6 +134,99 @@ def injectGiven (parts : Array Expr) (i : Nat) (h : Expr)
     acc := mkApp3 (mkConst ``Or.inr) parts[j]! suffix[j + 1]! acc
   return acc
 
+/--
+A disjunction of `parts`, which a proof of any one part proves at a cost that
+does not grow with where the part stands.
+
+Proving `p₀ ∨ … ∨ pₙ` from `pₖ` takes `k` disjunction introductions, so placing
+every literal of a clause into it one at a time takes the square of its length
+-- at every step the clause takes part in. `lift j : suffix[j] → suffix[0]` is
+instead bound once, around the proof that uses it, and defined by the one
+before (`lift j h := lift (j-1) (Or.inr h)`): all of them together are the
+length of the clause, and a part is placed with one of them and one
+introduction. A disjunction of a few parts is placed directly, which is no
+longer than applying a lift.
+-/
+structure Disjunction where
+  parts : Array Expr
+  /-- `suffixJunctions ``Or ``False parts`. -/
+  suffix : Array Expr
+  /-- `suffix[j] → suffix[0]`, applied. -/
+  lift : Nat → Expr → Expr
+
+instance : Inhabited Disjunction := ⟨{ parts := #[], suffix := #[mkConst ``False], lift := fun _ h => h }⟩
+
+/-- The whole disjunction. -/
+def Disjunction.whole (d : Disjunction) : Expr := d.suffix[0]!
+
+/-- A proof of the whole disjunction from a proof of its `i`th part. -/
+def Disjunction.inject (d : Disjunction) (i : Nat) (h : Expr) : Expr :=
+  if i + 1 >= d.parts.size then d.lift i h
+  else d.lift i (mkApp3 (mkConst ``Or.inl) d.parts[i]! d.suffix[i + 1]! h)
+
+/-- How many parts a disjunction has before its parts are placed through lifts. -/
+private def directParts : Nat := 4
+
+/-- The lifts of `withDisjunction` from the `j`th on, each let-bound. -/
+private partial def bindLifts (parts suffix : Array Expr)
+    (k : Disjunction → ReconstructM Expr) (j : Nat) (lifts : Array Expr) :
+    ReconstructM Expr := do
+  if j >= parts.size then
+    let lift (i : Nat) (h : Expr) : Expr := if i == 0 then h else mkApp lifts[i - 1]! h
+    let body ← k { parts, suffix, lift }
+    return ← mkLetFVars lifts (← instantiateMVars body)
+  let previous (h : Expr) : Expr := if j == 1 then h else mkApp lifts[j - 2]! h
+  let value := .lam `h suffix[j]!
+    (previous (mkApp3 (mkConst ``Or.inr) parts[j - 1]! suffix[j]! (.bvar 0))) .default
+  withLetDecl (Name.mkSimple s!"lift{j}") (← mkArrow suffix[j]! suffix[0]!) value fun x =>
+    bindLifts parts suffix k (j + 1) (lifts.push x)
+
+/--
+`k` given the disjunction of `parts`, its lifts bound around what `k` builds:
+see `Disjunction`. Only the lifts `k` uses are kept.
+-/
+def withDisjunction (parts : Array Expr) (k : Disjunction → ReconstructM Expr) :
+    ReconstructM Expr := do
+  let suffix := suffixJunctions ``Or ``False parts
+  let n := parts.size
+  if n <= directParts then
+    let lift (j : Nat) (h : Expr) : Expr := Id.run do
+      let mut acc := h
+      for d in [0 : j] do
+        let i := j - 1 - d
+        acc := mkApp3 (mkConst ``Or.inr) parts[i]! suffix[i + 1]! acc
+      return acc
+    return ← k { parts, suffix, lift }
+  bindLifts parts suffix k 1 #[]
+
+/--
+`¬pⱼ` for each part of a disjunction `p₀ ∨ … ∨ pₙ`, from `against`, which
+denies the whole and mentions no bound variable.
+
+Each is built on the denial of the suffix before it -- `¬suffix[j+1]` is
+`fun h => ¬suffix[j] (Or.inr h)` -- so all of them together share one chain the
+length of the disjunction, where denying each part through its own injection
+would take the square of it. They are closed terms, so a caller can keep them
+past any binder.
+-/
+def refutationsOf (parts : Array Expr) (against : Expr) : Array Expr := Id.run do
+  let n := parts.size
+  if n == 0 then return #[]
+  let suffix := suffixJunctions ``Or ``False parts
+  let mut out := #[]
+  let mut deniesSuffix := against
+  for j in [0 : n] do
+    if j + 1 == n then
+      out := out.push deniesSuffix
+    else
+      out := out.push (.lam `h parts[j]!
+        (mkApp deniesSuffix (mkApp3 (mkConst ``Or.inl) parts[j]! suffix[j + 1]! (.bvar 0)))
+        .default)
+      deniesSuffix := .lam `h suffix[j + 1]!
+        (mkApp deniesSuffix (mkApp3 (mkConst ``Or.inr) parts[j]! suffix[j + 1]! (.bvar 0)))
+        .default
+  return out
+
 /-- One part handled on its own, with the motive the elimination proves. -/
 private def elimGivenAt (parts : Array Expr) (k offset : Nat)
     (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :

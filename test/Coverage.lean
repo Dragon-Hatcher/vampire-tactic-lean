@@ -252,6 +252,20 @@ example {A B C D : Type} (R : B → Prop) (m : C → B) (k : D → B → C) (g :
     (hb : R b) : False := by
   vampire [*]
 
+-- Unification with abstraction: resolution and superposition defer what they
+-- cannot unify into constraint literals, found by which literals they are once
+-- literal selection has moved them (step 31's constraint is not where
+-- superposition put it), and the resolved pair is complementary up to them.
+#guard_msgs (drop info) in
+example {ι : Type} (f : ℤ → ι) (p : ι → Prop) (b : ι) (q r : Prop) (a : ℤ) (h1 : f 1 = b ∨ q)
+    (h2 : p (f (a + 2)) ∨ r) (h3 : ¬ p b) (h4 : ¬ q) (h5 : ¬ r) (ha : a + 2 ≤ 1)
+    (hb : 1 ≤ a + 2) : False := by
+  vampire (options := #[("unification_with_abstraction", "all"),
+    ("abstracting_linear_arithmetic_superposition_calculus", "off"),
+    ("forward_demodulation", "off"), ("backward_demodulation", "off"),
+    ("forward_subsumption_resolution", "off"), ("avatar", "off"),
+    ("function_definition_elimination", "none")]) [*]
+
 -- Backward demodulation, with forward demodulation off.
 #guard_msgs (drop info) in
 example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a : ι) (hp : p (f (f a)))

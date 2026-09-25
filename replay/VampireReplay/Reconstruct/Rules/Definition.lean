@@ -323,8 +323,10 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
   let defs ← definitions step
   step.underVars fun kept target => do
     let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
-    let body ← carryWith (← instantiateForall (← conclusionOf parent) args) target
-      (mkAppN clauseProof args)
+    let premiseType ← instantiateForall (← conclusionOf parent) args
+    step.withInto target fun into =>
+    carryWith premiseType target
+      (mkAppN clauseProof args) into (sourceCount := parent.clauseSize?)
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
@@ -347,7 +349,6 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
           if ← literalPolarity l then pure congruence
           else mkCongrArg (mkConst ``Not) congruence
         mkAppM ``Eq.mp #[atom, h])
-    pure body
 
 /--
 A proof of what is kept of a definition, from the definition.
@@ -494,7 +495,8 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (premiseAt, premiseType) ←
       Clause.instantiateKept parent vars proof stated
-    carryAll premiseType target premiseAt
+    carryAll premiseType target premiseAt (sourceCount := parent.clauseSize?)
+      (targetCount := step.unit.clause?.map (·.size))
 
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
