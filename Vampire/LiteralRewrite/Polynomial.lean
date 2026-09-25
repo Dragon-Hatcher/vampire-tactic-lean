@@ -898,7 +898,15 @@ private def alascaDifference (c : Comparison) :
   let t ← if isZero l then pure r
     else if isZero r then mkAppM ``Neg.neg #[l]
     else mkAppM ``HAdd.hAdd #[r, ← mkAppM ``Neg.neg #[l]]
-  let tIsDiff ← ringEq! t (← mkAppM ``HSub.hSub #[r, l])
+  -- `t = r - l`, by the one lemma that says so for the way `t` was written;
+  -- stated at `t` and `r - l` themselves, which the lemmas reach through
+  -- instances of their own.
+  let diff ← mkAppM ``HSub.hSub #[r, l]
+  let tIsDiff ← mkExpectedTypeHint
+    (← mkEqSymm (← if isZero l then mkAppM ``sub_zero #[r]
+      else if isZero r then mkAppM ``zero_sub #[l]
+      else mkAppM ``sub_eq_add_neg #[r, l]))
+    (← mkEq t diff)
   let atT (atom : Expr → MetaM Expr) : MetaM Expr := do
     let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← atom x)
     iffOfEq (← mkCongrArg motive (← mkEqSymm tIsDiff))
