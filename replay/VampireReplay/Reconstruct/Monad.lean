@@ -316,8 +316,9 @@ what reads it as the product unfolds it.
 def linMul {α : Type u} [Mul α] (k t : α) : α := k * t
 
 /--
-The locals `e` mentions, and those their types mention in turn, in the order
-the context has them: what a definition closed over `e` has to take.
+The locals `e` mentions, and those their types -- and, for a local definition,
+its value -- mention in turn, in the order the context has them: what a
+definition closed over `e` has to take.
 -/
 def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
   let lctx ← getLCtx
@@ -330,6 +331,8 @@ def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
     found := found.insert id
     if let some decl := lctx.find? id then
       pending := (collectFVars {} (← instantiateMVars decl.type)).fvarIds.toList ++ pending
+      if let some value := decl.value? then
+        pending := (collectFVars {} (← instantiateMVars value)).fvarIds.toList ++ pending
   return (lctx.sortFVarsByContextOrder found.toArray).map mkFVar
 
 /--
@@ -352,7 +355,11 @@ def auxDefinition (kind : Name) (value : Expr) (reducible : Bool := false) : Met
   let closedType ← inferType closed
   addDecl (.defnDecl (mkDefinitionValEx name lps.toList closedType closed .abbrev .safe [name]))
   if reducible then setReducibleAttribute name
-  return mkAppN (mkConst name (lps.toList.map mkLevelParam)) locals
+  -- A local definition among them is a `let` of the definition's own, not one
+  -- of what it takes: applied to the rest.
+  let lctx ← getLCtx
+  let taken := locals.filter fun x => !((lctx.find? x.fvarId!).map (·.isLet) |>.getD false)
+  return mkAppN (mkConst name (lps.toList.map mkLevelParam)) taken
 
 /--
 Binds the symbol vampire introduced, `name`, to `definition`: what gave it its

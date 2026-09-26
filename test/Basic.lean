@@ -110,3 +110,18 @@ example {ι : Type} [Inhabited ι] (f : ι → ι) (a : ι)
 #guard_msgs (drop info) in
 example (p q r s t : Prop) (h : p ∧ q ∧ r ∧ s ∧ t) (g : ¬t ∨ ¬s) : False := by
   vampire (mode := "vampire") (cores := 1) (options := #[("forced_options", "si=on")]) [*]
+
+-- A definition replay makes -- a witness, a formula vampire named -- closed over
+-- a lifted if-then-else, which is a local definition: it is a `let` of the
+-- definition's own, not one of what it takes, and what its value mentions is
+-- what the definition takes instead.
+#guard_msgs (drop info) in
+example (p : ℤ → Prop) (a b : ℤ) (h : ∃ x : ℤ, p (if a < b then x else b)) (hn : ∀ y, ¬ p y) :
+    False := by
+  vampire [*]
+
+#guard_msgs (drop info) in
+example (p q r : ℤ → Prop) (a b : ℤ)
+    (h1 : ∀ x, (p (if a < b then x else b) ∧ q x) ∨ (r x ∧ p x) ∨ (q x ∧ r (if a < b then b else x)))
+    (h2 : ∀ x, ¬ p x) (h3 : ∀ x, ¬ r x) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("naming", "2")]) [*]
