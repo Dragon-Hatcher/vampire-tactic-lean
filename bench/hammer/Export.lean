@@ -28,6 +28,8 @@ Configured by environment variables:
 * `HAMMER_N`, `HAMMER_SEED`: how many theorems to sample, and how
 * `HAMMER_START`, `HAMMER_COUNT`: which of the sample this run exports
 * `HAMMER_KS`: the budgets, comma-separated
+* `HAMMER_THEOREM_SECONDS`: how long a theorem may take, 1200 by default; one
+  that takes longer is recorded as timed out at every budget
 * `HAMMER_SELECTORS`: which of Lean's selectors rank the premises, of `sine`
   (`sineQuaNonSelector`) and `mepo` (`mepoSelector` with symbol rarity);
   a budget is labelled `<selector>:<k>`
@@ -162,6 +164,7 @@ def main : MetaM Unit := do
   let ks := ((← IO.getEnv "HAMMER_KS").getD "0,16,32,64,128,256").splitOn ","
     |>.filterMap String.toNat? |>.toArray
   let kmax := ks.foldl max 0
+  let limitMs := 1000 * (← envNat "HAMMER_THEOREM_SECONDS" 1200)
   let selectors := ((← IO.getEnv "HAMMER_SELECTORS").getD "sine").splitOn "," |>.toArray
   let env ← getEnv
   -- The sample: every human-written theorem, ordered by a hash of its name.
@@ -177,6 +180,7 @@ def main : MetaM Unit := do
   for i in [start : min (start + count) sample.size] do
     let thm := sample[i]!
     let ci ← getConstInfo thm
+    let theoremStarted ← IO.monoMsNow
     let thmMod := (env.getModuleIdxFor? thm).get!.toNat
     let thmLine ← lineOf thm
     let imports := importClosure env thmMod
@@ -200,7 +204,13 @@ def main : MetaM Unit := do
     -- Why each one that does not was left out goes to `screen.jsonl`.
     let mut translates : Std.HashSet Name := {}
     let mut screened : Std.HashSet Name := {}
+    let mut timedOut := false
     for p in rankings.flatMap (·.2) ++ used do
+      -- A theorem gets as long as a hammer would give it, and one whose
+      -- premises take longer to translate than that is one it gives up on.
+      if (← IO.monoMsNow) - theoremStarted > limitMs then
+        timedOut := true
+        break
       if screened.contains p then continue
       screened := screened.insert p
       let saved ← saveState
@@ -222,6 +232,16 @@ def main : MetaM Unit := do
       rankings.flatMap (fun (sel, ranked) => ks.map fun k =>
           (s!"{sel}:{k}", keep ranked[:k].toArray, (ranked[:k].toArray).size))
         |>.push ("gt", keep used, used.size)
+    if timedOut then
+      for (label, _, selected) in budgets do
+        log.putStrLn s!"\{\"i\": {i}, \"thm\": {jsonStr thm.toString}, \"module\": \
+          {jsonStr env.header.moduleNames[thmMod]!.toString}, \"budget\": {jsonStr label}, \
+          \"selected\": {selected}, \"premises\": 0, \"status\": \"timeout\", \
+          \"ms\": {(← IO.monoMsNow) - theoremStarted}, \"error\": \"theorem took longer than \
+          {limitMs / 1000}s\"}"
+      log.flush
+      IO.println s!"{i} {thm} (timed out)"
+      continue
     for (label, premises, selected) in budgets do
       let file := out / "problems" / s!"{i}_{label.replace ":" "-"}.p"
       let started ← IO.monoMsNow
