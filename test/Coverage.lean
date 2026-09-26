@@ -229,6 +229,19 @@ example {ι : Type} (p q r : ι → Prop) (a : ι) (h : ∀ x, ¬ p x ∨ ¬ q x
 
 /-! ### More arithmetic -/
 
+-- Arithmetic subterm generalization of an ALASCA normal form, `X0 + t ≠ 0`
+-- made `0 ≠ X0`: vampire shares the equality with its sides turned round.
+-- (SMT-LIB LIA jain_7, under the strategy that found it.)
+#guard_msgs (drop info) in
+example
+    (s_c_main__x_0 : ℤ)
+    (s_c_main__y_0 : ℤ)
+    (s_c_main__z_0 : ℤ)
+    (h1 : ((∃ (v0 : ℤ) (v1 : ℤ) (v2 : ℤ) (v3 : ℤ), ((((2097152 : ℤ) * v0) + ((2097152 : ℤ) * v1) + ((2097152 : ℤ) * v2) + ((2097152 : ℤ) * v3)) = s_c_main__y_0)) ∧ (∃ (v4 : ℤ) (v5 : ℤ) (v6 : ℤ) (v7 : ℤ), ((((1048576 : ℤ) * v4) + ((1048576 : ℤ) * v5) + ((1048576 : ℤ) * v6) + ((1048576 : ℤ) * v7)) = s_c_main__x_0)) ∧ (∃ (v8 : ℤ) (v9 : ℤ) (v10 : ℤ) (v11 : ℤ), ((((4194304 : ℤ) * v8) + ((4194304 : ℤ) * v9) + ((4194304 : ℤ) * v10) + ((4194304 : ℤ) * v11)) = s_c_main__z_0))))
+    (h2 : (¬((∃ (v12 : ℤ), (((4194304 : ℤ) * v12) = s_c_main__z_0)) ∧ (∃ (v13 : ℤ), (((1048576 : ℤ) * v13) = s_c_main__x_0)) ∧ (∃ (v14 : ℤ), (s_c_main__y_0 = ((2097152 : ℤ) * v14)))))) :
+    False := by
+  vampire (strategy := "ott+21_1024_to=lakbo:sil=128000:alasca=on:wl=60:uwa=alasca_main:nwc=0.5:updr=off:random_seed=93277:cond=on:i=16:fgj=on:ep=RS:asg=force:nm=10:hb=500:rtra=on:qa=off:rawr=on_1") [*]
+
 -- Arithmetic subterm generalization: a variable standing only under `x - y`.
 #guard_msgs (drop info) in
 example (p : ℤ → Prop) (h : ∀ x y : ℤ, p (x - y)) (hn : ¬ p 5) : False := by

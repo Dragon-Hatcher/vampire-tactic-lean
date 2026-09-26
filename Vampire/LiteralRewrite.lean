@@ -51,10 +51,18 @@ the identities of a ring -- a variable standing for `x - y` is `x - y` again
 once `x` is replaced by `x + y`.
 -/
 private def generalization (a b : Expr) : MetaM Expr := do
-  let some same ← ringEq a b
-    | throwError "arithmetic subterm generalization made{indentExpr b}\nof{indentExpr a}, \
-        which are not one up to the identities of a ring"
-  iffOfEq same
+  if let some same ← ringEq a b then return ← iffOfEq same
+  -- Vampire shares an equality with its sides in an order of its own, as
+  -- `sameLiteral` allows: the literal it made can be the generalized one
+  -- turned round.
+  let (positive, atom) := atomOf b
+  if let some (_, x, y) := atom.eq? then
+    if let some same ← ringEq a (signed positive (← mkEq y x)) then
+      let h ← mkAppOptM ``eq_comm #[none, some y, some x]
+      let h ← if positive then pure h else negated h
+      return ← mkAppM ``Iff.trans #[← iffOfEq same, h]
+  throwError "arithmetic subterm generalization made{indentExpr b}\nof{indentExpr a}, \
+    which are not one up to the identities of a ring, either way round"
 
 /--
 `a ↔ b`, where the procedure `rule` rewrote the literal `a` into `b`, `factor`
