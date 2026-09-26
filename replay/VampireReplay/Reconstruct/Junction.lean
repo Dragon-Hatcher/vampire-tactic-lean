@@ -244,6 +244,57 @@ def Disjunction.inject (d : Disjunction) (i : Nat) (h : Expr) : Expr :=
   if i + 1 >= d.parts.size then d.lift i h
   else d.lift i (mkApp3 (mkConst ``Or.inl) d.parts[i]! d.suffix[i + 1]! h)
 
+/--
+`e` with `xs` abstracted -- what `Expr.abstract e xs` makes of it -- for an
+`e` whose large subterms are shared and do not mention `xs`.
+
+`abstract` works out whether a subterm holds any of `xs` afresh at each binder
+depth the subterm is met at, and descends into any subterm holding some local
+at all. A proof that eliminates a clause part by part meets the clause's
+suffixes one binder deeper for each part, and they hold the clause's own
+variables, so abstracting over it is quadratic in the clause's length. Here
+whether a subterm holds any of `xs` is worked out once for each shared subterm,
+and only those that do are rebuilt, at each depth they are met at.
+-/
+private unsafe def abstractSharedImpl (e : Expr) (xs : Array Expr) : Expr := Id.run do
+  let index : Std.HashMap FVarId Nat :=
+    xs.zipIdx.foldl (init := {}) fun m (x, i) => m.insert x.fvarId! i
+  let n := xs.size
+  let rec mentions (e : Expr) : StateM (Lean.PtrMap Expr Bool) Bool := do
+    if !e.hasFVar then return false
+    if let some held := (← get).find? e then return held
+    let held ← match e with
+      | .fvar id => pure (index.contains id)
+      | .app f a => do pure ((← mentions f) || (← mentions a))
+      | .lam _ t b _ | .forallE _ t b _ => do pure ((← mentions t) || (← mentions b))
+      | .letE _ t v b _ => do pure ((← mentions t) || (← mentions v) || (← mentions b))
+      | .mdata _ b | .proj _ _ b => mentions b
+      | _ => pure false
+    modify (·.insert e held)
+    return held
+  let (_, held) := (mentions e).run Lean.mkPtrMap
+  let holds (e : Expr) : Bool := e.hasFVar && (held.find? e).getD false
+  let rec go (e : Expr) (offset : Nat) : StateM (Std.HashMap (USize × Nat) Expr) Expr := do
+    if !holds e then return e
+    let key := (ptrAddrUnsafe e, offset)
+    if let some done := (← get)[key]? then return done
+    let result ← match e with
+      | .fvar id => pure (.bvar (offset + n - 1 - index[id]!))
+      | .app f a => do pure (e.updateApp! (← go f offset) (← go a offset))
+      | .lam _ t b _ => do pure (e.updateLambdaE! (← go t offset) (← go b (offset + 1)))
+      | .forallE _ t b _ => do pure (e.updateForallE! (← go t offset) (← go b (offset + 1)))
+      | .letE name t v b nondep => do
+        pure (.letE name (← go t offset) (← go v offset) (← go b (offset + 1)) nondep)
+      | .mdata _ b => do pure (e.updateMData! (← go b offset))
+      | .proj _ _ b => do pure (e.updateProj! (← go b offset))
+      | _ => pure e
+    modify (·.insert key result)
+    return result
+  (go e 0).run' {}
+
+@[implemented_by abstractSharedImpl]
+private opaque abstractShared (e : Expr) (xs : Array Expr) : Expr
+
 /-- How many parts a disjunction has before its parts are placed through lifts. -/
 private def directParts : Nat := 4
 
@@ -253,8 +304,30 @@ private partial def bindLifts (parts suffix : Array Expr)
     ReconstructM Expr := do
   if j >= parts.size then
     let lift (i : Nat) (h : Expr) : Expr := if i == 0 then h else mkApp lifts[i - 1]! h
-    let body ← k { parts, suffix, lift }
-    return ← mkLetFVars lifts (← instantiateMVars body)
+    let body ← instantiateMVars (← k { parts, suffix, lift })
+    if body.hasExprMVar then
+      throwError "withDisjunction: the proof built over the lifts is not finished"
+    -- The lets are built here rather than by `mkLetFVars`, which abstracts the
+    -- lifts out of each let's type -- `suffix[j] → suffix[0]`, the whole
+    -- clause -- one let at a time: quadratic in the clause's length, for a
+    -- type no lift occurs in. Where each lift occurs is known: in the body,
+    -- abstracted once, and in the value of the one after it. Each lift is
+    -- stated through the one before, so the lifts kept are the first so many,
+    -- up to the last the body uses.
+    let usedFVars := (collectFVars {} body).fvarSet
+    let used := ((lifts.zipIdx.filter fun (x, _) => usedFVars.contains x.fvarId!).map (·.2 + 1)).foldl max 0
+    let mut e := abstractShared body lifts[:used].toArray
+    for i' in [0 : used] do
+      let i := used - 1 - i'
+      -- The `i`th lift, stated through the lift before it: under this let's
+      -- value that one is the innermost let, `bvar 0`, and under the value's
+      -- own binder `bvar 1`.
+      let j := i + 1
+      let previous (h : Expr) : Expr := if j == 1 then h else mkApp (.bvar 1) h
+      let value := .lam `h suffix[j]!
+        (previous (mkApp3 (mkConst ``Or.inr) parts[j - 1]! suffix[j]! (.bvar 0))) .default
+      e := .letE (Name.mkSimple s!"lift{j}") (← mkArrow suffix[j]! suffix[0]!) value e false
+    return e
   let previous (h : Expr) : Expr := if j == 1 then h else mkApp lifts[j - 2]! h
   let value := .lam `h suffix[j]!
     (previous (mkApp3 (mkConst ``Or.inr) parts[j - 1]! suffix[j]! (.bvar 0))) .default
