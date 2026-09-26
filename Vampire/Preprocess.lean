@@ -240,6 +240,12 @@ def instantiateProps (hypotheses : Array (Expr × Role)) : MetaM (Array (Expr ×
 structure Result where
   hypotheses : Array (Expr × Role)
   goal : MVarId
+  /--
+  Under `+mono`, what each hypothesis was derived from, by position: the
+  lemmas `lean-auto` instantiated to get it, as the leaves of its derivation.
+  Empty otherwise, where a hypothesis is what was passed.
+  -/
+  derivations : Array Auto.DTr := #[]
 
 /-- The name given to the negated goal in the local context. -/
 private def goalMarker : Name := `_vampireNegatedGoal
@@ -316,13 +322,101 @@ def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
   }
 
 /--
+The heads the translation reads as arithmetic, each with how many of its
+arguments, the last ones, are its operands: the rest are the type and the
+instances, which say what arithmetic it is.
+-/
+private def arithmeticOperands : Std.HashMap Name Nat := .ofList
+  [(``OfNat.ofNat, 0), (``HAdd.hAdd, 2), (``HSub.hSub, 2), (``HMul.hMul, 2),
+   (``HDiv.hDiv, 2), (``HMod.hMod, 2), (``Neg.neg, 1), (``LE.le, 2), (``LT.lt, 2),
+   (``GE.ge, 2), (``GT.gt, 2), (``Int.cast, 1), (``Nat.cast, 1),
+   -- Mathlib's, named rather than referred to, as in `VampireReplay.Translate`.
+   (`Int.floor, 1), (`Int.ceil, 1)]
+
+/-- How many operands `e` has, if it is arithmetic at `ℤ`, `ℚ` or `ℝ`. -/
+private def arithmeticOperands? (e : Expr) : Option Nat := do
+  let .const c _ := e.getAppFn | none
+  let k ← arithmeticOperands[c]?
+  let τ ← e.getAppArgs[0]?
+  guard (arithmeticSort τ.consumeMData).isSome
+  return k
+
+/--
+`e` with `step` applied to every subterm, top down, except inside what the
+translation reads as arithmetic at `ℤ`, `ℚ` or `ℝ`: there only the operands are
+visited, and a numeral not at all.
+-/
+private partial def transformKeepingArithmetic (step : Expr → MetaM Expr) (e : Expr) :
+    MetaM Expr :=
+  Meta.transform e (usedLetOnly := false) (pre := fun e => do
+    let e := e.consumeMData
+    if let some k := arithmeticOperands? e then
+      let args := e.getAppArgs
+      let args ← args.mapIdxM fun i a =>
+        if i + k ≥ args.size then transformKeepingArithmetic step a else pure a
+      return .done (mkAppN e.getAppFn args)
+    return .continue (← step e))
+
+/--
+`lean-auto`'s reduction of a lemma's statement (`Auto.prepReduceExpr`: every
+subterm to weak head normal form, then projections of structure instances
+unfolded), except of what the translation reads as arithmetic. Reduced, a
+numeral at `ℝ` is taken apart into the Cauchy sequences the reals are built
+from, where the translation would have stated it as the TPTP number it is.
+-/
+def reduceKeepingArithmetic (e : Expr) : MetaM Expr := do
+  let mode := auto.redMode.get (← getOptions)
+  let e ← withTransparency mode <| transformKeepingArithmetic whnf e
+  transformKeepingArithmetic Auto.unfoldProj e
+
+/-- `Auto.unfoldConstAndPreprocessLemma`, reducing by `reduceKeepingArithmetic`. -/
+private def preprocessLemma (lem : Auto.Lemma) : MetaM Auto.Lemma := do
+  let type ← reduceKeepingArithmetic (← instantiateMVars lem.type)
+  return { lem with type := ← Core.betaReduce (← instantiateMVars type) }
+
+/--
+The constants the translation reads as logic, or lifts out before it reads; and
+`lean-auto`'s own `∀` and `→` (`Auto.Embedding.forallF`, `ImpF`), which it
+states binders by and which unfold to binders again.
+-/
+private def logicalConstants : List Name :=
+  [``Not, ``And, ``Or, ``Iff, ``True, ``False, ``Eq, ``Ne, ``Exists, ``ite, ``dite,
+   ``Auto.Embedding.forallF, ``Auto.Embedding.ImpF]
+
+/--
+Whether an atom `lean-auto` stood for `value` goes back to being `value`: what
+the translation reads for itself -- a type, which it names as a sort; a
+connective, an equation, or a quantifier, which `lean-auto` states as an atom
+applied to the body; `ℤ`, `ℚ` or `ℝ`'s arithmetic -- and a local of the goal's,
+which it names as it stands. The rest are constants at instances it could not
+name, which is what the atoms are for.
+-/
+private def isInterpretedAtom (value : Expr) : MetaM Bool := do
+  let value := value.consumeMData
+  if value.isFVar || value.isLambda || (← isType value) then return true
+  if (arithmeticSort value).isSome || (arithmeticOperands? value).isSome then return true
+  match value.getAppFn with
+  | .const c _ => return logicalConstants.contains c
+  | _ => return false
+
+/--
 Monomorphizes with `lean-auto`, reducing Lean's dependent type theory to
-something first-order. `lean-auto` negates the goal itself, so this also leaves
-a `False` goal over `Prop` hypotheses.
+something first-order, and leaves a `False` goal over the instances it found.
 
 What is sent is what `intros` sends: the hypotheses introduced from the goal,
 the negated goal, and whatever the caller passed in brackets. The rest of the
 local context goes only if named, or with `*`.
+
+`lean-auto` finds the instances and names each constant at its instance by an
+atom -- `@abs ℝ …` as `e2` -- which is what makes them first-order. It would go
+on to prove the problem for every value of its atoms and check that
+reflectively; but the atoms that are `≤`, `+` and `0` over `ℝ`, unknown, leave
+the problem without its arithmetic, and a refutation needs what they are. So
+the atoms the translation reads for itself are put back as what they stand for
+(`isInterpretedAtom`), and only the rest stay atoms: the problem is refuted for
+any values of those, as `lean-auto` would have it, and that refutation is then
+applied to what they stand for, where each instance's own proof -- over the
+constants -- proves what it states.
 -/
 def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
   let (goalBinders, mv) ← mv.intros
@@ -340,18 +434,43 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which
     -- instances it is waiting for.
-    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWithoutPowers).mapM
-      (Auto.unfoldConstAndPreprocessLemma #[])
+    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWithoutPowers).mapM preprocessLemma
+    let lemmas ← Meta.withDefault (Auto.rewriteIteCondDecide lemmas)
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
-    let (proof, mv, _, dtrs) ← Auto.runMono none lemmas inhFacts
-    absurd.assign proof
-    let fromGoal := dtrs.filterMap fun (fv, dtr) =>
-      if dtrContains dtr goalLeaf then some (Expr.fvar fv) else none
-    let hypotheses ← propHypotheses mv
+    -- The atoms are locals only while `lean-auto` has them in scope, so the
+    -- goal is built there: `∀ e₁ … eₙ, fact₁ → … → False`, closed.
+    let (goalType, values, facts) ← Meta.withDefault <|
+        Auto.Monomorphization.monomorphize lemmas inhFacts fun state => do
+      let lctx ← getLCtx
+      let atoms := state.exprFVarVal.toArray.qsort fun (a, _) (b, _) =>
+        ((lctx.find? a).map (·.index)).getD 0 < ((lctx.find? b).map (·.index)).getD 0
+      let mut interpreted := #[]
+      let mut defined := #[]
+      for atom in atoms do
+        if ← isInterpretedAtom atom.2 then interpreted := interpreted.push atom
+        else defined := defined.push atom
+      -- A binder comes back as `lean-auto`'s constant applied to its body, and
+      -- is one once that is unfolded and reduced.
+      let restore (e : Expr) : MetaM Expr := do
+        let e := e.replaceFVars (interpreted.map (Expr.fvar ·.1)) (interpreted.map (·.2))
+        Core.betaReduce (← deltaExpand e
+          (· matches ``Auto.Embedding.forallF | ``Auto.Embedding.ImpF))
+      let facts := state.facts
+      let mut body := mkConst ``False
+      for fact in facts.reverse do
+        body := .forallE `h (← restore (← instantiateMVars fact.type)) body .default
+      for (fv, _) in defined.reverse do
+        body := .forallE (← fv.getUserName) (← restore (← fv.getType))
+          (body.abstract #[.fvar fv]) .default
+      return (body, defined.map (·.2), facts.map fun f => (f.proof, f.deriv))
+    let goal ← mkFreshExprSyntheticOpaqueMVar goalType
+    absurd.assign (mkAppN goal (values ++ facts.map (·.1)))
+    let (fvars, goal) ← goal.mvarId!.introNP (values.size + facts.size)
     return {
-      hypotheses := hypotheses.map fun h =>
-        (h, if fromGoal.contains h then .negatedConjecture else .axiom)
-      goal := mv
+      hypotheses := (fvars[values.size:].toArray.zip facts).map fun (fv, _, deriv) =>
+        (.fvar fv, if dtrContains deriv goalLeaf then .negatedConjecture else .axiom)
+      goal
+      derivations := facts.map (·.2)
     }
 
 end Vampire.Preprocess

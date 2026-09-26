@@ -75,6 +75,8 @@ structure State where
   sorts : Std.HashMap Expr String := {}
   /-- TPTP symbol name for each signature constant, keyed by its `Expr`. -/
   symbols : Std.HashMap Expr String := {}
+  /-- How many arguments each symbol was declared to take. -/
+  arities : Std.HashMap String Nat := {}
   /-- TPTP variable name for each local introduced under a binder. -/
   vars : Std.HashMap FVarId String := {}
   decls : Declarations := {}
@@ -213,7 +215,11 @@ its own arguments is rejected outright, which is what keeps type class
 instances and polymorphic constants out; `+mono` is the way to handle those.
 -/
 def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
-  forallTelescopeReducing type fun args result => do
+  -- Its arity as written, up to what is reducible: a definition that is a
+  -- function type, `Set α` say, is a sort of its own. Unfolded at a result and
+  -- not at an argument, one type would be a sort in one place and an arity in
+  -- another.
+  withReducible <| forallTelescopeReducing type fun args result => do
     let locals := args.map (·.fvarId!)
     let dependent (e : Expr) : Bool := e.hasAnyFVar locals.contains
     if dependent result then return none
@@ -244,6 +250,7 @@ def symbolName (e : Expr) (type : Expr) : TranslateM (Option String) := do
     else s!"({String.intercalate " * " argNames.toList}) > {resultName}"
   modify fun s => { s with
     symbols := s.symbols.insert e name
+    arities := s.arities.insert name argNames.size
     decls.symbols := s.decls.symbols.push
       s!"tff({name}_decl, type, {name}: {signature})."
   }
@@ -421,6 +428,13 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
           {indentExpr fn}\nwhich is not a constant or a local"
     let some head := head
       | throwNotFirstOrderSymbol e fn
+    -- Applied to more arguments than its type takes as written: a term of a
+    -- sort used as a function -- a set applied to an element once membership
+    -- is unfolded -- which TPTP cannot say.
+    unless (← get).arities[head]? == some args.size do
+      throwError "cannot translate{indentExpr e}\nto TPTP: {fn} takes \
+        {((← get).arities[head]?).getD 0} arguments as a TPTP symbol, and is \
+        applied to {args.size}"
     return .app head (← args.mapM translateTerm)
   | .mdata _ e => translateTerm e
   | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it is not a constant, \
@@ -525,20 +539,49 @@ structure Symbols where
   hypotheses : Std.HashMap String Expr := {}
 deriving Inhabited
 
-/-- The TPTP problem for a set of hypotheses, to be refuted. -/
-def problemOf (hypotheses : Array (Expr × Role)) : MetaM (String × Symbols) := do
-  let go : TranslateM (Array String) := do
+/--
+The TPTP problem for a set of hypotheses, to be refuted.
+
+With @b skipUntranslatable, a hypothesis that cannot be stated in TPTP is left
+out rather than failing the problem, and the translation's state is as if it
+had never been tried; the rest keep their names, which are their positions.
+Under `+mono` the negated goal can be several facts -- `lean-auto` rewrites
+it with the lemmas it is given -- and any of them can be left out, but not all:
+without the goal there is nothing to refute, and the goal's own failure is
+the error.
+-/
+def problemOf (hypotheses : Array (Expr × Role)) (skipUntranslatable := false) :
+    MetaM (String × Symbols) := do
+  let go : TranslateM (Array String × Std.HashSet Nat) := do
     let mut formulas := #[]
+    let mut skipped := {}
+    let mut goalStated := false
+    let mut goalFailure : Option Exception := none
     for ((h, role), i) in hypotheses.zipIdx do
-      let formula ← translateFormula (← inferType h)
-      formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
-    return formulas
-  let (formulas, state) ← go.run {}
+      if skipUntranslatable then
+        let saved ← get
+        try
+          let formula ← translateFormula (← inferType h)
+          formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
+          if role == .negatedConjecture then goalStated := true
+        catch e =>
+          set saved
+          skipped := skipped.insert i
+          if role == .negatedConjecture && goalFailure.isNone then goalFailure := some e
+          trace[vampire] "left out hypothesis {i}, which cannot be stated in TPTP: \
+            {e.toMessageData}"
+      else
+        let formula ← translateFormula (← inferType h)
+        formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
+    if let some e := goalFailure then
+      unless goalStated do throw e
+    return (formulas, skipped)
+  let ((formulas, skipped), state) ← go.run {}
   let lines := state.decls.types ++ state.decls.symbols ++ formulas
   let invert (m : Std.HashMap Expr String) : Std.HashMap String Expr :=
     m.fold (init := {}) fun acc e name => acc.insert name e
   let named := hypotheses.zipIdx.foldl (init := {}) fun acc ((h, _), i) =>
-    Std.HashMap.insert acc s!"h{i}" h
+    if skipped.contains i then acc else Std.HashMap.insert acc s!"h{i}" h
   let symbols :=
     { sorts := invert state.sorts, symbols := invert state.symbols
       hypotheses := named }
