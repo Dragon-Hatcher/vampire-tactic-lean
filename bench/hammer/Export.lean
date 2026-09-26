@@ -7,8 +7,8 @@ them, at several premise budgets, so that provers can be compared on exactly
 the same problems.
 
 For each sampled theorem the goal is its statement, set up as `auto` sets it up
-(its binders introduced, then negated). Its premises are what Lean's SInE
-selector ranks highest among the theorems it could have used: those of the
+(its binders introduced, then negated). Its premises are what Lean's premise
+selectors rank highest among the theorems it could have used: those of the
 modules its module imports, and those earlier in its own module. The theorems
 its proof actually uses are a budget of their own (`gt`).
 
@@ -27,7 +27,10 @@ Configured by environment variables:
 * `HAMMER_OUT`: where problems and `export.jsonl` go
 * `HAMMER_N`, `HAMMER_SEED`: how many theorems to sample, and how
 * `HAMMER_START`, `HAMMER_COUNT`: which of the sample this run exports
-* `HAMMER_KS`: the SInE budgets, comma-separated
+* `HAMMER_KS`: the budgets, comma-separated
+* `HAMMER_SELECTORS`: which of Lean's selectors rank the premises, of `sine`
+  (`sineQuaNonSelector`) and `mepo` (`mepoSelector` with symbol rarity);
+  a budget is labelled `<selector>:<k>`
 -/
 
 open Lean Meta Elab
@@ -159,6 +162,7 @@ def main : MetaM Unit := do
   let ks := ((← IO.getEnv "HAMMER_KS").getD "0,16,32,64,128,256").splitOn ","
     |>.filterMap String.toNat? |>.toArray
   let kmax := ks.foldl max 0
+  let selectors := ((← IO.getEnv "HAMMER_SELECTORS").getD "sine").splitOn "," |>.toArray
   let env ← getEnv
   -- The sample: every human-written theorem, ordered by a hash of its name.
   let mut candidates := #[]
@@ -177,12 +181,18 @@ def main : MetaM Unit := do
     let thmLine ← lineOf thm
     let imports := importClosure env thmMod
     let ok := allowed env thm thmMod thmLine imports
-    -- SInE over-fetched, since it takes no filter, then kept to what was there.
+    -- Each selector over-fetched, since neither takes the config's filter, then
+    -- kept to what was there.
     let g ← mkFreshExprMVar ci.type
     let (_, g') ← g.mvarId!.intros
-    let ranked ← LibrarySuggestions.sineQuaNonSelector (depthFactor := 1.5) g' { maxSuggestions := 4 * kmax + 64 }
-    let ranked ← ranked.filterM fun s => ok s.name
-    let ranked := (ranked.map (·.name))[:kmax].toArray
+    let mut rankings : Array (String × Array Name) := #[]
+    for sel in selectors do
+      let selector : LibrarySuggestions.Selector := match sel with
+        | "mepo" => LibrarySuggestions.mepoSelector (useRarity := true)
+        | _ => LibrarySuggestions.sineQuaNonSelector (depthFactor := 1.5)
+      let ranked ← selector g' { maxSuggestions := 4 * kmax + 64 }
+      let ranked ← ranked.filterM fun s => ok s.name
+      rankings := rankings.push (sel, (ranked.map (·.name))[:kmax].toArray)
     -- What the proof used, of the theorems it could have.
     let used ← ((← proofConstants env.header.moduleNames[thmMod]! thm).filterM fun p => do
       return (← getConstInfo p) matches .thmInfo _ && (← ok p))
@@ -190,7 +200,7 @@ def main : MetaM Unit := do
     -- Why each one that does not was left out goes to `screen.jsonl`.
     let mut translates : Std.HashSet Name := {}
     let mut screened : Std.HashSet Name := {}
-    for p in ranked ++ used do
+    for p in rankings.flatMap (·.2) ++ used do
       if screened.contains p then continue
       screened := screened.insert p
       let saved ← saveState
@@ -209,10 +219,11 @@ def main : MetaM Unit := do
         screen.flush
     let keep (ps : Array Name) := ps.filter translates.contains
     let budgets : Array (String × Array Name × Nat) :=
-      ks.map (fun k => (toString k, keep ranked[:k].toArray, (ranked[:k].toArray).size))
+      rankings.flatMap (fun (sel, ranked) => ks.map fun k =>
+          (s!"{sel}:{k}", keep ranked[:k].toArray, (ranked[:k].toArray).size))
         |>.push ("gt", keep used, used.size)
     for (label, premises, selected) in budgets do
-      let file := out / "problems" / s!"{i}_{label}.p"
+      let file := out / "problems" / s!"{i}_{label.replace ":" "-"}.p"
       let started ← IO.monoMsNow
       let saved ← saveState
       -- A translation that runs out of heartbeats is one that failed, and a
