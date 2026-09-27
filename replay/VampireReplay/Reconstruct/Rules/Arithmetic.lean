@@ -123,13 +123,11 @@ def strongNormalization (step : Step) : ReconstructM Expr := do
       let same (a b : Expr) : ReconstructM Bool := do
         if a == b then return true
         withNewMCtxDepth <| withTransparency .instances <| isDefEq a b
+      let h ← orientedAs h part same
       let said ← instantiateMVars (← inferType h)
-      if ← same said part then return into.inject k (← mkExpectedTypeHint h part)
-      let some turned ← flipEquality h
-        | throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}"
-      unless ← same (← instantiateMVars (← inferType turned)) part do
+      unless ← same said part do
         throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}"
-      return into.inject k (← mkExpectedTypeHint turned part)
+      return into.inject k (← mkExpectedTypeHint h part)
     step.withInto target fun into =>
       carryPast premiseType target (mkAppN proof args) into
         (fun i => (placement[i]?.join).isNone) (placed := some placement)
@@ -338,25 +336,24 @@ private def integerOf (fact w : Expr) : ReconstructM (Option Expr) := do
   let stated ← instantiateMVars (← inferType fact)
   let some (τ, a, b) := stated.eq? | return none
   let difference ← mkAppM ``HSub.hSub #[b, a]
-  for (side, sign) in [(a, (-1 : Rat)), (b, 1)] do
-    for t in summands side do
-      let some (c, floor) := floorSummand? t | continue
-      let net := sign * c
-      if net.num == 0 then continue
-      let c ← ratNumeral τ (if 0 < net.num then net else -net)
-      let (inner, lemma_) ← if 0 < net.num then
-          pure (← mkAppM ``HSub.hSub #[floor, w], `Vampire.Lemmas.int_of_eq)
-        else pure (← mkAppM ``HSub.hSub #[w, floor], `Vampire.Lemmas.int_of_eq')
-      let some he ← ringEqual difference (← mkAppM ``HMul.hMul #[c, inner]) | continue
-      return some (← mkAppM lemma_ #[fact, ← positive c, he])
-  return none
+  -- `isInt(w)` is `⌊w⌋ = w` as ALASCA states it: one floor, on either side.
+  let floors := (summands a).filterMap (fun t => (floorSummand? t).map fun (c, f) => (-c, f))
+    ++ (summands b).filterMap floorSummand?
+  let #[(net, floor)] := floors | return none
+  if net.num == 0 then return none
+  let c ← ratNumeral τ (if 0 < net.num then net else -net)
+  let (inner, lemma_) ← if 0 < net.num then
+      pure (← mkAppM ``HSub.hSub #[floor, w], `Vampire.Lemmas.int_of_eq)
+    else pure (← mkAppM ``HSub.hSub #[w, floor], `Vampire.Lemmas.int_of_eq')
+  let some he ← ringEqual difference (← mkAppM ``HMul.hMul #[c, inner]) | return none
+  return some (← mkAppM lemma_ #[fact, ← positive c, he])
 
 /--
-`integerOf`, for a term the step may state negated: `j s + u` of a premise in
-which vampire's coefficient of `s` was negative, `j` being its absolute value.
+`integerOf` `j s + u`, as the worker recorded it of a premise: negated where
+vampire's coefficient of `s` was negative, `j` being its absolute value.
 -/
-private def integerUpToSign (fact w : Expr) : ReconstructM (Option Expr) := do
-  if let some h ← integerOf fact w then return some h
+private def integerAsRecorded (use : PremiseUse) (fact w : Expr) : ReconstructM (Option Expr) := do
+  unless use.negated do return ← integerOf fact w
   let some h ← integerOf fact (← mkAppM ``Neg.neg #[w]) | return none
   return some (← mkAppM `Vampire.Lemmas.ifm_int_neg #[h])
 
@@ -450,16 +447,16 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
       if stated.isAppOfArity ``LE.le 4 then return (false, stated.appArg!)
       throwError "step {step.unit.number}: a premise's literal{indentExpr stated}\n\
         is no comparison with zero"
-    -- The floors the conclusion states, to find the lemmas' own among.
-    let floors ← do
-      let found ← IO.mkRef (#[] : Array Expr)
-      forEachExpr target fun e => do
-        if isFloorCast e then found.modify (·.push e.appArg!.appArg!)
-      found.get
-    let floorOf (wanted : Expr) : ReconstructM Expr := do
-      for a in floors do
-        if let some h ← ringEqual a wanted then return h
-      throwError "step {step.unit.number}: its conclusion has no floor of{indentExpr wanted}"
+    -- The floors the lemmas speak of, which the worker recorded of the
+    -- conclusion: the floor each strengthened side's ceiling is made of.
+    let floorOf (i : Nat) (wanted : Expr) : ReconstructM Expr := do
+      let some (some recorded) := step.unit.introducedTerms[i]?
+        | throwError "step {step.unit.number} recorded no floor {i}"
+      let floor ← term covered recorded
+      let some h ← ringEqual floor wanted
+        | throwError "step {step.unit.number}: its floor{indentExpr floor}\nis not of\
+            {indentExpr wanted}"
+      return h
     withInto target step.unit.clauseSize? fun into => do
       premiseCases step premises target into fun facts => do
         let (strict₀, e₀) ← comparison facts[first]!
@@ -473,7 +470,7 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
         let ht₁ ← ring (← mkAppM ``HMul.hMul #[t₁, k₁]) r₁
         let integral ← if three then do
             let jsu ← mkAppM ``HAdd.hAdd #[← mkAppM ``HMul.hMul #[j, s], u]
-            let some h ← integerUpToSign facts[integer]! jsu
+            let some h ← integerAsRecorded (← step.useAt integer) facts[integer]! jsu
               | throwError "step {step.unit.number}: its integrality premise\
                   {indentExpr (← inferType facts[integer]!)}\nsays of no floor that it is\
                   {indentExpr jsu}\nup to a numeral and the ring"
@@ -485,11 +482,11 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
             mkAppM `Vampire.Lemmas.ifm_floor_int #[s.appArg!.appArg!]
         let lower ← if strict₀ then do
             let wanted ← mkAppM ``Neg.neg #[← mkAppM ``HSub.hSub #[← mkAppM ``HMul.hMul #[j, t₀], u]]
-            mkAppM `Vampire.Lemmas.ifm_lower #[hk₀, hj, ht₀, h₀, integral, ← floorOf wanted]
+            mkAppM `Vampire.Lemmas.ifm_lower #[hk₀, hj, ht₀, h₀, integral, ← floorOf 0 wanted]
           else mkAppM `Vampire.Lemmas.ifm_lower_le #[hk₀, ht₀, h₀]
         let upper ← if strict₁ then do
             let wanted ← mkAppM ``Neg.neg #[← mkAppM ``HAdd.hAdd #[← mkAppM ``HMul.hMul #[j, t₁], u]]
-            mkAppM `Vampire.Lemmas.ifm_upper #[hk₁, hj, ht₁, h₁, integral, ← floorOf wanted]
+            mkAppM `Vampire.Lemmas.ifm_upper #[hk₁, hj, ht₁, h₁, integral, ← floorOf 1 wanted]
           else mkAppM `Vampire.Lemmas.ifm_upper_le #[hk₁, ht₁, h₁]
         let joined ← mkAppM `Vampire.Lemmas.ifm_join #[lower, upper]
         let joinedType ← whnfR (← instantiateMVars (← inferType joined))
@@ -497,31 +494,31 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
           throwError "step {step.unit.number}: the lemmas joined to no disjunction"
         let sum := joinedType.appFn!.appArg!.appArg!
         let lhs := joinedType.appArg!.appFn!.appArg!
-        -- Each disjunct is one of the conclusion's literals, up to the ring.
-        let place (i : Nat) (h : Expr) : ReconstructM (Option Expr) := do
-          let part := into.parts[i]!
-          if part.isAppOfArity ``LT.lt 4 then
-            let some eq ← ringEqual sum part.appArg! | return none
-            let motive ← withLocalDeclD `x α fun x => do
-              mkLambdaFVars #[x] (← mkAppM ``LT.lt #[← num 0, x])
-            return some (into.inject i (← mkEqMP (← mkCongrArg motive eq) h))
-          if let some (_, a, b) := part.eq? then
-            for (side, flipped) in [(a, false), (b, true)] do
-              let some eq ← ringEqual lhs side | continue
-              let motive ← withLocalDeclD `x α fun x => do
-                mkLambdaFVars #[x] (← if flipped then mkEq (← num 0) x else mkEq x (← num 0))
-              let h ← if flipped then mkEqSymm h else pure h
-              return some (into.inject i (← mkEqMP (← mkCongrArg motive eq) h))
-          return none
-        let placed (h : Expr) (wantEq : Bool) : ReconstructM Expr := do
-          for i in [0 : into.parts.size] do
-            if wantEq != into.parts[i]!.eq?.isSome then continue
-            if let some p ← place i h then return p
-          throwError "step {step.unit.number}: its conclusion has no literal{indentExpr (← inferType h)}"
+        -- Each disjunct is one of the two literals the worker recorded the
+        -- step built, the comparison first, up to the ring.
+        let builtPart (j : Nat) : ReconstructM (Nat × Expr) := do
+          let some i := step.unit.introduced[j]?
+            | throwError "step {step.unit.number} recorded no literal {j} it built"
+          let some part := into.parts[i]?
+            | throwError "step {step.unit.number} has no literal {i}"
+          return (i, part)
         let onSum ← withLocalDeclD `h (← mkAppM ``LT.lt #[← num 0, sum]) fun h => do
-          mkLambdaFVars #[h] (← placed h false)
+          let (i, part) ← builtPart 0
+          unless part.isAppOfArity ``LT.lt 4 do
+            throwError "step {step.unit.number}: its literal{indentExpr part}\nis no comparison"
+          let eq ← ring sum part.appArg!
+          let motive ← withLocalDeclD `x α fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``LT.lt #[← num 0, x])
+          mkLambdaFVars #[h] (into.inject i (← mkEqMP (← mkCongrArg motive eq) h))
         let onEq ← withLocalDeclD `h (← mkEq lhs (← num 0)) fun h => do
-          mkLambdaFVars #[h] (← placed h true)
+          let (i, part) ← builtPart 1
+          let h' ← orientedAs h part fun a b => return (← ringEqual a b).isSome
+          let some (_, l, r) := (← instantiateMVars (← inferType h')).eq?
+            | throwError "step {step.unit.number}: its equation is no equation"
+          let some (_, a, b) := part.eq?
+            | throwError "step {step.unit.number}: its literal{indentExpr part}\nis no equation"
+          let same ← mkEqTrans (← mkEqTrans (← ring a l) h') (← ring r b)
+          mkLambdaFVars #[h] (into.inject i (← mkExpectedTypeHint same part))
         mkAppOptM ``Or.elim #[none, none, some target, some joined, some onSum, some onEq]
 
 /--
@@ -664,7 +661,7 @@ def coherence (step : Step) : ReconstructM Expr := do
     let Iw ← mkAppM ``HMul.hMul #[I, w]
     withInto target step.unit.clauseSize? fun into => do
       premiseCases step premises target into fun facts => do
-        let some hw ← integerUpToSign facts[0]! w
+        let some hw ← integerAsRecorded (← step.useAt 0) facts[0]! w
           | throwError "step {step.unit.number}: its first premise's literal\
               {indentExpr (← inferType facts[0]!)}\nsays of no floor that it is{indentExpr w}"
         let L ← instantiateMVars (← inferType facts[1]!)
@@ -682,9 +679,11 @@ def coherence (step : Step) : ReconstructM Expr := do
         let some (some new) := holeIn body part
           | throwError "step {step.unit.number}: its literal{indentExpr part}\nis not\
               {indentExpr L}\nwith{indentExpr F}\nrewritten"
-        let some fl := (summands new).find? isFloorCast
-          | throwError "step {step.unit.number}: what it rewrote the floor to,\
-              {indentExpr new}\nhas no floor"
+        -- `⌊Y⌋ + i w`, as `Coherence` builds it.
+        let fl := if new.isAppOfArity ``HAdd.hAdd 6 then new.appFn!.appArg! else new
+        unless isFloorCast fl do
+          throwError "step {step.unit.number}: what it rewrote the floor to,\
+              {indentExpr new}\nis no floor plus a multiple"
         let some hY ← ringEqual fl.appArg!.appArg! (← mkAppM ``HSub.hSub #[X, Iw])
           | throwError "step {step.unit.number}: the floor{indentExpr fl}\nis not of\
               {indentExpr (← mkAppM ``HSub.hSub #[X, Iw])}"
@@ -782,14 +781,11 @@ def theoryAxiom (step : Step) : ReconstructM Expr := do
           | throwError "{step.rule.name} built no literal {i}"
         let some part := into.parts[k]?
           | throwError "{step.rule.name}'s clause has no literal {k}"
+        let h ← orientedAs h part sameUpToInstances
         let said ← instantiateMVars (← inferType h)
-        if ← sameUpToInstances said part then
-          return into.inject k (← mkExpectedTypeHint h part)
-        let some turned ← flipEquality h
-          | throwError "{step.rule.name}'s literal{indentExpr said}\nis not{indentExpr part}"
-        unless ← sameUpToInstances (← instantiateMVars (← inferType turned)) part do
+        unless ← sameUpToInstances said part do
           throwError "{step.rule.name}'s literal{indentExpr said}\nis not{indentExpr part}"
-        return into.inject k (← mkExpectedTypeHint turned part)) proof
+        return into.inject k (← mkExpectedTypeHint h part)) proof
 
 /--
 ALASCA's Fourier-Motzkin:
@@ -956,14 +952,12 @@ say.
 private def placeByRing (step : Step) (into : Into) (k : Nat) (h : Expr) : ReconstructM Expr := do
   let some part := into.parts[k]?
     | throwError "step {step.unit.number}'s clause has no literal {k}"
+  let h ← orientedAs h part fun a b => return (← ringEqual a b).isSome
   let said ← instantiateMVars (← inferType h)
-  if let some same ← equalModuloRing #[] said part then
-    return into.inject k (← mkEqMP same h)
-  if let some turned ← flipEquality h then
-    if let some same ← equalModuloRing #[] (← instantiateMVars (← inferType turned)) part then
-      return into.inject k (← mkEqMP same turned)
-  throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}\n\
-    up to the identities of a ring"
+  let some same ← equalModuloRing #[] said part
+    | throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}\n\
+        up to the identities of a ring"
+  return into.inject k (← mkEqMP same h)
 
 /--
 ALASCA's floor bounds: from a literal whose selected atom is a floor, the
@@ -1116,10 +1110,7 @@ def eqFactoring (step : Step) : ReconstructM Expr := do
           let differ ← withLocalDeclD `h (mkNot apart) fun hne => do
             let some part := into.parts[built]?
               | throwError "step {step.unit.number}'s clause has no literal {built}"
-            let hne ← if (← instantiateMVars (← inferType hne)) == part then pure hne else
-              let some turned ← flipEquality hne
-                | throwError "step {step.unit.number}: its disequality is not{indentExpr part}"
-              pure turned
+            let hne ← orientedAs hne part fun a b => pure (a == b)
             unless (← instantiateMVars (← inferType hne)) == part do
               throwError "step {step.unit.number}: its disequality is not{indentExpr part}"
             mkLambdaFVars #[hne] (into.inject built hne)

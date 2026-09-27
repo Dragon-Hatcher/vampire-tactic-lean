@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    49 words, see `write`:
+ *   header    50 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -38,8 +38,8 @@
  *              43  how many words `literalFactors` holds, and 44
  *                  `constraintLits`
  *              45  how many words `satOrder` holds, 46 how many pairs
- *                  `introducedLits`, 47 how many words `genPlacements` and 48
- *                  how many `created`
+ *                  `introducedLits`, 47 how many words `genPlacements`, 48
+ *                  how many `created` and 49 how many `introducedTerms`
  *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
@@ -73,7 +73,8 @@
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
  *              splittingName, firstFactor, numFactors, procedure, site,
- *              firstIntroduced, numIntroduced, variant, introducedSymbol}
+ *              firstIntroduced, numIntroduced, variant, introducedSymbol,
+ *              firstIntroducedTerm, numIntroducedTerms}
  *             `firstConstraint` and `numConstraints` are the entries of
  *             `constraintLits` that say which of a clause's literals are the
  *             disequalities an abstracting unifier left behind: what it could
@@ -103,6 +104,9 @@
  *             builds this one is (`InferenceStore::recordIntroduced`).
  *             `introducedSymbol` is the name of the first symbol vampire
  *             recorded the unit to introduce, `NONE` for none.
+ *             `firstIntroducedTerm` and `numIntroducedTerms` are the entries
+ *             of `introducedTerms` for the terms the inference built that
+ *             replay is told of (`InferenceStore::Introduced::terms`).
  *             `site` is the string offset of where in vampire the inference
  *             was made, `file:line` relative to vampire's source directory,
  *             and `NONE` where it is not known: one rule is made in several
@@ -258,6 +262,8 @@
  *   genPlacements where each literal a step pushed went in the clause it
  *             made, in the order it pushed them, bit 31 set where the push
  *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
+ *   introducedTerms term indices, or `NONE` where the inference built no
+ *             term there, in the conclusion's variables
  *   created   when each function symbol and then each predicate symbol was
  *             created, counted over both: a symbol vampire introduced is made
  *             of symbols that exist already, so this is an order to bind them in
@@ -318,9 +324,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 37;
+const uint32_t VERSION = 38;
 /** Words per unit record. */
-const uint32_t UNIT_WIDTH = 39;
+const uint32_t UNIT_WIDTH = 41;
 const uint32_t NONE = 0xFFFFFFFFu;
 /** A placement entry's flags: the literal was turned round, or rewritten into it. */
 const uint32_t PLACED_TURNED = 0x80000000u;
@@ -657,7 +663,7 @@ struct Encoder {
       bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
       placementEntries, literalFactors, constraintLits, introducedLits,
-      genPlacements, created;
+      genPlacements, created, introducedTerms;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -1176,12 +1182,20 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 35] = NONE;
     units[UNIT_WIDTH * idx + 36] = 0;
     units[UNIT_WIDTH * idx + 37] = 0;
+    units[UNIT_WIDTH * idx + 39] = NONE;
+    units[UNIT_WIDTH * idx + 40] = 0;
     if (const auto* introduced = InferenceStore::instance()->introduced(u);
         introduced && u->isClause()) {
       Clause* cl = u->asClause();
       units[UNIT_WIDTH * idx + 35] = static_cast<uint32_t>(introducedLits.size() / 2);
       units[UNIT_WIDTH * idx + 36] = static_cast<uint32_t>(introduced->literals.size());
       units[UNIT_WIDTH * idx + 37] = introduced->variant;
+      if (!introduced->terms.isEmpty()) {
+        units[UNIT_WIDTH * idx + 39] = static_cast<uint32_t>(introducedTerms.size());
+        units[UNIT_WIDTH * idx + 40] = static_cast<uint32_t>(introduced->terms.size());
+        for (TermList t : iterTraits(introduced->terms.iterFifo()))
+          introducedTerms.push_back(t.isEmpty() ? NONE : encodeTerm(t));
+      }
       // A literal made of a premise literal says which, by its index in the
       // first premise, as the literal is serialised.
       Inference::Iterator pit = inference.iterator();
@@ -1775,6 +1789,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.introducedLits.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.genPlacements.size()));
   putWord(buf, static_cast<uint32_t>(enc.created.size()));
+  putWord(buf, static_cast<uint32_t>(enc.introducedTerms.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1811,6 +1826,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.introducedLits);
   putWords(buf, enc.genPlacements);
   putWords(buf, enc.created);
+  putWords(buf, enc.introducedTerms);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

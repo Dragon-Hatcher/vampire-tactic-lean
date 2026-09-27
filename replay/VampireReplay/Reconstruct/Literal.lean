@@ -97,16 +97,18 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
       -- these two is the one with their difference, either way round as
       -- vampire shares the constraint, and `a = b` follows from it.
       if pairs.isEmpty then return none
+      -- The pair for these two is the one whose difference, either way round,
+      -- has their difference's normal form.
       let difference ← mkAppM ``HSub.hSub #[a, b]
       let candidates := pairs.flatMap fun (x, y, p) => #[(x, y, p, false), (y, x, p, true)]
       let differences ← candidates.mapM fun (x, y, _, _) => mkAppM ``HSub.hSub #[x, y]
       let normals ← (← read).ringNormalForms (#[difference] ++ differences)
-      for ((_, _, p, flipped), i) in candidates.zipIdx do
-        unless normals[i + 1]!.1 == normals[0]!.1 do continue
-        let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
-        let h ← if flipped then mkEqSymm p else pure p
-        return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
-      return none
+      let some i := (normals.extract 1 normals.size).findIdx? (·.1 == normals[0]!.1)
+        | return none
+      let (_, _, p, flipped) := candidates[i]!
+      let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
+      let h ← if flipped then mkEqSymm p else pure p
+      return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
     unless a.isApp && b.isApp do return none
     let as := a.getAppArgs
     let bs := b.getAppArgs
@@ -144,29 +146,37 @@ def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
   return some (← mkExpectedTypeHint same (← mkEq a b))
 
 /--
+`h`, a literal, stated the way round `part` states its equation. Vampire shares
+an equation with its sides in an order of its own, so which way round `part`
+has them is read off the two: turned where `h`'s left side is `part`'s right
+side and not its left, `same` saying when two sides are one.
+-/
+def orientedAs (h part : Expr) (same : Expr → Expr → ReconstructM Bool) :
+    ReconstructM Expr := do
+  let said ← instantiateMVars (← inferType h)
+  let (some (_, a, _, _), some (_, c, d, _)) := (equalityLiteral? said, equalityLiteral? part)
+    | return h
+  if ← same a c then return h
+  unless ← same a d do return h
+  return (← flipEquality h).getD h
+
+/--
 `target` from two complementary literals: `negative`, which the step's
 literal says is the negative one, and `positive`, its complement at the same
-substitution. The two are one atom, but that vampire's equality literals are
-unordered, so the positive one can state its equation the other way round,
-which the two themselves say.
+substitution. The two are one atom, as terms or -- where ALASCA's unifier
+solved an equation, which makes them equal as numbers -- as numbers, a ring's
+normal forms deciding at each arithmetic subterm. An equation can be stated
+the other way round, which its sides say (`orientedAs`).
 -/
 def closeComplementary (target negative positive : Expr) : ReconstructM Expr := do
   let deny ← instantiateMVars (← inferType negative)
   let some refuted := asNegation deny
     | throwError "the literal{indentExpr deny}\nthe step resolved as negative is no negation"
+  let positive ← orientedAs positive refuted fun a b => pure (a == b)
   let stated ← instantiateMVars (← inferType positive)
-  -- One atom, as terms or -- where ALASCA's unifier solved an equation, which
-  -- makes them equal as numbers -- as numbers, a ring's normal forms deciding
-  -- at each arithmetic subterm; an equation's sides either way round, which
-  -- the normal forms say.
-  if let some same ← equalModuloRing #[] stated refuted then
-    return ← mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive),
-      some negative]
-  if let some flipped ← flipEquality positive then
-    if let some same ← equalModuloRing #[] (← instantiateMVars (← inferType flipped)) refuted then
-      return ← mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same flipped),
-        some negative]
-  throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary"
+  let some same ← equalModuloRing #[] stated refuted
+    | throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary"
+  mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive), some negative]
 
 /--
 `target` from two literals complementary up to the pairs an abstracting

@@ -12,10 +12,10 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 49
+private def headerWords : Nat := 50
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 39
+private def unitWidth : Nat := 41
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -66,6 +66,7 @@ private structure Layout where
   introducedLits : Nat
   genPlacements : Nat
   created : Nat
+  introducedTerms : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -152,7 +153,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 37
+private def version : UInt32 := 38
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -216,6 +217,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numIntroducedLits := word 46
   let numGenPlacements := word 47
   let numCreated := word 48
+  let numIntroducedTerms := word 49
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -251,7 +253,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let introducedLits := satOrder + numSatOrder * 4
   let genPlacements := introducedLits + numIntroducedLits * 2 * 4
   let created := genPlacements + numGenPlacements * 4
-  let strings := created + numCreated * 4
+  let introducedTerms := created + numCreated * 4
+  let strings := introducedTerms + numIntroducedTerms * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -328,6 +331,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numUnits] do
     let u (off : Nat) := at_ units unitWidth i off
     optionalString "introduced symbol" (u 38)
+    range "introduced terms" (u 39) (u 40) numIntroducedTerms
+    for k in [0:u 40] do
+      optional "introduced term" (at_ introducedTerms 1 (u 39 + k) 0) numTerms
     if u 3 &&& 1 != 0 then range "clause literals" (u 4) (u 5) numUnitLits
     else index "unit formula" (u 4) numFormulas
     range "premises" (u 6) (u 7) numParents
@@ -462,7 +468,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
       literalFactors, constraintLits, satOrder, introducedLits, genPlacements,
-      created, strings, stringsLen, proofText, numFunctions, numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
+      created, introducedTerms, strings, stringsLen, proofText, numFunctions, numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
   }
@@ -627,6 +633,11 @@ structure PremiseUse where
   -/
   virtualEpsilon : Bool
   virtualInfinity : Option Bool
+  /--
+  Whether the premise states `term` negated: an integrality premise `j s + u`
+  whose coefficient of `s` is negative, `j` being its absolute value.
+  -/
+  negated : Bool
   bindings : Array (UInt32 × Term)
   /--
   A second term of the premise the inference acted on: what an arithmetic
@@ -1084,6 +1095,18 @@ def introducedSources (u : Unit) : Array (Option Nat) :=
       (u.proof.layout.introducedLits + (first.toNat + i.val) * 2 * 4 + 4)
     if source == none32 then none else some source.toNat
 
+/--
+The terms the inference built that replay is told of, in the order its rule
+lists them, `none` where it built none there: integer Fourier-Motzkin's floors.
+-/
+def introducedTerms (u : Unit) : Array (Option Term) :=
+  let first := u.field 39
+  let count := u.field 40
+  if first == none32 then #[] else
+  Array.ofFn (n := count.toNat) fun i =>
+    let t := readU32 u.proof.data (u.proof.layout.introducedTerms + (first.toNat + i.val) * 4)
+    if t == none32 then none else some ⟨u.proof, t⟩
+
 /-- Which of the clauses of different shapes its rule builds this one is. -/
 def variant (u : Unit) : Nat := (u.field 37).toNat
 
@@ -1301,6 +1324,7 @@ def premiseUses (u : Unit) : Array PremiseUse :=
       virtualEpsilon := flags &&& 2 != 0
       virtualInfinity := if flags &&& 4 != 0 then some true
         else if flags &&& 8 != 0 then some false else none
+      negated := flags &&& 16 != 0
       bindings := Array.ofFn (n := numBindings.toNat) fun j =>
         let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
         (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩)

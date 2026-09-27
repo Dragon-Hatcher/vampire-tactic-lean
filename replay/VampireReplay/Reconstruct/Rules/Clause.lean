@@ -16,7 +16,7 @@ open Lean Meta
 /-- A step whose conclusion restates its premise's literals. -/
 def literals (step : Step) : ReconstructM Expr := do
   let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
-  relateLiterals step parent premiseProof premiseStated
+  relateLiterals step 0 parent premiseProof premiseStated
 
 /--
 `reorient_equations`: a clause stated again with its equations turned.
@@ -28,7 +28,7 @@ formula states as they stand.
 def reoriented (step : Step) : ReconstructM Expr := do
   let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
   if parent.clause?.isSome then
-    return ← relateLiterals step parent premiseProof premiseStated
+    return ← relateLiterals step 0 parent premiseProof premiseStated
   let stated ← instantiateMVars premiseStated
   unless ← sameFormula stated (← step.conclusion) do
     throwError "reorient_equations: the formula{indentExpr stated}\ndoes not state \

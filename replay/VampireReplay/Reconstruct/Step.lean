@@ -274,7 +274,7 @@ The literals are taken as vampire has them rather than found by taking the
 clause apart: a literal naming a subformula stands for a whole formula, and the
 disjuncts of what it rebuilds to are not literals of the clause.
 -/
-def relateLiterals (step : Step) (parent : Vampire.Unit)
+def relateLiterals (step : Step) (position : Nat) (parent : Vampire.Unit)
     (premiseProof premiseStated : Expr) : ReconstructM Expr := do
   let (some source, some _) := (parent.clause?, step.unit.clause?)
     | throwError "step {step.unit.number} ({step.rule.name}) relates the literals of \
@@ -286,8 +286,7 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
     -- Where the worker recorded each literal went, which is where it goes.
-    let position? := step.unit.parents.findIdx? (·.number == parent.number)
-    let some placed := position?.bind step.placedAt
+    let some placed := step.placedAt position
       | throwError "step {step.unit.number}: the worker recorded no placement of \
           step {parent.number}'s literals"
     -- The conclusion's literals, by the count of them: a literal can itself be
