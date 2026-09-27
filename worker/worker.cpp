@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    46 words, see `write`:
+ *   header    47 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -69,7 +69,8 @@
  *              genState, firstChoice, numChoices, firstCongruence,
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
- *              splittingName, firstFactor, numFactors, procedure, site}
+ *              splittingName, firstFactor, numFactors, procedure, site,
+ *              firstIntroduced, numIntroduced, variant}
  *             `firstConstraint` and `numConstraints` are the entries of
  *             `constraintLits` that say which of a clause's literals are the
  *             disequalities an abstracting unifier left behind: what it could
@@ -90,6 +91,12 @@
  *             procedure rewrote it (`InferenceStore::LiteralProcedure`):
  *             evaluation is whichever of three evaluators the options chose,
  *             and they rewrite a literal differently. `NONE` otherwise.
+ *             `firstIntroduced` and `numIntroduced` are the entries of
+ *             `introducedLits` for the literals the inference built rather
+ *             than carried -- a theory axiom's -- in the order it built them,
+ *             each the index of the conclusion's literal it is, and
+ *             `variant` which of the clauses of different shapes a rule
+ *             builds this one is (`InferenceStore::recordIntroduced`).
  *             `site` is the string offset of where in vampire the inference
  *             was made, `file:line` relative to vampire's source directory,
  *             and `NONE` where it is not known: one rule is made in several
@@ -283,9 +290,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 32;
+const uint32_t VERSION = 33;
 /** Words per unit record. */
-const uint32_t UNIT_WIDTH = 35;
+const uint32_t UNIT_WIDTH = 38;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /**
@@ -618,7 +625,7 @@ struct Encoder {
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
-      placementEntries, literalFactors, constraintLits;
+      placementEntries, literalFactors, constraintLits, introducedLits;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -1117,6 +1124,27 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 11] = numSkolems;
     units[UNIT_WIDTH * idx + 12] = nameOff;
     units[UNIT_WIDTH * idx + 34] = siteOf(inference);
+    // The literals the inference built, as the conclusion's indices.
+    units[UNIT_WIDTH * idx + 35] = NONE;
+    units[UNIT_WIDTH * idx + 36] = 0;
+    units[UNIT_WIDTH * idx + 37] = 0;
+    if (const auto* introduced = InferenceStore::instance()->introduced(u);
+        introduced && u->isClause()) {
+      Clause* cl = u->asClause();
+      units[UNIT_WIDTH * idx + 35] = static_cast<uint32_t>(introducedLits.size());
+      units[UNIT_WIDTH * idx + 36] = static_cast<uint32_t>(introduced->literals.size());
+      units[UNIT_WIDTH * idx + 37] = introduced->variant;
+      for (Literal* lit : iterTraits(introduced->literals.iterFifo())) {
+        uint32_t entry = NONE;
+        for (unsigned j = 0; j < cl->length() && entry == NONE; j++)
+          if ((*cl)[j] == lit)
+            entry = j;
+        if (entry == NONE)
+          throw UserErrorException("unit " + std::to_string(u->number()) +
+            " recorded an introduced literal its conclusion does not have");
+        introducedLits.push_back(entry);
+      }
+    }
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -1673,6 +1701,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
   putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
+  putWord(buf, static_cast<uint32_t>(enc.introducedLits.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1706,6 +1735,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.literalFactors);
   putWords(buf, enc.constraintLits);
   putWords(buf, enc.satOrder);
+  putWords(buf, enc.introducedLits);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

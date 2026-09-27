@@ -12,10 +12,10 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 46
+private def headerWords : Nat := 47
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 35
+private def unitWidth : Nat := 38
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -63,6 +63,7 @@ private structure Layout where
   literalFactors : Nat
   constraintLits : Nat
   satOrder : Nat
+  introducedLits : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -149,7 +150,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 32
+private def version : UInt32 := 33
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -210,6 +211,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numLiteralFactors := word 43
   let numConstraintLits := word 44
   let numSatOrder := word 45
+  let numIntroducedLits := word 46
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -242,7 +244,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let literalFactors := placementEntries + numPlacementEntries * 4
   let constraintLits := literalFactors + numLiteralFactors * 4
   let satOrder := constraintLits + numConstraintLits * 4
-  let strings := satOrder + numSatOrder * 4
+  let introducedLits := satOrder + numSatOrder * 4
+  let strings := introducedLits + numIntroducedLits * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -446,7 +449,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, constraintLits, satOrder, strings, stringsLen, proofText, numFunctions,
+      literalFactors, constraintLits, satOrder, introducedLits, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -1021,6 +1024,20 @@ def skolems (u : Unit) : Array (UInt32 × Term) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.skolems + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+/--
+The literals the inference built rather than carried, in the order it built
+them -- a theory axiom's -- each the index of the conclusion's literal it is.
+-/
+def introduced (u : Unit) : Array Nat :=
+  let first := u.field 35
+  let count := u.field 36
+  if first == none32 then #[] else
+  Array.ofFn (n := count.toNat) fun i =>
+    (readU32 u.proof.data (u.proof.layout.introducedLits + (first.toNat + i.val) * 4)).toNat
+
+/-- Which of the clauses of different shapes its rule builds this one is. -/
+def variant (u : Unit) : Nat := (u.field 37).toNat
 
 /--
 Where in vampire the inference was made, `file:line` in its source directory:

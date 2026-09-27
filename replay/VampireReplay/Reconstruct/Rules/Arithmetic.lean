@@ -905,4 +905,196 @@ partial def coherence (step : Step) : ReconstructM Expr := do
         throwError "step {step.unit.number}: its conclusion has no literal that is{indentExpr L}\n\
           with{indentExpr F}\nrewritten"
 
+
+/--
+The lemma of `Vampire.Lemmas` a theory axiom is, and the vampire variables its
+arguments are, in order: `TheoryAxioms.cpp` numbers them itself. A rule that
+adds one clause for each of several operations is told apart by the operation
+its equation is of, and ALASCA's by the variant recorded.
+-/
+private def axiomLemma (step : Step) : ReconstructM (Name × Array UInt32) := do
+  let operation : ReconstructM String := do
+    let some clause := step.unit.clause?
+      | throwError "a theory axiom that is no clause"
+    let some l := clause.literals[0]?
+      | throwError "a theory axiom with no literals"
+    let some lhs := l.args[0]?
+      | throwError "a theory axiom's equation with no sides"
+    let some symbol := lhs.symbol?
+      | throwError "a theory axiom's equation of no operation"
+    return symbol.name
+  let byOperation (add mul : String) : ReconstructM Name := do
+    match ← operation with
+    | "$sum" => return (`Vampire.Lemmas).str add
+    | "$product" => return (`Vampire.Lemmas).str mul
+    | op => throwError "{step.rule.name} of the operation {op}"
+  let l (s : String) : Name := (`Vampire.Lemmas).str s
+  match step.rule with
+  | .thaCommutativity => return (← byOperation "tha_add_commutativity" "tha_mul_commutativity", #[0, 1])
+  | .thaAssociativity => return (← byOperation "tha_add_associativity" "tha_mul_associativity", #[0, 1, 2])
+  | .thaRightIdentity => return (← byOperation "tha_add_right_identity" "tha_mul_right_identity", #[0])
+  | .thaInverseOpOpInverses => return (l "tha_inverse_op_op_inverses", #[0, 1])
+  | .thaInverseOpUnit => return (l "tha_inverse_op_unit", #[0])
+  | .thaNonreflex => return (l "tha_nonreflex", #[0])
+  | .thaTransitivity => return (l "tha_transitivity", #[0, 1, 2])
+  | .thaOrderTotality => return (l "tha_order_totality", #[0, 1])
+  | .thaOrderMonotonicity => return (l "tha_order_monotonicity", #[0, 1, 2])
+  | .thaOrderPlusOneDichotomy => return (l "tha_order_plus_one_dichotomy", #[0, 1])
+  | .thaMinusMinusX => return (l "tha_minus_minus_x", #[0])
+  | .thaTimesZero => return (l "tha_times_zero", #[0])
+  | .thaDistributivity => return (l "tha_distributivity", #[0, 1, 2])
+  | .thaModuloMultiply => return (l "tha_modulo_multiply", #[1, 2])
+  | .thaModuloPositive => return (l "tha_modulo_positive", #[1, 2])
+  | .thaModuloSmall => return (l "tha_modulo_small", #[1, 2])
+  | .thaAbsEquals => return (l "tha_abs_equals", #[1])
+  | .thaAbsMinusEquals => return (l "tha_abs_minus_equals", #[1])
+  | .thaQuotientNonZero => return (l "tha_quotient_non_zero", #[1])
+  | .thaQuotientMultiply => return (l "tha_quotient_multiply", #[1, 2])
+  | .thaExtraIntegerOrdering => return (l "tha_extra_integer_ordering", #[0, 1])
+  | .thaFloorSmall => return (l "tha_floor_small", #[0])
+  | .thaFloorBig => return (l "tha_floor_big", #[0])
+  | .thaCeilingBig => return (l "tha_ceiling_big", #[0])
+  | .thaCeilingSmall => return (l "tha_ceiling_small", #[0])
+  | .thaAlasca =>
+    match step.unit.variant with
+    | 0 => return (l "tha_alasca_0", #[0, 1, 2])
+    | 1 => return (l "tha_alasca_1", #[0, 1])
+    | 2 => return (l "tha_alasca_2", #[0, 1, 2])
+    | 3 => return (l "tha_alasca_3", #[0, 1, 2])
+    | 4 => return (l "tha_alasca_4", #[0, 1, 2])
+    | v => throwError "tha_alasca has no variant {v}"
+  | rule => throwError "{rule.name} is no theory axiom of vampire's arithmetic"
+
+/--
+A theory axiom: its lemma at the clause's variables, each disjunct the literal
+the axiom built it as, where the worker recorded that literal went. Vampire
+shares an equation with its sides either way round, so a disjunct is the
+conclusion's literal or it turned round, which the two say; the lemma is
+stated over the classes the numbers are instances of, and the literal with the
+instances replay reads it with, so the two are one up to those instances.
+-/
+def theoryAxiom (step : Step) : ReconstructM Expr := do
+  let (lemma_, variables) ← axiomLemma step
+  let introduced := step.unit.introduced
+  step.underVars fun vars target => do
+    let args ← variables.mapM fun v => do
+      let some x := vars[v]?
+        | throwError "{step.rule.name}'s clause does not bind X{v}"
+      return x
+    let proof ← mkAppM lemma_ args
+    let stated ← instantiateMVars (← inferType proof)
+    let disjuncts ← countedParts ``Or stated introduced.size
+    let sameUpToInstances (a b : Expr) : ReconstructM Bool :=
+      withTransparency .instances (isDefEq a b)
+    step.withInto target fun into =>
+      elimGiven disjuncts (motive? := some target) (fun i h => do
+        let some k := introduced[i]?
+          | throwError "{step.rule.name} built no literal {i}"
+        let some part := into.parts[k]?
+          | throwError "{step.rule.name}'s clause has no literal {k}"
+        let said ← instantiateMVars (← inferType h)
+        if ← sameUpToInstances said part then
+          return into.inject k (← mkExpectedTypeHint h part)
+        let some turned ← flipEquality h
+          | throwError "{step.rule.name}'s literal{indentExpr said}\nis not{indentExpr part}"
+        unless ← sameUpToInstances (← instantiateMVars (← inferType turned)) part do
+          throwError "{step.rule.name}'s literal{indentExpr said}\nis not{indentExpr part}"
+        return into.inject k (← mkExpectedTypeHint turned part)) proof
+
+/--
+ALASCA's Fourier-Motzkin:
+
+    j s₁ + t₁ >₁ 0    -k s₂ + t₂ >₂ 0
+    ─────────────────────────────────
+    k t₁ + j t₂ > 0    (∨ -k s₂ + t₂ = 0 where both are ≥)
+
+at the unifier, which makes `s₁` and `s₂` one up to arithmetic; at the
+integers the resolvent is `k t₁ + j t₂ - 1 > 0`. `Vampire.Lemmas.fm_*` at the
+recorded `j` and `k`, with `t₁` and `t₂` what is left of each premise's term
+once its atom is taken out, related to the premises and the literals the
+inference built by ring arithmetic alone.
+-/
+partial def fourierMotzkin (step : Step) : ReconstructM Expr := do
+  step.underVars fun vars target => do
+    let premises ← premisesOf step vars
+    let covered ← coverVars vars step.unit.boundVarSorts
+    let (some s₁, some j) ← recordedTerms step covered 0
+      | throwError "step {step.unit.number}: its first premise recorded no atom and coefficient"
+    let (some s₂, some k) ← recordedTerms step covered 1
+      | throwError "step {step.unit.number}: its second premise recorded no atom and coefficient"
+    let α ← inferType s₁
+    let integral := α.isConstOf ``Int
+    let introduced := step.unit.introduced
+    let ring (a b : Expr) : ReconstructM Expr := do
+      let some h ← ringEqual a b
+        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
+            are not one up to the identities of a ring"
+      return h
+    let zero ← wholeNumeral α 0
+    let comparison (h : Expr) : ReconstructM (Bool × Expr) := do
+      let stated ← instantiateMVars (← inferType h)
+      if stated.isAppOfArity ``LT.lt 4 then return (true, stated.appArg!)
+      if stated.isAppOfArity ``LE.le 4 then return (false, stated.appArg!)
+      throwError "step {step.unit.number}: a premise's literal{indentExpr stated}\n\
+        is no comparison with zero"
+    -- `h`, a comparison with `0` of `e`, restated as one of `e'`, equal to it.
+    let restated (h e e' : Expr) (strict : Bool) : ReconstructM Expr := do
+      let eq ← ring e e'
+      let op := if strict then ``LT.lt else ``LE.le
+      let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM op #[zero, x])
+      mkEqMP (← mkCongrArg motive eq) h
+    -- `h : 0 < e` as the literal `part` states it, `0 < e'` for `e'` equal to `e`.
+    let asPart (h part : Expr) : ReconstructM Expr := do
+      let stated ← instantiateMVars (← inferType h)
+      if part.isAppOfArity ``LT.lt 4 && stated.isAppOfArity ``LT.lt 4 then
+        let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``LT.lt #[zero, x])
+        return ← mkEqMP (← mkCongrArg motive (← ring stated.appArg! part.appArg!)) h
+      -- `e = 0`, either way round as vampire shares it.
+      let some (_, l, _) := stated.eq?
+        | throwError "step {step.unit.number}: {indentExpr stated}\nis not{indentExpr part}"
+      let some (_, pl, pr) := part.eq?
+        | throwError "step {step.unit.number}: {indentExpr stated}\nis not{indentExpr part}"
+      let (side, flipped) := if pr == zero then (pl, false) else (pr, true)
+      let motive ← withLocalDeclD `x α fun x => do
+        mkLambdaFVars #[x] (← if flipped then mkEq zero x else mkEq x zero)
+      let h ← if flipped then mkEqSymm h else pure h
+      mkEqMP (← mkCongrArg motive (← ring l side)) h
+    let place (i : Nat) (into : Into) (h : Expr) : ReconstructM Expr := do
+      let some k := introduced[i]?
+        | throwError "step {step.unit.number} built no literal {i}"
+      let some part := into.parts[k]?
+        | throwError "step {step.unit.number}'s clause has no literal {k}"
+      return into.inject k (← asPart h part)
+    withInto target step.unit.clauseSize? fun into => do
+      premiseCases step premises target into fun facts => do
+        let (strict₁, e₁) ← comparison facts[0]!
+        let (strict₂, e₂) ← comparison facts[1]!
+        let js ← mkAppM ``HMul.hMul #[j, s₁]
+        let ks ← mkAppM ``HMul.hMul #[k, s₂]
+        let a ← mkAppM ``HSub.hSub #[e₁, js]
+        let b ← mkAppM ``HAdd.hAdd #[e₂, ks]
+        -- The second premise's term with the first's atom: one up to the unifier.
+        let ks₁ ← mkAppM ``HMul.hMul #[k, s₁]
+        let h₁ ← restated facts[0]! e₁ (← mkAppM ``HAdd.hAdd #[js, a]) strict₁
+        let h₂ ← restated facts[1]! e₂ (← mkAppM ``HAdd.hAdd #[← mkAppM ``Neg.neg #[ks₁], b]) strict₂
+        let hj ← positive j
+        let hk ← positive k
+        let l (n : String) : Name := (`Vampire.Lemmas).str n
+        if integral then
+          unless strict₁ && strict₂ do
+            throwError "step {step.unit.number}: integer Fourier-Motzkin of a comparison not strict"
+          return ← place 0 into (← mkAppM (l "fm_int") #[hj, hk, h₁, h₂])
+        match strict₁, strict₂ with
+        | true, true => place 0 into (← mkAppM (l "fm_gt_gt") #[hj, hk, h₁, h₂])
+        | true, false => place 0 into (← mkAppM (l "fm_gt_ge") #[hj, hk, h₁, h₂])
+        | false, true => place 0 into (← mkAppM (l "fm_ge_gt") #[hj, hk, h₁, h₂])
+        | false, false =>
+          let joined ← mkAppM (l "fm_ge_ge") #[hj, hk, h₁, h₂]
+          let joinedType ← whnfR (← instantiateMVars (← inferType joined))
+          let onSum ← withLocalDeclD `h joinedType.appFn!.appArg! fun h => do
+            mkLambdaFVars #[h] (← place 0 into h)
+          let onEq ← withLocalDeclD `h joinedType.appArg! fun h => do
+            mkLambdaFVars #[h] (← place 1 into h)
+          mkAppOptM ``Or.elim #[none, none, some target, some joined, some onSum, some onEq]
+
 end Vampire.Reconstruct.Arithmetic
