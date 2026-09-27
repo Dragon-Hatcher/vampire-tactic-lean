@@ -1370,7 +1370,9 @@ struct Encoder {
       placements.push_back(static_cast<uint32_t>(from.size()));
       numPlacements++;
     };
-    if (u->isClause()) {
+    // A split clause is a formula, of names, and what is placed for it is its
+    // components' literals, into the clause it splits.
+    if (u->isClause() || inference.rule() == InferenceRule::AVATAR_SPLIT_CLAUSE) {
       const Stack<InferenceStore::PremiseUse>* recorded =
         InferenceStore::instance()->premiseUses(u);
       // The uses recorded against a premise, in order.
@@ -1427,9 +1429,18 @@ struct Encoder {
           }
           if (lits.size() != parts.size())
             continue;
+          // A negative ground singleton is defined by its complement and named
+          // negatively (`Splitter::buildAndInsertComponentClause`): what its
+          // name asserts is the clause's literal itself.
+          Clause* split = premisesInOrder[0]->asClause();
+          if (lits.size() == 1 && lits[0]->ground()) {
+            Literal* complement = Literal::complementaryLiteral(lits[0]);
+            for (unsigned j = 0; j < split->length(); j++)
+              if ((*split)[j] == complement && complement->isNegative())
+                lits[0] = complement;
+          }
           for (uint32_t k = 0; k < premiseUses.size(); k++)
-            place(pos, k, lits, premisesInOrder[0]->asClause(),
-                  &premiseUses[k]->bindings, nullptr);
+            place(pos, k, lits, split, &premiseUses[k]->bindings, nullptr);
         } else if (inference.rule() == InferenceRule::CLAUSIFY && pos == 0
                    && !premise->isClause()
                    && InferenceStore::instance()->genClauseOfClause(u)

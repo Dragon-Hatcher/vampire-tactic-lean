@@ -156,7 +156,7 @@ taken apart by @b targetCount, or by its shape where that is `none`.
 def carryAll (source target proof : Expr) (placed : Option Placement := none)
     (into : Option Into := none) (sourceCount targetCount : Option Nat := none) :
     ReconstructM Expr := do
-  if ← sameFormula source target then
+  if (← instantiateMVars source) == (← instantiateMVars target) then
     return proof
   match into with
   | some into => carryWith source target proof into (fun _ h => pure h) placed sourceCount

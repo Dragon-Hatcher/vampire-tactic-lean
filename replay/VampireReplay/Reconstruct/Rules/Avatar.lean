@@ -401,11 +401,10 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- How many times each name has been met, so that a component named twice
     -- takes its two renamings in turn.
     let mut met : Std.HashMap String Nat := {}
-    let mut negations : Array (Expr × Expr) := #[]
     -- Which clause literal each component literal is, as the worker recorded
     -- it under the component's renaming: that literal is refuted by that
     -- negation, with nothing to look for.
-    let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool) := {}
+    let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool × Bool) := {}
     for (name, i) in disjuncts.zipIdx do
       let key := (splitName name).2
       -- A name the clause held under is in the split clause flipped, and is no
@@ -466,14 +465,12 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- Injected by the count of the component's literals, which can
       -- themselves be disjunctions.
       let refutations := refutationsOf parts against
-      let placed := if (splitName name).1 then none
-        else step.unit.placement? position seen
+      let placed := step.unit.placement? position seen
       for (part, j) in parts.zipIdx do
         let negation := refutations[j]!
-        negations := negations.push (part, negation)
         if let some placed := placed then
           if let some (some (k, flipped)) := placed[j]? then
-            negationAt := negationAt.insert k (part, negation, flipped)
+            negationAt := negationAt.insert k (part, negation, flipped, (splitName name).1)
     -- The clause at all of those witnesses at once has every literal refuted.
     let arguments' ← argsFor parent arguments
     let instance_ := mkAppN proof arguments'
@@ -484,29 +481,31 @@ def splitClause (step : Step) : ReconstructM Expr := do
       | throwError "an avatar split clause splits {parent}, which is not a clause"
     let clauseParts ← countedParts ``Or instantiated clause.size
     let contradiction ← elimGiven clauseParts (fun i hl => do
-      if let some (part, negation, flipped) := negationAt[i]? then
-        -- The worker recorded the component's literal as the clause's, turned
-        -- round where it said so.
-        if let some hl ← (if flipped then flipEquality hl else pure (some hl)) then
-          let literal ← instantiateMVars (← inferType hl)
-          if ← isDefEq part literal then
-            return ← mkAppOptM ``absurd
-              #[some literal, some (mkConst ``False), some hl, some negation]
-      -- A named component and the clause's own literal over it can meet with a
-      -- double negation between them: which of a name and its negation carries
-      -- one is up to which of the two splitting introduced, and polarity
-      -- flipping can add another. And vampire shares an equation whichever way
-      -- round it is written, so the component can state it the other way.
-      for candidate in #[hl] ++ (← doubleNegations hl) ++ (← flipEquality hl).toArray do
-        let literal ← instantiateMVars (← inferType candidate)
-        for (part, negation) in negations do
-          if ← isDefEq part literal then
-            return ← mkAppOptM ``absurd
-              #[some literal, some (mkConst ``False), some candidate,
-                some negation]
-      throwError "nothing refutes{indentExpr (← instantiateMVars (← inferType hl))}\
-        \nof the clause {parent}, whose components are {disjuncts}; their \
-        literals are{MessageData.joinSep (negations.toList.map (indentExpr ·.1)) ""}") instance_
+      -- Each of the clause's literals is a component's, where the worker
+      -- recorded it went, turned round where it said so.
+      let some (part, negation, flipped, negatedName) := negationAt[i]?
+        | throwError "the worker placed no component's literal at literal {i} of the \
+            clause {parent}, whose components are {disjuncts}; it placed \
+            {definitions.toList.map fun (n, (_, uses, position)) =>
+              (n, position, uses.size, (List.range uses.size).map fun k =>
+                repr (step.unit.placement? position k))}"
+      let some hl ← (if flipped then flipEquality hl else pure (some hl))
+        | throwError "the worker recorded literal {i} of {parent} as turned round, but it \
+            is no equation"
+      let literal ← instantiateMVars (← inferType hl)
+      if part == literal then
+        return ← mkAppOptM ``absurd #[some literal, some (mkConst ``False), some hl, some negation]
+      -- A negated name's component is the complement of what its name's
+      -- definition states, which reads as a double negation of the clause's
+      -- literal where the definition reads the complement as a negation.
+      if negatedName then
+        if let some inner := part.not? then
+          if inner.not? == some literal then
+            let doubled ← mkAppM ``not_not_intro #[hl]
+            return ← mkAppOptM ``absurd #[some part, some (mkConst ``False), some doubled,
+              some negation]
+      throwError "the component's literal{indentExpr part}\nis not literal {i} of the clause,\
+        {indentExpr literal}") instance_
     mkAppM ``Iff.mp
       #[← mkAppOptM ``Classical.not_not #[some target],
         ← mkLambdaFVars #[h] contradiction]

@@ -50,24 +50,6 @@ def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
     | return none
   return some (← symmLiteral τ lhs rhs negated h)
 
-/--
-The same literal with a double negation taken off, or put on.
-
-A name and its negation are two names, and polarity flipping leaves a literal
-meaning the opposite of what it did, so the two can meet with one negation
-between them either way round.
--/
-def doubleNegations (h : Expr) : ReconstructM (Array Expr) := do
-  let stated ← instantiateMVars (← inferType h)
-  let mut out := #[]
-  if let some inner := stated.not? then
-    if let some innermost := inner.not? then
-      out := out.push (← mkAppM ``Iff.mp
-        #[← mkAppOptM ``Classical.not_not #[some innermost], h])
-  out := out.push (← mkAppM ``Iff.mpr
-    #[← mkAppOptM ``Classical.not_not #[some stated], h])
-  return out
-
 /-- `a` with its double negations stripped. -/
 partial def stripped (a : Expr) : Expr :=
   match a.not? with
@@ -213,21 +195,6 @@ def closeComplementaryModulo (target negative positive : Expr)
     | throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary \
         up to what the unifier deferred"
   mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive), some negative]
-
-/--
-Which of `parts` a literal stating `stated` is.
-
-The literal is usually the very one the conclusion was built from, so it is
-looked for as it stands before what the parts mean is asked about: a clause of
-a few hundred literals is placed a literal at a time, and unifying with each of
-its parts costs more than the inferences do.
--/
-def findPart? (parts : Array Expr) (stated : Expr) : ReconstructM (Option Nat) := do
-  for k in [0 : parts.size] do
-    if parts[k]! == stated then return some k
-  for k in [0 : parts.size] do
-    if ← isDefEq parts[k]! stated then return some k
-  return none
 
 /--
 `target` from `h`, a literal a step dropped because nothing makes it hold:
