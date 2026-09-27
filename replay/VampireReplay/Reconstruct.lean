@@ -234,13 +234,11 @@ to the Lean term it means: before any step is replayed where that can be done
 step needs a name that was never bound, or cannot be replayed.
 -/
 def run (proof : Proof) (symbols : Symbols)
-    (contradiction : Array Expr → Option Expr → MetaM Expr)
     (literalIff : LiteralRewrite → Expr → Expr → Int × Nat → MetaM Expr)
     (literalFalse : LiteralRewrite → Expr → Int × Nat → MetaM Expr)
     (literalRewritten : LiteralRewrite → Expr → MetaM (Expr × Expr))
     (virasRefute : Expr → Expr → Nat → Array Expr → Array Expr →
       Option Expr → Bool → Option Bool → MetaM Expr)
-    (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
     (ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)))
     (checkSteps : Bool := false)
     (numerically : Expr → MetaM Expr := fun _ =>
@@ -264,8 +262,8 @@ def run (proof : Proof) (symbols : Symbols)
     | some decl => if decl.isImplementationDetail then none else some decl.toExpr
     | none => none
   let (outcome, _) ←
-    (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse,
-              literalRewritten, virasRefute, cancelling, ringNormalForms,
+    (go.run { symbols, proof, givens, literalIff, literalFalse,
+              literalRewritten, virasRefute, ringNormalForms,
               checkSteps, numerically
               flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>

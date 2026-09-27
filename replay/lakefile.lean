@@ -35,10 +35,10 @@ lean_lib VampireReplay where
   roots := #[
     `VampireReplay.InferenceRule, `VampireReplay.Wire,
     `VampireReplay.Translate, `VampireReplay.Reconstruct,
-    `VampireReplay.Abstract, `VampireReplay.Spawn]
+    `VampireReplay.Spawn]
   globs := #[
     .one `VampireReplay.InferenceRule, .one `VampireReplay.Wire,
     .one `VampireReplay.Translate,
-    .one `VampireReplay.Abstract, .one `VampireReplay.Spawn,
+    .one `VampireReplay.Spawn,
     .andSubmodules `VampireReplay.Reconstruct]
   precompileModules := true

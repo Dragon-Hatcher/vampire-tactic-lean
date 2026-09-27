@@ -90,24 +90,12 @@ structure Context where
   -/
   checkSteps : Bool := false
   /--
-  What proves `False` from facts that cannot all hold of any numbers.
-
-  Vampire's arithmetic rules record nothing of why they are sound -- for it,
-  soundness is the calculus rather than a derivation -- so those are the one
-  kind of step whose conclusion replay has to prove for itself, which for
-  arithmetic is what a decision procedure is for. It is handed in rather than
-  called directly: `omega` and `linarith` are the procedures, and `linarith`
-  lives in a library whose keywords this one cannot afford to have.
-  -/
-  contradiction : Array Expr → Option Expr → MetaM Expr := fun _ _ =>
-    throwError "replay was not given a way to prove arithmetic steps"
-  /--
   `a ↔ b`, where a literal-wise simplification rewrote the literal `a` into
   `b`, by exactly the rewrites that procedure makes; the factor is the one the
   step recorded against the literal (see `Unit.literalFactors?`), `(1, 1)`
   where it recorded none.
 
-  Handed in for the same reason as `contradiction`: the rewrites are identities
+  Handed in because it is Mathlib's: the rewrites are identities
   of a ring and facts about an order, which are Mathlib's.
   -/
   literalIff : LiteralRewrite → Expr → Expr → Int × Nat → MetaM Expr :=
@@ -129,22 +117,12 @@ structure Context where
   literals, and the conclusion VIRAS made of it failing: `images[i]` is what
   the premise's `i`th literal became and `denials[i]` a proof it fails; and
   the virtual term VIRAS substituted, as its term, whether plus an
-  infinitesimal, and which infinity. Handed in for the same reason as
-  `contradiction`.
+  infinitesimal, and which infinity. Handed in because it is
+  Mathlib's.
   -/
   virasRefute : Expr → Expr → Nat → Array Expr → Array Expr →
       Option Expr → Bool → Option Bool → MetaM Expr :=
     fun _ _ _ _ _ _ _ _ => throwError "replay was not given a way to replay VIRAS"
-  /--
-  `x ≠ 0 → x * z = x * w → z = w` at three numbers, and none where their sort
-  does not cancel.
-
-  Handed in for the same reason as `contradiction`, and needed because
-  vampire's divisibility axiom turns on exactly this: that multiplication by
-  anything but zero cancels is a fact about a ring without zero divisors, and
-  no procedure that reads its facts as linear constraints can see it.
-  -/
-  cancelling : Expr → Expr → Expr → MetaM (Option Expr) := fun _ _ _ => pure none
   /--
   Each term in ring normal form, with `e = nf`, the atoms numbered alike across
   all of them and normalised too: two terms one up to the identities of a
@@ -152,14 +130,14 @@ structure Context where
   unifier makes of two terms it unifies, solving `X + 1 = a` for `X` where it
   can rather than leaving the pair.
 
-  Handed in for the same reason as `contradiction`.
+  Handed in because it is Mathlib's.
   -/
   ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)) := fun _ =>
     throwError "replay was not given a way to normalise terms over a ring"
   /--
   A proof of a true closed fact about numerals -- `0 < 3 / 2`, `(2 : ℤ) = 2`:
-  evaluated, not searched for. Handed in for the same reason as
-  `contradiction`.
+  evaluated, not searched for. Handed in because it is
+  Mathlib's.
   -/
   numerically : Expr → MetaM Expr := fun _ =>
     throwError "replay was not given a way to evaluate facts about numerals"

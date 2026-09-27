@@ -484,4 +484,94 @@ theorem lf_ge_ge {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 ≤ e�
 
 end LiteralFactoring
 
+
+/-!
+### VIRAS
+
+A literal `L` of the premise, whose term `s` is linear in the eliminated `x`
+with slope `-c` (`c` the slope of its complement's term `-s`), fails at the
+point VIRAS's virtual term stands for, while the conclusion fails. `sp` is `s`
+at the point, `st` at the virtual term's term `t`, and `z` where `-s` vanishes;
+each lemma is one shape of that, stated as replay has it.
+-/
+
+section Viras
+variable {α : Type*} [Field α] [LinearOrder α] [IsStrictOrderedRing α]
+
+/-! Below every place a complement changes: `p < z`, and `-s = c (x - z)`. -/
+
+theorem viras_below_le {c z p sp : α} (hc : c < 0) (hp : p < z) (hs : sp = -(c * (p - z)))
+    (h : 0 ≤ sp) : False := by
+  have : 0 < c * (p - z) := mul_pos_of_neg_of_neg hc (sub_neg.mpr hp)
+  linarith
+theorem viras_below_lt {c z p sp : α} (hc : c < 0) (hp : p < z) (hs : sp = -(c * (p - z)))
+    (h : 0 < sp) : False :=
+  viras_below_le hc hp hs h.le
+theorem viras_below_eq {c z p sp : α} (hc : c ≠ 0) (hp : p < z) (hs : sp = -(c * (p - z)))
+    (h : sp = 0) : False := by
+  rw [h, zero_eq_neg] at hs
+  rcases mul_eq_zero.mp hs with h | h
+  · exact hc h
+  · exact (sub_neg.mpr hp).ne h
+
+/-! Just above `t`: `p = t + δ` for a positive `δ`, and `sp = st - c δ`. -/
+
+theorem viras_above_rising_le {c δ st sp : α} (hc : 0 < c) (hδ : 0 < δ) (hs : sp = st - c * δ)
+    (hden : ¬0 < st) (h : 0 ≤ sp) : False := by
+  have := mul_pos hc hδ
+  linarith [not_lt.mp hden]
+theorem viras_above_rising_lt {c δ st sp : α} (hc : 0 < c) (hδ : 0 < δ) (hs : sp = st - c * δ)
+    (hden : ¬0 < st) (h : 0 < sp) : False :=
+  viras_above_rising_le hc hδ hs hden h.le
+/-- Falling, the complement holds only below `r = st / -c`, and `δ` is at most `r / 2`. -/
+theorem viras_above_falling_le {c δ st sp : α} (hc : c < 0) (hδ : 0 < δ)
+    (hle : δ ≤ 1 / 2 * (c⁻¹ * st)) (hs : sp = st - c * δ) (hden : ¬0 ≤ st) (h : 0 ≤ sp) :
+    False := by
+  have hst : st < 0 := not_le.mp hden
+  have hr : c⁻¹ * st = st / c := by rw [div_eq_inv_mul]
+  have : c * δ ≥ c * (1 / 2 * (c⁻¹ * st)) := mul_le_mul_of_nonpos_left hle hc.le
+  have e : c * (1 / 2 * (c⁻¹ * st)) = st / 2 := by
+    rw [show c * (1 / 2 * (c⁻¹ * st)) = 1 / 2 * (c * c⁻¹) * st by ring,
+      mul_inv_cancel₀ hc.ne]
+    ring
+  linarith
+theorem viras_above_falling_lt {c δ st sp : α} (hc : c < 0) (hδ : 0 < δ)
+    (hle : δ ≤ 1 / 2 * (c⁻¹ * st)) (hs : sp = st - c * δ) (hden : ¬0 ≤ st) (h : 0 < sp) :
+    False :=
+  viras_above_falling_le hc hδ hle hs hden h.le
+/-- `r / 2` is positive where the complement falls and its conclusion literal fails. -/
+theorem viras_half_pos {c st : α} (hc : c < 0) (hden : ¬0 ≤ st) : 0 < 1 / 2 * (c⁻¹ * st) := by
+  have := mul_pos (inv_lt_zero.mpr hc |> neg_pos.mpr) (neg_pos.mpr (not_le.mp hden))
+  nlinarith
+/--
+A disequality's complement, `s ≠ 0`, of a slope other than zero: `s = 0` just
+above `t` at most at one point, `r = st / c` above it, which `δ` stays below
+where `r` is above `t`.
+-/
+theorem viras_above_eq_far {c δ st sp : α} (hc : c ≠ 0) (hδ : 0 < δ)
+    (hle : δ ≤ 1 / 2 * (c⁻¹ * st)) (hr : 0 < c⁻¹ * st) (hs : sp = st - c * δ) (h : sp = 0) :
+    False := by
+  have : st = c * δ := by linarith
+  have hd : δ = c⁻¹ * st := by rw [this, ← mul_assoc, inv_mul_cancel₀ hc, one_mul]
+  linarith
+theorem viras_above_eq_near {c δ st sp : α} (hc : c ≠ 0) (hδ : 0 < δ)
+    (hr : ¬0 < c⁻¹ * st) (hs : sp = st - c * δ) (h : sp = 0) : False := by
+  have : st = c * δ := by linarith
+  have hd : c⁻¹ * st = δ := by rw [this, ← mul_assoc, inv_mul_cancel₀ hc, one_mul]
+  exact hr (hd ▸ hδ)
+
+theorem viras_half_of_pos {r : α} (hr : 0 < r) : 0 < 1 / 2 * r := by positivity
+
+end Viras
+
+/--
+Two terms an abstracting unifier deferred as `x = y`, where their difference
+is `x - y`: ALASCA's unifier states the pair it could not unify as the
+positive and negative parts of the two terms' difference.
+-/
+theorem eq_of_sub_eq {α : Type*} [AddCommGroup α] {a b x y : α} (h : x = y)
+    (he : a - b = x - y) : a = b := by
+  rw [h, sub_self] at he
+  exact sub_eq_zero.mp he
+
 end Vampire.Lemmas

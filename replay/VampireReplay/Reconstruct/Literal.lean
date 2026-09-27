@@ -124,10 +124,23 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
       if x == a && y == b then return some p
       if x == b && y == a then return some (← mkEqSymm p)
     if arithmetic a || arithmetic b then
-      -- Their normal forms differ, so without deferred pairs to say they are
-      -- equal they are not the same number.
+      -- ALASCA's unifier defers two terms it cannot unify as `P ≠ N`, where
+      -- `P - N` is their difference split into its positive and negative
+      -- monomials (`UnificationWithAbstraction.cpp`, `alasca`): the pair for
+      -- these two is the one with their difference, either way round as
+      -- vampire shares the constraint, and `a = b` follows from it.
       if pairs.isEmpty then return none
-      return some (← (← read).contradiction (pairs.map (·.2.2)) (some (← mkEq a b)))
+      let difference ← mkAppM ``HSub.hSub #[a, b]
+      let candidates := pairs.flatMap fun (x, y, p) => #[(x, y, p, false), (y, x, p, true)]
+      let differences ← candidates.mapM fun (x, y, _, _) => mkAppM ``HSub.hSub #[x, y]
+      let normals ← (← read).ringNormalForms (#[difference] ++ differences)
+      for ((x, y, p, flipped), i) in candidates.zipIdx do
+        unless normals[i + 1]!.1 == normals[0]!.1 do continue
+        let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
+        let h ← if flipped then mkEqSymm p else pure p
+        let _ := (x, y)
+        return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
+      return none
     unless a.isApp && b.isApp do return none
     let as := a.getAppArgs
     let bs := b.getAppArgs
@@ -202,7 +215,8 @@ def closeComplementaryModulo (target negative positive : Expr)
   let stated ← instantiateMVars (← inferType positive)
   let some same ← equalModuloRing equal stated refuted
     | throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary \
-        up to what the unifier deferred"
+        up to what the unifier deferred:{MessageData.joinSep (equal.toList.map fun (x, y, _) =>
+          m!"{indentExpr x}\n  ={indentExpr y}") ""}"
   mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive), some negative]
 
 /--
@@ -254,137 +268,5 @@ partial def plainly (h : Expr) : ReconstructM Expr := do
     unless stated.not?.isSome do
       return ← mkExpectedTypeHint h (mkApp (mkConst ``Not) inner)
   return h
-
-/--
-What proves `goal` from the facts given, where what settles it is arithmetic.
-
-The propositional part is taken apart here -- a conjunction proved a conjunct
-at a time, a case made for each disjunct of a fact -- so that what is left for
-a decision procedure is what it is good at: a comparison, or facts that cannot
-all hold of any numbers.
--/
-partial def byArithmetic (facts : Array Expr) (goal : Expr)
-    (fuel : Nat := 2) : ReconstructM Expr := do
-  let contradiction := (← read).contradiction
-  -- A fact that says two things says each of them, and one that says either of
-  -- two is two cases; both are the caller's to take apart, so they are taken
-  -- apart here before anything is asked of the numbers.
-  for (fact, i) in facts.zipIdx do
-    let stated ← instantiateMVars (← inferType fact)
-    if stated.isAppOfArity ``And 2 then
-      let rest := facts.eraseIdx! i
-      let parts := spineParts ``And stated
-      let suffix := suffixJunctions ``And ``True parts
-      let mut extended := rest
-      for j in [0 : parts.size] do
-        extended := extended.push (← projectGiven parts j fact (suffix? := some suffix))
-      return ← byArithmetic extended goal fuel
-    if stated.isAppOfArity ``Or 2 then
-      let rest := facts.eraseIdx! i
-      return ← elimGiven (spineParts ``Or stated)
-        (fun _ h => do byArithmetic (rest.push (← plainly h)) goal fuel) fact
-  -- What is asked for says two things, or either of two, or that something
-  -- cannot be: each is a step away from something the numbers settle.
-  if goal.isAppOfArity ``And 2 then
-    let parts := spineParts ``And goal
-    return ← introGiven parts fun i => byArithmetic facts parts[i]! fuel
-  if let some inner := goal.not? then
-    return ← withLocalDeclD `h inner fun h => do
-      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h))
-        (mkConst ``False) fuel)
-  if let some (p, q) := goal.iff? then
-    let forward ← withLocalDeclD `h p fun h => do
-      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) q fuel)
-    let backward ← withLocalDeclD `h q fun h => do
-      mkLambdaFVars #[h] (← byArithmetic (facts.push (← plainly h)) p fuel)
-    return ← mkAppM ``Iff.intro #[forward, backward]
-  if goal.isAppOfArity ``Or 2 then
-    let parts := spineParts ``Or goal
-    -- A step of this kind acts on one literal and carries the rest, so most of
-    -- what is asked for is a fact already in hand. Looking for it costs a
-    -- comparison, where asking the numbers costs a decision procedure a
-    -- question it answers the same way.
-    let suffix := suffixJunctions ``Or ``False parts
-    for (part, i) in parts.zipIdx do
-      for fact in facts do
-        if ← isDefEq part (← instantiateMVars (← inferType fact)) then
-          return ← injectGiven parts i fact (suffix? := some suffix)
-    -- Otherwise suppose none of them holds. That covers whichever disjunct the
-    -- numbers would have given, so asking for each in turn first is asking a
-    -- decision procedure, once per disjunct, what this asks it once.
-    let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
-      let mut extended := facts
-      for refuting in refutationsOf parts h do
-        extended := extended.push (← plainly refuting)
-      mkLambdaFVars #[h] (← byArithmetic extended (mkConst ``False) fuel)
-    return ofNotNot goal refuted
-  if goal.isConstOf ``False then
-    -- Two of the facts may be a thing and its denial, which is no question
-    -- about numbers: a procedure reads a fact as a linear constraint, and a
-    -- denied equality between two long sums is not one, so it passes over the
-    -- very fact that settles it.
-    for (fact, i) in facts.zipIdx do
-      if let some denied := (← instantiateMVars (← inferType fact)).not? then
-        for other in facts.eraseIdx! i do
-          if ← isDefEq denied (← instantiateMVars (← inferType other)) then
-            return ← mkAppOptM ``absurd
-              #[some denied, some (mkConst ``False), some other, some fact]
-    -- A step's variable can stand for a term -- flattening names a subterm by
-    -- one, Gaussian elimination solves for one -- and a fact about the variable
-    -- and one about the term are then one fact only once the equation between
-    -- them is substituted, which no procedure over the facts as given does.
-    if fuel > 0 then
-      let types ← facts.mapM fun f => do instantiateMVars (← inferType f)
-      let namesVariable (t : Expr) : Bool := match t.eq? with
-        | some (_, l, r) =>
-          (l.isFVar && !r.containsFVar l.fvarId!) || (r.isFVar && !l.containsFVar r.fvarId!)
-        | none => false
-      if types.any namesVariable then
-        try
-          return ← rollingBack do
-            let decls := types.mapIdx fun i t => (Name.mkSimple s!"fact{i}", fun _ => pure t)
-            withLocalDeclsD decls fun hs => do
-              let before := (← getLCtx)
-              let goal ← mkFreshExprSyntheticOpaqueMVar (mkConst ``False)
-              let substituted ← Lean.Meta.substVars goal.mvarId!
-              let proof ← substituted.withContext do
-                let mut remaining := #[]
-                for decl in ← getLCtx do
-                  if decl.isImplementationDetail then continue
-                  -- What was in scope before, and still is, is no fact of these.
-                  if (before.find? decl.fvarId).isSome && !hs.contains decl.toExpr then continue
-                  if ← isProp decl.type then remaining := remaining.push decl.toExpr
-                byArithmetic remaining (mkConst ``False) (fuel - 1)
-              substituted.assign proof
-              return mkAppN (← mkLambdaFVars hs (← instantiateMVars goal)) facts
-        catch _ => pure ()
-    -- A fact that denies an equality is used by making the equality: `linarith`
-    -- reads `¬(a < b)` as `b ≤ a` but takes nothing from `a ≠ b`, so what it
-    -- denies is proved from the rest instead. A denied comparison needs none
-    -- of this, being a comparison the other way round.
-    if fuel > 0 then
-      for (fact, i) in facts.zipIdx do
-        if let some denied := (← instantiateMVars (← inferType fact)).not? then
-          -- Through what vampire defined, as an equality proxy is.
-          unless (← unfoldDefinitions denied).isAppOfArity ``Eq 3 do continue
-          -- Rolled back if it fails, as every attempt that may not succeed is.
-          try
-            return ← rollingBack do
-              let held ← byArithmetic (facts.eraseIdx! i) denied (fuel - 1)
-              mkAppOptM ``absurd
-                #[some denied, some (mkConst ``False), some held, some fact]
-          catch _ => pure ()
-    return ← contradiction facts none
-  -- A comparison, which is what the numbers settle.
-  try
-    rollingBack (contradiction facts (some goal))
-  catch _ =>
-    -- Supposing it fails is another set of facts, and they are taken apart
-    -- the same way anything else is: a denied comparison among them says
-    -- nothing to a procedure until what it denies has been proved.
-    let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) goal) fun h => do
-      mkLambdaFVars #[h]
-        (← byArithmetic (facts.push (← plainly h)) (mkConst ``False) fuel)
-    return ofNotNot goal refuted
 
 end Vampire.Reconstruct

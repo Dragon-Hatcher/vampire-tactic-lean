@@ -1,5 +1,4 @@
 import Vampire.LiteralRewrite.Polynomial
-import Mathlib.Tactic.Linarith
 
 /-!
 A port of ALASCA's VIRAS quantifier elimination (`Inferences/ALASCA/VIRAS.cpp`
@@ -153,13 +152,6 @@ private def Output.statement (o : Output) (α : Expr) : MetaM (Option Expr) := d
 /-- Whether two statements are one up to the identities of a ring. -/
 private def sameStatement (a b : Expr) : MetaM Bool := return (← ringEq a b).isSome
 
-/-- A proof of `False` from `facts` and nothing but linear arithmetic. -/
-private def byLinarith (facts : Array Expr) : MetaM Expr := do
-  let facts ← facts.mapM unfoldFact
-  let proof ← mkFreshExprMVar (mkConst ``False)
-  Mathlib.Tactic.Linarith.linarith true facts.toList {} proof.mvarId!
-  instantiateMVars proof
-
 /-- The `n` disjuncts of `c`, the last holding what is left. -/
 private def disjuncts (c : Expr) (n : Nat) : Array Expr := Id.run do
   let mut out := #[]
@@ -182,6 +174,147 @@ private partial def elimOr (c : Expr) (n : Nat) (h : Expr)
   let right ← withLocalDeclD `r b fun r => do
     mkLambdaFVars #[r] (← elimOr b (n - 1) r refute (i + 1))
   return mkApp6 (mkConst ``Or.elim) a b (mkConst ``False) h left right
+
+/-- `goal`, by cases on `cond`. -/
+private def byCasesOn (cond goal : Expr) (yes no : Expr → MetaM Expr) : MetaM Expr := do
+  let hYes ← withLocalDeclD `h cond fun h => do mkLambdaFVars #[h] (← yes h)
+  let hNo ← withLocalDeclD `h (mkNot cond) fun h => do mkLambdaFVars #[h] (← no h)
+  mkAppOptM ``Classical.byCases #[some cond, some goal, some hYes, some hNo]
+
+/-- How a literal states its term at the point: `0 ≤ s`, `0 < s`, or `s = 0`. -/
+inductive LiteralKind
+  | le | lt | eq
+
+/--
+What is known at the point of a literal whose term has a slope, the lemma that
+refutes it being chosen by which: below every zero; or just above the virtual
+term's term `t`, at `t + δ`, the term rising, falling (`δ` at most half the
+distance to where it vanishes), or a disequality's term, split on whether it
+vanishes above `t`. `st` is the term at `t` as the lemma takes it.
+-/
+inductive PointFact
+  | below (p z hp : Expr)
+  | rising (δ st hδ : Expr)
+  | falling (δ st hδ hle : Expr)
+  | apart (δ st hδ cond hle half : Expr)
+
+/-- `s` and how the literal `h` states it, an equation turned to `s = 0`. -/
+private def literalTerm (literal h : Expr) : MetaM (Expr × LiteralKind × Expr) := do
+  if literal.isAppOfArity ``LE.le 4 then return (literal.appArg!, .le, h)
+  if literal.isAppOfArity ``LT.lt 4 then return (literal.appArg!, .lt, h)
+  if let some (_, a, b) := literal.eq? then
+    if isZero b then return (a, .eq, h)
+    if isZero a then return (b, .eq, ← mkEqSymm h)
+  throwError "VIRAS: the literal{indentExpr literal}\nis no comparison of a term with zero"
+
+/-- `min b₀ (min b₁ … bottom)`. -/
+private def minOf (bounds : Array Expr) (bottom : Expr) : MetaM Expr := do
+  let mut acc := bottom
+  for b in bounds.reverse do
+    acc ← mkAppM ``Min.min #[b, acc]
+  return acc
+
+/--
+`m ≤ bᵢ` for `m = min b₀ (min b₁ … bottom)`: the `i`th of the chain, and the
+bottom itself for `i` past the bounds.
+-/
+private partial def minLe (bounds : Array Expr) (bottom : Expr) (i : Nat) : MetaM Expr := do
+  if bounds.isEmpty then return ← mkAppM ``le_refl #[bottom]
+  let rest ← minOf (bounds.extract 1 bounds.size) bottom
+  if i == 0 then return ← mkAppM ``min_le_left #[bounds[0]!, rest]
+  mkAppM ``le_trans #[← mkAppM ``min_le_right #[bounds[0]!, rest],
+    ← minLe (bounds.extract 1 bounds.size) bottom (i - 1)]
+
+/-- `lower < min b₀ (min b₁ … bottom)` from `lower < bᵢ` for each, and `lower < bottom`. -/
+private def ltMin (positives : Array Expr) (bottomPositive : Expr) : MetaM Expr := do
+  let mut acc := bottomPositive
+  for p in positives.reverse do
+    acc ← mkAppM ``lt_min #[p, acc]
+  return acc
+
+/--
+The point the complements all hold at, with what is known there of each
+literal: `t` for a term; below every zero for minus infinity; `t + δ` for
+`t + ε`, `δ` below every distance from `t` at which a complement stops holding.
+-/
+private def pointFor (x τ : Expr) (complements : Array (Option Complement))
+    (images denials : Array Expr) (vt : Virtual) :
+    MetaM (Expr × Array (Option PointFact)) := do
+  let zero ← wholeOf τ 0
+  let one ← wholeOf τ 1
+  let none' : Array (Option PointFact) := complements.map fun _ => none
+  match vt with
+  | .term t => return (t, none')
+  | .minusInfinity =>
+    let mut zeros : Array Expr := #[]
+    let mut owners : Array Nat := #[]
+    for (c?, i) in complements.zipIdx do
+      let some c := c? | continue
+      if c.slope == 0 then continue
+      zeros := zeros.push (← zeroOf x c)
+      owners := owners.push i
+    if zeros.isEmpty then return (zero, none')
+    let m ← minOf zeros.pop zeros.back!
+    let p ← mkAppM ``HSub.hSub #[m, one]
+    let pm ← mkAppM ``sub_one_lt #[m]
+    let mut facts := none'
+    for (i, j) in owners.zipIdx do
+      let le ← minLe zeros.pop zeros.back! j
+      let hp ← mkAppM ``lt_of_lt_of_le #[pm, le]
+      facts := facts.set! i (some (.below p zeros[j]! hp))
+    return (p, facts)
+  | .plusEpsilon t =>
+    let mut bounds : Array Expr := #[]
+    let mut positives : Array Expr := #[]
+    -- Per literal: what it becomes once `δ` is known.
+    let mut pending : Array (Nat × Nat × (Expr → Expr → Expr → MetaM PointFact)) := #[]
+    let mut rising : Array (Nat × Expr) := #[]
+    for (c?, i) in complements.zipIdx do
+      let some c := c? | continue
+      if c.slope == 0 then continue
+      let cE ← numeralOf τ c.slope
+      match c.symbol with
+      | .gt | .geq =>
+        let st := images[i]!.appArg!
+        if c.slope > 0 then
+          rising := rising.push (i, st)
+        else
+          let half ← mkAppM ``HMul.hMul #[← numeralOf τ (1/2),
+            ← mkAppM ``HMul.hMul #[← mkAppM ``Inv.inv #[cE], st]]
+          let hc ← byNumerals (← mkAppM ``LT.lt #[cE, zero])
+          let positive ← mkAppM `Vampire.Lemmas.viras_half_pos #[hc, denials[i]!]
+          pending := pending.push (i, bounds.size, fun δ hδ hle => pure (.falling δ st hδ hle))
+          bounds := bounds.push half
+          positives := positives.push positive
+      | .neq =>
+        let st := at_ x c.term t
+        let r ← mkAppM ``HMul.hMul #[← mkAppM ``Inv.inv #[cE], st]
+        let half ← mkAppM ``HMul.hMul #[← numeralOf τ (1/2), r]
+        let cond ← mkAppM ``LT.lt #[zero, r]
+        let inst ← mkAppOptM ``Classical.propDecidable #[some cond]
+        let e ← mkAppOptM ``ite #[some τ, some cond, some inst, some half, some one]
+        let positive ← byCasesOn cond (← mkAppM ``LT.lt #[zero, e])
+          (fun hr => do
+            let is ← mkAppOptM ``if_pos #[some cond, some inst, some hr, some τ, some half, some one]
+            mkAppM ``lt_of_lt_of_eq #[← mkAppM `Vampire.Lemmas.viras_half_of_pos #[hr],
+              ← mkEqSymm is])
+          (fun hr => do
+            let is ← mkAppOptM ``if_neg #[some cond, some inst, some hr, some τ, some half, some one]
+            mkAppM ``lt_of_lt_of_eq #[← mkAppOptM ``zero_lt_one #[some τ, none, none, none, none, none],
+              ← mkEqSymm is])
+        pending := pending.push (i, bounds.size, fun δ hδ hle => pure (.apart δ st hδ cond hle half))
+        bounds := bounds.push e
+        positives := positives.push positive
+      | .eq => continue
+    let onePositive ← mkAppOptM ``zero_lt_one #[some τ, none, none, none, none, none]
+    let δ ← minOf bounds one
+    let hδ ← ltMin positives onePositive
+    let mut facts := none'
+    for (i, j, make) in pending do
+      facts := facts.set! i (some (← make δ hδ (← minLe bounds one j)))
+    for (i, st) in rising do
+      facts := facts.set! i (some (.rising δ st hδ))
+    return (← mkAppM ``HAdd.hAdd #[t, δ], facts)
 
 /--
 `False`, from a premise `∀ x, C x` whose clause `C` has `n` literals, where the
@@ -231,10 +364,10 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr)
       | throwError "VIRAS made a conclusion its virtual term does not give"
     trace[vampire] "VIRAS took {match vt with
       | .minusInfinity => m!"-∞" | .term t => m!"{t}" | .plusEpsilon t => m!"{t} + ε"}"
-    -- The point every complement holds at, and what shows each does.
-    let (point, facts, splits) ← pointFor x τ complements denials vt
-    let clauseAtPoint ← literalsAt point
-    let premiseAtPoint := mkApp premise point
+    -- The point every complement holds at, and what is known of each literal there.
+    let (pt, facts) ← pointFor x τ complements images denials vt
+    let clauseAtPoint ← literalsAt pt
+    let premiseAtPoint := mkApp premise pt
     let refuteLiteral (i : Nat) (literal h : Expr) : MetaM Expr := do
       let some denial := denials[i]? | throwError "VIRAS: no denial for literal {i}"
       let some image := images[i]? | throwError "VIRAS: no image for literal {i}"
@@ -248,121 +381,47 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr)
           let some same ← ringEq literal image
             | throwError "VIRAS: {literal} is not {image} up to the identities of a ring"
           return mkApp denial (← mkAppM ``Eq.mp #[same, h])
-        -- A choice of distance made for this literal is split on.
-        match splits.find? (·.1 == i) with
-        | some (_, cond, e, half) =>
+        let some fact := facts[i]?.join
+          | throwError "VIRAS: nothing was worked out of the point for literal {i}"
+        -- The literal's term at the point, and how the literal states it.
+        let (sp, kind, h) ← literalTerm literal h
+        let cE ← numeralOf τ c.slope
+        let lemma_ (n : String) : Name := (`Vampire.Lemmas).str n
+        match fact, vt with
+        | .below p z hp, _ =>
+          let hs ← ringEq! sp (← mkAppM ``Neg.neg #[← mkAppM ``HMul.hMul #[cE, ← mkAppM ``HSub.hSub #[p, z]]])
+          match kind with
+          | .le => mkAppM (lemma_ "viras_below_le") #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
+          | .lt => mkAppM (lemma_ "viras_below_lt") #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
+          | .eq => mkAppM (lemma_ "viras_below_eq") #[← byNumerals (mkNot (← mkEq cE (← wholeOf τ 0))), hp, hs, h]
+        | .rising δ st hδ, _ =>
+          let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
+          let hc ← byNumerals (← mkAppM ``LT.lt #[← wholeOf τ 0, cE])
+          match kind with
+          | .le => mkAppM (lemma_ "viras_above_rising_le") #[hc, hδ, hs, denial, h]
+          | .lt => mkAppM (lemma_ "viras_above_rising_lt") #[hc, hδ, hs, denial, h]
+          | .eq => throwError "VIRAS: an equation's complement rising just above its term"
+        | .falling δ st hδ hle, _ =>
+          let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
+          let hc ← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0])
+          match kind with
+          | .le => mkAppM (lemma_ "viras_above_falling_le") #[hc, hδ, hle, hs, denial, h]
+          | .lt => mkAppM (lemma_ "viras_above_falling_lt") #[hc, hδ, hle, hs, denial, h]
+          | .eq => throwError "VIRAS: an equation's complement falling just above its term"
+        | .apart δ st hδ cond e half, _ =>
+          let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
+          let hc ← byNumerals (mkNot (← mkEq cE (← wholeOf τ 0)))
           let inst ← mkAppOptM ``Classical.propDecidable #[some cond]
           let one ← wholeOf τ 1
+          let .eq := kind | throwError "VIRAS: a disequality's complement that is no equation"
           byCasesOn cond (mkConst ``False)
-            (fun hc => do
-              let is ← mkAppOptM ``if_pos #[some cond, some inst, some hc, some τ, some half, some one]
-              byLinarith (facts ++ #[h, denial, hc, is]))
-            (fun hc => do
-              let is ← mkAppOptM ``if_neg #[some cond, some inst, some hc, some τ, some half, some one]
-              byLinarith (facts ++ #[h, denial, hc, is]))
-        | none => byLinarith (facts ++ #[h, denial])
+            (fun hr => do
+              let is ← mkAppOptM ``if_pos #[some cond, some inst, some hr, some τ, some half, some one]
+              let hle ← mkAppM ``le_of_le_of_eq #[e, is]
+              mkAppM (lemma_ "viras_above_eq_far") #[hc, hδ, hle, hr, hs, h])
+            (fun hr => mkAppM (lemma_ "viras_above_eq_near") #[hc, hδ, hr, hs, h])
     let refuted ← withLocalDeclD `h clauseAtPoint fun h => do
       mkLambdaFVars #[h] (← elimOr clauseAtPoint n h refuteLiteral)
     return mkApp refuted premiseAtPoint
-where
-  /--
-  The point the complements all hold at, and facts about it for linear
-  arithmetic: `t` for a term; `t + δ` for `t + ε`, `δ` below every distance
-  from `t` at which one of them stops holding; for `-∞` a point below every
-  place one of them changes.
-  -/
-  pointFor (x τ : Expr) (complements : Array (Option Complement)) (denials : Array Expr)
-      (vt : Virtual) : MetaM (Expr × Array Expr × Array (Nat × Expr × Expr × Expr)) := do
-    let zero ← wholeOf τ 0
-    let one ← wholeOf τ 1
-    let add (a b : Expr) : MetaM Expr := mkAppM ``HAdd.hAdd #[a, b]
-    let sub (a b : Expr) : MetaM Expr := mkAppM ``HSub.hSub #[a, b]
-    let mul (a b : Expr) : MetaM Expr := mkAppM ``HMul.hMul #[a, b]
-    let lt (a b : Expr) : MetaM Expr := mkAppM ``LT.lt #[a, b]
-    -- `min b₁ (min b₂ … bottom)`, and the facts `min … ≤ bᵢ` linear
-    -- arithmetic needs of it, and `lower < min …` from `lower < bᵢ`.
-    let minOf (bounds : Array (Expr × Expr)) (bottom : Expr × Expr) :
-        MetaM (Expr × Array Expr × Expr) := do
-      let mut acc := bottom.1
-      let mut accLower := bottom.2
-      let mut facts : Array Expr := #[]
-      for (b, lower) in bounds.reverse do
-        let m ← mkAppM ``Min.min #[b, acc]
-        facts := facts.push (← mkAppM ``min_le_left #[b, acc])
-          |>.push (← mkAppM ``min_le_right #[b, acc])
-        accLower ← mkAppM ``lt_min #[lower, accLower]
-        acc := m
-      return (acc, facts, accLower)
-    match vt with
-    | .term t => return (t, #[], #[])
-    | .minusInfinity =>
-      -- Below every zero of a complement that holds only below it.
-      let mut zeros : Array Expr := #[]
-      for c? in complements do
-        let some c := c? | continue
-        if c.slope == 0 then continue
-        zeros := zeros.push (← zeroOf x c)
-      if zeros.isEmpty then return (zero, #[], #[])
-      -- `min z₁ (min z₂ … z_k) - 1`: below each.
-      let mut m := zeros.back!
-      let mut facts : Array Expr := #[]
-      for z in (zeros.pop).reverse do
-        let m' ← mkAppM ``Min.min #[z, m]
-        facts := facts.push (← mkAppM ``min_le_left #[z, m]) |>.push (← mkAppM ``min_le_right #[z, m])
-        m := m'
-      let point ← sub m one
-      return (point, facts.push (← mkAppM ``sub_one_lt #[m]), #[])
-    | .plusEpsilon t =>
-      -- `δ ≤ Eᵢ` for each complement that holds only near `t`, each `Eᵢ`
-      -- half the distance to where it stops, and `1` below them all.
-      let mut bounds : Array (Expr × Expr) := #[]
-      let mut splits : Array (Nat × Expr × Expr × Expr) := #[]
-      for ((c?, denial), i) in (complements.zip denials).zipIdx do
-        let some c := c? | continue
-        if c.slope == 0 then continue
-        -- `r = -s(t)/a`, where the literal's term `s` has slope `a = -c`:
-        -- how far above `t` the term vanishes.
-        let st := at_ x c.term t
-        let r ← mul (← numeralOf τ c.slope⁻¹) st
-        let half ← mul (← numeralOf τ (1/2)) r
-        match c.symbol with
-        | .gt | .geq =>
-          -- Holds only below `r` where the complement falls: `c < 0`.
-          if c.slope > 0 then continue
-          -- `0 < r/2`, from the conclusion literal failing.
-          let positive ← byLinarithGoal (← lt zero half) #[denial]
-          bounds := bounds.push (half, positive)
-        | .neq =>
-          -- `r/2` if `r` is above `t`, and anything otherwise; which of the
-          -- two is settled where the literal is refuted.
-          let cond ← lt zero r
-          let inst ← mkAppOptM ``Classical.propDecidable #[some cond]
-          let e ← mkAppOptM ``ite #[some τ, some cond, some inst, some half, some one]
-          let positive ← byCasesOn cond (← lt zero e)
-            (fun h => do
-              let is ← mkAppOptM ``if_pos #[some cond, some inst, some h, some τ,
-                some half, some one]
-              byLinarithGoal (← lt zero e) #[h, is])
-            (fun h => do
-              let is ← mkAppOptM ``if_neg #[some cond, some inst, some h, some τ,
-                some half, some one]
-              byLinarithGoal (← lt zero e) #[is])
-          splits := splits.push (i, cond, e, half)
-          bounds := bounds.push (e, positive)
-        | .eq => continue
-      let onePositive ← mkAppOptM ``zero_lt_one #[some τ, none, none, none, none, none]
-      let (δ, minFacts, positive) ← minOf bounds (one, onePositive)
-      let point ← add t δ
-      return (point, minFacts.push positive, splits)
-  byLinarithGoal (goal : Expr) (facts : Array Expr) : MetaM Expr := do
-    -- Unfolded as the facts are, so that the two speak of the same atoms.
-    let proof ← mkFreshExprMVar (← unfoldDefinitions goal)
-    let facts ← facts.mapM unfoldFact
-    Mathlib.Tactic.Linarith.linarith true facts.toList {} proof.mvarId!
-    mkExpectedTypeHint (← instantiateMVars proof) goal
-  byCasesOn (cond goal : Expr) (yes no : Expr → MetaM Expr) : MetaM Expr := do
-    let hYes ← withLocalDeclD `h cond fun h => do mkLambdaFVars #[h] (← yes h)
-    let hNo ← withLocalDeclD `h (mkNot cond) fun h => do mkLambdaFVars #[h] (← no h)
-    mkAppOptM ``Classical.byCases #[some cond, some goal, some hYes, some hNo]
 
 end Vampire.LiteralRewrite.Viras
