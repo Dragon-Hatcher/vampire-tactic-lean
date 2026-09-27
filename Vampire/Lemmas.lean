@@ -344,4 +344,14 @@ theorem fm_int {j k s a b : ℤ} (hj : 0 < j) (hk : 0 < k)
   have q : j ≤ j * (-(k * s) + b) := le_mul_of_one_le_right hj.le h₂
   nlinarith
 
+/--
+ALASCA's arithmetic equation as a rewrite: `k s + t = 0`, which is
+`k (s - (-t/k))`, rewrites `s` to `-t/k` (`a` to `b`), for a numeral `k` other
+than zero.
+-/
+theorem eq_of_scaled {α : Type*} [CommRing α] [NoZeroDivisors α] {e k a b : α}
+    (hk : k ≠ 0) (h : e = 0) (he : e = k * (a - b)) : a = b := by
+  rw [he] at h
+  exact sub_eq_zero.mp ((mul_eq_zero.mp h).resolve_left hk)
+
 end Vampire.Lemmas

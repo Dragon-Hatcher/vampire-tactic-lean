@@ -105,10 +105,10 @@ def ofRule (step : Step) : ReconstructM Expr :=
   -- could not unify left among the conclusion's literals.
   | .constrainedSuperposition => Rewrite.superposition step
   | .equalityFactoring => Resolution.equalityFactoring step
-  | .instantiation => Arithmetic.theoryStep step
+  | .instantiation => Resolution.instantiation step
   | .alascaFourierMotzkin => Arithmetic.fourierMotzkin step
   | .alascaIntegerFourierMotzkin => Arithmetic.integerFourierMotzkin step
-  | .alascaTermFactoring => Arithmetic.theoryStep step
+  | .alascaTermFactoring => Arithmetic.termFactoring step
   | .alascaFloorBounds => Arithmetic.theoryStep step
   | .alascaEqFactoring => Arithmetic.theoryStep step
   | .alascaLiteralFactoring => Arithmetic.theoryStep step

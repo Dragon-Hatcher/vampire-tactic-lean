@@ -176,7 +176,7 @@
  *             into the clause it is building and each conjunct into a clause of
  *             its own, so a clause is one path through the conjunctions and
  *             this is that path
- *   uses      {premise, literal, term, flags, firstBinding, numBindings, other}: how a
+ *   uses      {premise, literal, term, flags, firstBinding, numBindings, other, factor}: how a
  *             generated clause used one of its premises. `premise` is that
  *             premise's number, `literal` the index of the literal the
  *             inference acted on or `NONE`, and `term` the index of the term it
@@ -290,7 +290,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 33;
+const uint32_t VERSION = 34;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 38;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -1153,7 +1153,7 @@ struct Encoder {
       InferenceStore::instance()->recoverSubsumptionResolutionUses(u);
     }
 
-    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 7);
+    uint32_t firstUse = static_cast<uint32_t>(uses.size() / 8);
     uint32_t numUses = 0;
     if (const Stack<InferenceStore::PremiseUse>* recorded =
           InferenceStore::instance()->premiseUses(u)) {
@@ -1183,6 +1183,7 @@ struct Encoder {
         uses.push_back(use.bindings.isEmpty() ? NONE : firstBinding);
         uses.push_back(static_cast<uint32_t>(use.bindings.size()));
         uses.push_back(use.other.isEmpty() ? NONE : encodeTerm(use.other));
+        uses.push_back(use.factor.isEmpty() ? NONE : encodeTerm(use.factor));
         numUses++;
       }
     }
@@ -1680,7 +1681,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 8));
   putWord(buf, static_cast<uint32_t>(enc.genLits.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 7));
+  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 8));
   putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.congruences.size() / 5));
   putWord(buf, static_cast<uint32_t>(enc.congruenceArgs.size()));

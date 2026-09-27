@@ -1097,4 +1097,33 @@ partial def fourierMotzkin (step : Step) : ReconstructM Expr := do
             mkLambdaFVars #[h] (← place 1 into h)
           mkAppOptM ``Or.elim #[none, none, some target, some joined, some onSum, some onEq]
 
+/--
+ALASCA's term factoring: `k₁ s₁ + k₂ s₂ + t ⋈ 0` at the unifier, which makes
+`s₁` and `s₂` one up to arithmetic, as `(k₁ + k₂) s₁ + t ⋈ 0` -- the literal
+rewritten where it stands, which the worker recorded, and one with the
+premise's up to the identities of a ring; every other literal carried.
+-/
+def termFactoring (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let use ← step.useAt 0
+  step.underVars fun kept target => do
+    let vars ← coverVars kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ← instantiateAt parent use vars proof stated
+    let (some placement, some rewritten) := (step.placedAt 0, step.rewrittenAt 0)
+      | throwError "step {step.unit.number} recorded no placement of its premise"
+    let byRing (equal : Array (Expr × Expr × Expr)) (h wanted : Expr) : ReconstructM Expr := do
+      let said ← instantiateMVars (← inferType h)
+      let some same ← equalModuloRing equal said wanted
+        | throwError "step {step.unit.number}:{indentExpr said}\nis not{indentExpr wanted}\n\
+            up to the identities of a ring"
+      mkEqMP same h
+    step.withInto target fun into => do
+      -- What the unifier deferred is a literal of the conclusion, or equal.
+      if step.unit.constraints.isEmpty then
+        return ← carryRewritten premiseType target premiseAt into placement rewritten
+          parent.clauseSize? (byRing #[])
+      underConstraints step into fun equal =>
+        carryRewritten premiseType target premiseAt into placement rewritten
+          parent.clauseSize? (byRing equal)
+
 end Vampire.Reconstruct.Arithmetic

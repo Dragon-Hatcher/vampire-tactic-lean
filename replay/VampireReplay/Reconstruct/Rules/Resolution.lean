@@ -129,6 +129,13 @@ def factoring (step : Step) : ReconstructM Expr := do
         (sourceCount := parent.clauseSize?)
 
 /--
+`instantiation`: the premise at the substitution it recorded, every literal
+carried where the worker recorded it went -- as for factoring, but with no two
+literals made one.
+-/
+def instantiation (step : Step) : ReconstructM Expr := factoring step
+
+/--
 The conclusion `into`, from `h` denying the equality `inner` a step resolved
 away: the binding makes its sides one term, which `h` then denies.
 
