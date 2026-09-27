@@ -120,12 +120,9 @@ def strongNormalization (step : Step) : ReconstructM Expr := do
       let some part := into.parts[k]?
         | throwError "step {step.unit.number}'s clause has no literal {k}"
       -- One up to instances: the lemmas state their comparisons over classes.
-      let same (a b : Expr) : ReconstructM Bool := do
-        if a == b then return true
-        withNewMCtxDepth <| withTransparency .instances <| isDefEq a b
-      let h ← orientedAs h part same
+      let h ← orientedAs h part fun a b => sameUpToInstances a b
       let said ← instantiateMVars (← inferType h)
-      unless ← same said part do
+      unless ← sameUpToInstances said part do
         throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}"
       return into.inject k (← mkExpectedTypeHint h part)
     step.withInto target fun into =>
@@ -271,6 +268,13 @@ def viras (step : Step) : ReconstructM Expr := do
         term use.virtualEpsilon use.virtualInfinity
       mkLambdaFVars #[h] falsity
     mkAppOptM ``Classical.byContradiction #[some target, some refuted]
+
+/-- `a = b` up to the identities of a ring, which the step's certificate needs. -/
+private def ringOf (step : Step) (a b : Expr) : ReconstructM Expr := do
+  let some h ← ringEqual a b
+    | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
+        are not one up to the identities of a ring"
+  return h
 
 /-!
 ### Steps certified by a lemma
@@ -429,11 +433,7 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
     let hk₀ ← positive c₀
     let hk₁ ← positive k₁
     let hj ← positive j
-    let ring (a b : Expr) : ReconstructM Expr := do
-      let some h ← ringEqual a b
-        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
-            are not one up to the identities of a ring"
-      return h
+    let ring := ringOf step
     -- `h`, a comparison with `0` of `e`, restated as one of `e'`, equal to it.
     let restated (h e e' : Expr) (strict : Bool) : ReconstructM Expr := do
       let eq ← ring e e'
@@ -773,15 +773,13 @@ def theoryAxiom (step : Step) : ReconstructM Expr := do
     let proof ← mkAppM lemma_ args
     let stated ← instantiateMVars (← inferType proof)
     let disjuncts ← countedParts ``Or stated introduced.size
-    let sameUpToInstances (a b : Expr) : ReconstructM Bool :=
-      withTransparency .instances (isDefEq a b)
     step.withInto target fun into =>
       elimGiven disjuncts (motive? := some target) (fun i h => do
         let some k := introduced[i]?
           | throwError "{step.rule.name} built no literal {i}"
         let some part := into.parts[k]?
           | throwError "{step.rule.name}'s clause has no literal {k}"
-        let h ← orientedAs h part sameUpToInstances
+        let h ← orientedAs h part fun a b => sameUpToInstances a b
         let said ← instantiateMVars (← inferType h)
         unless ← sameUpToInstances said part do
           throwError "{step.rule.name}'s literal{indentExpr said}\nis not{indentExpr part}"
@@ -811,11 +809,7 @@ def fourierMotzkin (step : Step) : ReconstructM Expr := do
     let α ← inferType s₁
     let integral := α.isConstOf ``Int
     let introduced := step.unit.introduced
-    let ring (a b : Expr) : ReconstructM Expr := do
-      let some h ← ringEqual a b
-        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
-            are not one up to the identities of a ring"
-      return h
+    let ring := ringOf step
     let zero ← wholeNumeral α 0
     let comparison (h : Expr) : ReconstructM (Bool × Expr) := do
       let stated ← instantiateMVars (← inferType h)
@@ -985,11 +979,7 @@ def floorBounds (step : Step) : ReconstructM Expr := do
       throwError "step {step.unit.number}: the atom{indentExpr floor}\nis no floor"
     let α ← inferType floor
     let zero ← wholeNumeral α 0
-    let ring (a b : Expr) : ReconstructM Expr := do
-      let some h ← ringEqual a b
-        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
-            are not one up to the identities of a ring"
-      return h
+    let ring := ringOf step
     let l (n : String) : Name := (`Vampire.Lemmas).str n
     let neg (e : Expr) : ReconstructM Expr := mkAppM ``Neg.neg #[e]
     step.withInto target fun into =>
@@ -1062,11 +1052,7 @@ def eqFactoring (step : Step) : ReconstructM Expr := do
     let (s₂, t₂, k₂) ← sides second
     let α ← inferType s₁
     let zero ← wholeNumeral α 0
-    let ring (a b : Expr) : ReconstructM Expr := do
-      let some h ← ringEqual a b
-        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
-            are not one up to the identities of a ring"
-      return h
+    let ring := ringOf step
     -- `s = t` from the equation's literal, and the literal from `s = t`.
     let solved (h : Expr) (s t : Expr) (k? : Option Expr) : ReconstructM Expr := do
       let said ← instantiateMVars (← inferType h)
@@ -1074,10 +1060,10 @@ def eqFactoring (step : Step) : ReconstructM Expr := do
         | throwError "step {step.unit.number}: an equation factored{indentExpr said}\nis none"
       match k? with
       | some k =>
-        let (e, h) ← if a == zero then pure (b, ← mkEqSymm h) else pure (a, h)
-        let he ← ring e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[s, t]])
-        let hk ← (← read).numerically (← mkAppM ``Ne #[k, zero])
-        mkAppM `Vampire.Lemmas.eq_of_scaled #[hk, h, he]
+        let some h ← scaledEquation h k s t zero
+          | throwError "step {step.unit.number}:{indentExpr said}\nis not {k} times\
+              {indentExpr s}\nless{indentExpr t}"
+        pure h
       | none =>
         if a == s && b == t then pure h
         else if a == t && b == s then mkEqSymm h
@@ -1093,8 +1079,7 @@ def eqFactoring (step : Step) : ReconstructM Expr := do
         let h ← mkAppM `Vampire.Lemmas.eq_zero_of_scaled #[he, eq]
         let h ← if flipped then mkEqSymm h else pure h
         -- The lemma's zero is its own class's; the literal's is the type's.
-        unless ← withNewMCtxDepth <| withTransparency .instances <|
-            isDefEq (← instantiateMVars (← inferType h)) statement do
+        unless ← sameUpToInstances (← instantiateMVars (← inferType h)) statement do
           throwError "step {step.unit.number}:{indentExpr (← inferType h)}\nis not\
             {indentExpr statement}"
         mkExpectedTypeHint h statement

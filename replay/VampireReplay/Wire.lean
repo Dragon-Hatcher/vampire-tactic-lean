@@ -11,6 +11,22 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 2]!.toUInt32 <<< 16)
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
+/--
+A placement entry's flags, as the worker writes them (`PLACED_TURNED`,
+`PLACED_REWRITTEN`): the literal became its place turned round, or rewritten
+into it; the rest of the word is the place.
+-/
+private def placedTurned : UInt32 := 0x80000000
+private def placedRewritten : UInt32 := 0x40000000
+private def placedIndex : UInt32 := 0x3FFFFFFF
+
+/--
+A clausification step's placement flag (`InferenceStore::genTurned`): the push
+stored `~f` at a sign as `f` at the other; the rest of the word is the place.
+-/
+private def genTurned : UInt32 := 0x80000000
+private def genIndex : UInt32 := 0x7FFFFFFF
+
 /-- The header's length, in words. -/
 private def headerWords : Nat := 50
 
@@ -331,6 +347,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numUnits] do
     let u (off : Nat) := at_ units unitWidth i off
     optionalString "introduced symbol" (u 38)
+    range "introduced literals" (u 35) (u 36) numIntroducedLits
+    for k in [0:u 36] do
+      index "introduced literal" (at_ introducedLits 2 (u 35 + k) 0) (clauseSize i)
     range "introduced terms" (u 39) (u 40) numIntroducedTerms
     for k in [0:u 40] do
       optional "introduced term" (at_ introducedTerms 1 (u 39 + k) 0) numTerms
@@ -414,6 +433,11 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     range "replacement" (at_ genStates 11 i 4) (at_ genStates 11 i 5) numGenLits
     range "generalised bindings" (at_ genStates 11 i 6) (at_ genStates 11 i 7) numBindings
     range "generalised placements" (at_ genStates 11 i 9) (at_ genStates 11 i 10) numGenPlacements
+    -- Each place is one of this state's literals.
+    for k in [0:at_ genStates 11 i 10] do
+      index "generalised placement"
+        (at_ genPlacements 1 (at_ genStates 11 i 9 + k) 0 &&& genIndex.toNat)
+        (at_ genStates 11 i 3)
   for i in [0:numGenLits] do index "generalised literal" (at_ genLits 2 i 0) numFormulas
   for i in [0:numChoices] do
     let conjunction := at_ choices 2 i 0
@@ -447,7 +471,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
         let first := at_ placements 4 (u 28 + k) 2
         for j in [0:at_ placements 4 (u 28 + k) 3] do
           let entry := at_ placementEntries 1 (first + j) 0
-          if entry != none then index "placed literal" (entry &&& 0x3FFFFFFF) into
+          if entry != none then index "placed literal" (entry &&& placedIndex.toNat) into
     -- A literal's factor, as a string.
     if u 32 != 0 then
       index "literal factors" (u 31 + u 32 - 1) numLiteralFactors
@@ -648,9 +672,10 @@ structure PremiseUse where
   bindings : Array (UInt32 × Term)
   /--
   A second term of the premise the inference acted on: what an arithmetic
-  equation `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; or the
-  atom a factoring unified `term` with. Stated in the premise's variables, as
-  `term` is.
+  equation `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; the
+  atom an inequality factoring unified `term` with; for an equality factoring,
+  the other side of the equation `term` is one side of; or, for VIRAS, the
+  virtual term's term. Stated in the premise's variables, as `term` is.
   -/
   other : Option Term
   /--
@@ -1252,7 +1277,7 @@ def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
     Option (Array (Option (Nat × Bool))) :=
   (u.placementEntries? position use).map (·.map fun entry =>
     if entry == none32 then none
-    else some ((entry &&& 0x3FFFFFFF).toNat, entry &&& 0x80000000 != 0))
+    else some ((entry &&& placedIndex).toNat, entry &&& placedTurned != 0))
 
 /--
 Which of the literals of the premise in `position` the inference rewrote into
@@ -1260,7 +1285,7 @@ the literal it was placed at (`recordRewritten`), rather than carried there.
 -/
 def rewritten? (u : Unit) (position : Nat) (use : Nat := 0) : Option (Array Bool) :=
   (u.placementEntries? position use).map (·.map fun entry =>
-    entry != none32 && entry &&& 0x40000000 != 0)
+    entry != none32 && entry &&& placedRewritten != 0)
 
 /--
 For a literal-wise simplification that scaled a literal, one number per
@@ -1431,7 +1456,7 @@ def placements (c : GenClause) : Array (Nat × Bool) :=
   let count := c.field 10
   Array.ofFn (n := count.toNat) fun i =>
     let w := readU32 p.data (p.layout.genPlacements + (first.toNat + i.val) * 4)
-    ((w &&& 0x7FFFFFFF).toNat, w &&& 0x80000000 != 0)
+    ((w &&& genIndex).toNat, w &&& genTurned != 0)
 
 end GenClause
 

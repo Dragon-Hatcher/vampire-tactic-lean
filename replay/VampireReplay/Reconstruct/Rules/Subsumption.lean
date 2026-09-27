@@ -62,7 +62,6 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
       (fun _ h =>
         carryPast sideType target sideAt into (fun k => (placements[k]?.join).isNone)
           (placed := sidePlaced) (sourceCount := sideParent.clauseSize?)
-          (fun _ hSide => if removedPositive then closeComplementary target hSide h
-            else closeComplementary target h hSide))
+          (fun _ hSide => closeByPolarity target h hSide removedPositive))
 
 end Vampire.Reconstruct.Subsumption

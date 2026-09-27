@@ -235,6 +235,15 @@ def sameFormula (a b : Expr) : MetaM Bool := do
   withTransparency .instances (isDefEq a b)
 
 /--
+Whether two terms are one up to instances: the same operation reached through
+two instance paths, as where a lemma states over a class what replay reads over
+the type's own. Assigns no metavariable.
+-/
+def sameUpToInstances (a b : Expr) : MetaM Bool := do
+  if a == b then return true
+  withNewMCtxDepth <| withTransparency .instances <| isDefEq a b
+
+/--
 Raised for a name that stands for nothing: neither the goal nor anything the
 proof introduced binds it.
 

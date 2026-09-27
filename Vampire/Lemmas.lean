@@ -275,6 +275,7 @@ variable {α : Type*} [CommRing α] [LinearOrder α] [IsStrictOrderedRing α]
 /-! ALASCA's axioms (`AlascaAxioms`), for a nonlinear problem, in the order it adds them. -/
 
 theorem tha_alasca_0 (x y z : α) : x + (y + z) = x + y + z := (add_assoc x y z).symm
+/-- As vampire states it, `x + y = x + y`: its commutativity axiom's sides are one term. -/
 theorem tha_alasca_1 (x y : α) : x + y = x + y := rfl
 theorem tha_alasca_2 (x y z : α) : x * (y + z) = x * y + x * z := mul_add x y z
 theorem tha_alasca_3 (x y z : α) : 0 ≤ -x ∨ 0 ≤ y + -z ∨ 0 < x * z + -(x * y) := by
@@ -365,9 +366,11 @@ reads it: `⌊s⌋ = t`, or `k (±⌊s⌋ + t) ⋈ 0` for a positive `k`.
 section FloorBounds
 variable {α : Type*} [Field α] [LinearOrder α] [IsStrictOrderedRing α] [FloorRing α]
 
+/-- `⌊s⌋ = t`: the floor is above `s - 1`. -/
 theorem fb_0 {s t : α} (h : ((⌊s⌋ : ℤ) : α) = t) : 0 < t + -s + 1 := by
   have := Int.lt_floor_add_one s
   linarith
+/-- `⌊s⌋ = t`: the floor is at most `s`. -/
 theorem fb_1 {s t : α} (h : ((⌊s⌋ : ℤ) : α) = t) : 0 ≤ s + -t := by
   have := Int.floor_le s
   linarith
@@ -377,6 +380,7 @@ private theorem pos_of_scaled {k e x : α} (hk : 0 < k) (he : e = k * x) (h : 0 
 private theorem nonneg_of_scaled {k e x : α} (hk : 0 < k) (he : e = k * x) (h : 0 ≤ e) : 0 ≤ x :=
   nonneg_of_mul_nonneg_right (he ▸ h) hk
 
+/-- `k (⌊s⌋ + t) ≥ 0`: `⌊s⌋ + ⌊t⌋` is positive or zero. -/
 theorem fb_2 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (((⌊s⌋ : ℤ) : α) + t)) :
     0 < s + ((⌊t⌋ : ℤ) : α) ∨ ((⌊s⌋ : ℤ) : α) + ((⌊t⌋ : ℤ) : α) = 0 := by
   have h₀ := nonneg_of_scaled hk he h
@@ -387,6 +391,7 @@ theorem fb_2 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (((⌊s⌋ 
     push_cast at h1
     linarith [Int.floor_le s]
   · right; exact_mod_cast heq.symm
+/-- `k (⌊s⌋ + t) > 0`: `⌊s⌋ - ⌊-t⌋ - 1` is positive or zero. -/
 theorem fb_3 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (((⌊s⌋ : ℤ) : α) + t)) :
     0 < s + -((⌊-t⌋ : ℤ) : α) + -1 ∨ ((⌊s⌋ : ℤ) : α) + -((⌊-t⌋ : ℤ) : α) + -1 = 0 := by
   have h₀ := pos_of_scaled hk he h
@@ -401,6 +406,7 @@ theorem fb_3 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (((⌊s⌋ : 
     have : ((⌊s⌋ - ⌊-t⌋ - 1 : ℤ) : α) = 0 := by exact_mod_cast heq.symm
     push_cast at this
     linarith
+/-- `k (-⌊s⌋ + t) ≥ 0`: `⌊t⌋ - ⌊s⌋` is positive or zero. -/
 theorem fb_4 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (-((⌊s⌋ : ℤ) : α) + t)) :
     0 < -s + ((⌊t⌋ : ℤ) : α) ∨ -((⌊s⌋ : ℤ) : α) + ((⌊t⌋ : ℤ) : α) = 0 := by
   have h₀ := nonneg_of_scaled hk he h
@@ -414,6 +420,7 @@ theorem fb_4 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (-((⌊s⌋
     have : ((⌊t⌋ - ⌊s⌋ : ℤ) : α) = 0 := by exact_mod_cast heq.symm
     push_cast at this
     linarith
+/-- `k (-⌊s⌋ + t) > 0`: `-⌊s⌋ - ⌊-t⌋ - 1` is positive or zero. -/
 theorem fb_5 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (-((⌊s⌋ : ℤ) : α) + t)) :
     0 < -s + -((⌊-t⌋ : ℤ) : α) + -1 ∨ -((⌊s⌋ : ℤ) : α) + -((⌊-t⌋ : ℤ) : α) + -1 = 0 := by
   have h₀ := pos_of_scaled hk he h
@@ -543,6 +550,7 @@ theorem viras_above_eq_near {c δ st sp : α} (hc : c ≠ 0) (hδ : 0 < δ)
   have hd : c⁻¹ * st = δ := by rw [this, ← mul_assoc, inv_mul_cancel₀ hc, one_mul]
   exact hr (hd ▸ hδ)
 
+/-- What `δ` is where the complement falls: half of a positive `r` is positive. -/
 theorem viras_half_of_pos {r : α} (hr : 0 < r) : 0 < 1 / 2 * r := by positivity
 
 end Viras

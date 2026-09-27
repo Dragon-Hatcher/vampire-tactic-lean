@@ -195,15 +195,13 @@ private def equationOf (parent : Vampire.Unit) (use : PremiseUse) (vars : Vars)
   let k := (← treeOf trees vars bindings factor).toExpr
   -- `k s + t = 0`, as the clause states it either way round, is `k (s - to)`.
   let stated ← instantiateMVars (← inferType proof)
-  let some (_, l, r) := stated.eq?
+  let some (τ, _, _) := stated.eq?
     | throwError "the equation used from step {parent.number} is no equation:{indentExpr stated}"
-  let zero ← mkAppOptM ``OfNat.ofNat #[some (← inferType l), some (mkRawNatLit 0), none]
-  let (e, h) ← if l == zero then pure (r, ← mkEqSymm proof) else pure (l, proof)
-  let some he ← ringEqual e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[«from», to]])
+  let zero ← mkAppOptM ``OfNat.ofNat #[some τ, some (mkRawNatLit 0), none]
+  let some h ← scaledEquation proof k «from» to zero
     | throwError "the equation used from step {parent.number},{indentExpr stated}\nis not \
         {k} times{indentExpr «from»}\nless{indentExpr to}"
-  let hk ← (← read).numerically (← mkAppM ``Ne #[k, zero])
-  return («from», to, ← mkAppM `Vampire.Lemmas.eq_of_scaled #[hk, h, he])
+  return («from», to, h)
 
 /--
 What a rewriting inference did to the premise it rewrote: which literal, and

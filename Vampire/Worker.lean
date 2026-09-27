@@ -44,26 +44,6 @@ structure Config where
   the strategies before it.
   -/
   strategy : String := ""
-  /--
-  Options set on every strategy of the schedule, overriding what it says.
-
-  Shuffling is off. It permutes a formula's junctions, its quantifiers'
-  variables and the sides of its equalities before the search, to give a
-  strategy a different run of luck; the proof then speaks of a formula that is
-  the goal's under a permutation nothing records, which is no use to replay.
-
-  Global subsumption and backward subsumption demodulation are off because the
-  vampire this is built from keeps nothing of how they used their premises:
-  one stands on a propositional proof it discards, and the other, unlike its
-  forward twin, records no substitution. A step of either could only be
-  admitted.
-  -/
-  forced : Array (String × String) :=
-    #[("si", "off"), ("gs", "off"), ("bsd", "off")]
-  -- Vampire takes one `forced_options`, the last given, so options a user
-  -- forces are merged into these rather than passed after them: passed after,
-  -- they would replace these, and a proof could then use what replay cannot
-  -- follow. Theirs go first, so that these hold whatever they say.
   /-- Extra vampire options, as `(name, value)` pairs of its command line. -/
   options : Array (String × String) := #[]
   /-- Path to `vampire-worker`; searched for when absent. -/
@@ -71,6 +51,26 @@ structure Config where
 deriving Inhabited
 
 namespace Config
+
+/--
+Options set on every strategy of the schedule, overriding what it says.
+
+Shuffling is off. It permutes a formula's junctions, its quantifiers'
+variables and the sides of its equalities before the search, to give a
+strategy a different run of luck; the proof then speaks of a formula that is
+the goal's under a permutation nothing records, which is no use to replay.
+
+Global subsumption and backward subsumption demodulation are off because the
+vampire this is built from keeps nothing of how they used their premises:
+one stands on a propositional proof it discards, and the other, unlike its
+forward twin, records no substitution. A step of either could only be
+admitted.
+
+Not a field of the configuration: a proof taking one of these steps could only
+be admitted, so they are forced whatever a caller asks for.
+-/
+private def forced : Array (String × String) :=
+  #[("si", "off"), ("gs", "off"), ("bsd", "off")]
 
 /--
 The options replay needs at vampire's defaults: their names, long and short,
@@ -127,9 +127,15 @@ def toArgs (cfg : Config) : Array String :=
     ++ (cfg.options.filter (!isForced ·.1)).map fun (n, v) => s!"{n}={v}"
 where
   isForced (name : String) : Bool := name == "forced_options" || name == "fo"
-  /-- What a user forced, then what replay needs forced (see `forced`). -/
+  /--
+  What a user forced, then what replay needs forced (`Config.forced`). Vampire
+  takes one `forced_options`, the last given, so the two are merged rather than
+  passed one after the other: passed after, the user's would replace these, and
+  a proof could then use what replay cannot follow. Theirs go first, so that
+  these hold whatever they say.
+  -/
   forced : Array String :=
-    (cfg.options.filter (isForced ·.1)).map (·.2) ++ cfg.forced.map fun (n, v) => s!"{n}={v}"
+    (cfg.options.filter (isForced ·.1)).map (·.2) ++ Config.forced.map fun (n, v) => s!"{n}={v}"
 
 end Config
 

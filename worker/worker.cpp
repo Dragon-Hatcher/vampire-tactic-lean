@@ -208,9 +208,10 @@
  *             infinitesimal, plus infinity, minus infinity, and its term is
  *             `other`. `other` is a second term of the premise the inference
  *             acted on, or `NONE`: what an arithmetic equation `k s + t = 0`
- *             rewrote `s` to, `-t/k`, which is no side of it; the atom a
- *             factoring unified `term` with; or, for VIRAS, the virtual
- *             term's term. Like `term`, it is stated in the premise's
+ *             rewrote `s` to, `-t/k`, which is no side of it; the atom an
+ *             inequality factoring unified `term` with; for an equality
+ *             factoring, the other side of the equation `term` is one side
+ *             of; or, for VIRAS, the virtual term's term. Like `term`, it is stated in the premise's
  *             variables. `factor` is the numeral the inference scaled the
  *             use's term by, `k` of `k s + t = 0` (`PremiseUse::factor`), or
  *             `NONE`
@@ -658,6 +659,36 @@ std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause
     out.push_back(found);
   }
   return out;
+}
+
+/**
+ * The literals of the component an AVATAR definition `name <=> component`
+ * names, as `Formula::fromClause` wrote them: the disjuncts of the component,
+ * under its quantifier. False where @b definition is no such definition.
+ */
+static bool componentLiterals(Formula* definition, std::vector<Literal*>& lits)
+{
+  lits.clear();
+  if (definition->connective() != IFF)
+    return false;
+  Formula* component = definition->left()->connective() == NAME
+    ? definition->right() : definition->left();
+  if (component->connective() == FORALL)
+    component = component->qarg();
+  std::vector<Formula*> parts;
+  if (component->connective() == OR)
+    for (const FormulaList* it = component->args(); it; it = it->tail())
+      parts.push_back(it->head());
+  else
+    parts.push_back(component);
+  for (Formula* part : parts) {
+    if (part->connective() != LITERAL) {
+      lits.clear();
+      return false;
+    }
+    lits.push_back(part->literal());
+  }
+  return true;
 }
 
 struct Encoder {
@@ -1524,28 +1555,8 @@ struct Encoder {
                    && premisesInOrder[0]->isClause()) {
           // A component's definition, `name <=> component`: its literals, under
           // each renaming recorded against it, into the clause being split.
-          Formula* definition = premise->getFormula();
-          if (definition->connective() != IFF)
-            continue;
-          Formula* component = definition->left()->connective() == NAME
-            ? definition->right() : definition->left();
-          if (component->connective() == FORALL)
-            component = component->qarg();
-          std::vector<Formula*> parts;
-          if (component->connective() == OR)
-            for (const FormulaList* it = component->args(); it; it = it->tail())
-              parts.push_back(it->head());
-          else
-            parts.push_back(component);
           std::vector<Literal*> lits;
-          for (Formula* part : parts) {
-            if (part->connective() != LITERAL) {
-              lits.clear();
-              break;
-            }
-            lits.push_back(part->literal());
-          }
-          if (lits.size() != parts.size())
+          if (!componentLiterals(premise->getFormula(), lits))
             continue;
           // A negative ground singleton is defined by its complement and named
           // negatively (`Splitter::buildAndInsertComponentClause`): what its
@@ -1605,21 +1616,9 @@ struct Encoder {
           // the component's literals are the clause's own (`Formula::fromClause`
           // of them), which is where each goes. A negative ground singleton is
           // defined by its complement, and goes nowhere: replay says why.
-          Formula* definition = premise->getFormula();
-          if (definition->connective() != IFF)
-            continue;
-          Formula* component = definition->left()->connective() == NAME
-            ? definition->right() : definition->left();
-          if (component->connective() == FORALL)
-            component = component->qarg();
           std::vector<Literal*> lits;
-          if (component->connective() == OR) {
-            for (const FormulaList* it = component->args(); it; it = it->tail())
-              if (it->head()->connective() == LITERAL)
-                lits.push_back(it->head()->literal());
-          } else if (component->connective() == LITERAL) {
-            lits.push_back(component->literal());
-          }
+          if (!componentLiterals(premise->getFormula(), lits))
+            continue;
           // A negative ground singleton is defined by its complement
           // (`Splitter::buildAndInsertComponentClause`) and named negatively,
           // so what its name asserts is the clause's literal itself.

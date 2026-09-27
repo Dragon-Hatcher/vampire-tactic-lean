@@ -126,9 +126,6 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
   let some same ← go normal[0]!.1 normal[1]!.1 | return none
   let same ← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2))
   return some (← mkExpectedTypeHint same (← mkEq a b))
-where
-  sameUpToInstances (x y : Expr) : ReconstructM Bool :=
-    withNewMCtxDepth <| withTransparency .instances <| isDefEq x y
 
 /--
 `a = b` where the two are one up to the identities of a commutative ring, at
@@ -139,8 +136,7 @@ this, and a term that is not the one it looks for is not an error.
 def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
   let normal ← (← read).ringNormalForms #[a, b]
-  unless normal[0]!.1 == normal[1]!.1 ||
-      (← withNewMCtxDepth <| withTransparency .instances <| isDefEq normal[0]!.1 normal[1]!.1) do
+  unless ← sameUpToInstances normal[0]!.1 normal[1]!.1 do
     return none
   let same ← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2)
   return some (← mkExpectedTypeHint same (← mkEq a b))
@@ -177,6 +173,29 @@ def closeComplementary (target negative positive : Expr) : ReconstructM Expr := 
   let some same ← equalModuloRing #[] stated refuted
     | throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary"
   mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive), some negative]
+
+/--
+`s = t` from `h`, an equation as ALASCA states it -- `e = 0`, or `0 = e`, for an
+`e` that is `k (s - t)` up to the ring, `k` a numeral other than zero -- which
+is the rewrite it makes of it (`Vampire.Lemmas.eq_of_scaled`). `zero` is the
+zero the equation is stated with; `none` where `h` is no such equation.
+-/
+def scaledEquation (h k s t zero : Expr) : ReconstructM (Option Expr) := do
+  let stated ← instantiateMVars (← inferType h)
+  let some (_, a, b) := stated.eq? | return none
+  let (e, h) ← if a == zero then pure (b, ← mkEqSymm h) else pure (a, h)
+  let some he ← ringEqual e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[s, t]])
+    | return none
+  let hk ← (← read).numerically (← mkAppM ``Ne #[k, zero])
+  return some (← mkAppM `Vampire.Lemmas.eq_of_scaled #[hk, h, he])
+
+/--
+`target` from `h`, a literal the step's clause states with the polarity
+`positive` says, and `other`, its complement: `closeComplementary`, the negative
+one first.
+-/
+def closeByPolarity (target h other : Expr) (positive : Bool) : ReconstructM Expr :=
+  if positive then closeComplementary target other h else closeComplementary target h other
 
 /--
 `target` from two literals complementary up to the pairs an abstracting

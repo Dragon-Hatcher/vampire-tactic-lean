@@ -106,8 +106,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
             | throwError "no unit resolved literal {i} away"
           let some literal := mainClause.literals[i]?
             | throwError "the clause has no literal {i}"
-          if ← literalPolarity literal then closeComplementary target unitAt h
-          else closeComplementary target h unitAt)
+          closeByPolarity target h unitAt (← literalPolarity literal))
         (placed := step.placedAt 0) (sourceCount := main.clauseSize?)
 
 /--
