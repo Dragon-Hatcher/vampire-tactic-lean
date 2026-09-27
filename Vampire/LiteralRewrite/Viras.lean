@@ -91,17 +91,6 @@ private def zeroOf (x : Expr) (c : Complement) : MetaM Expr := do
   let s0 := at_ x c.term (← wholeOf c.sort 0)
   mkAppM ``HMul.hMul #[← numeralOf c.sort c.slope⁻¹, s0]
 
-/-- `elim_set` for a literal whose term has no breaks. -/
-private def elimSet (x : Expr) (c : Complement) : MetaM (Array Virtual) := do
-  if c.slope == 0 then return #[.minusInfinity]
-  let zero ← zeroOf x c
-  return match c.symbol with
-    | .neq => #[.minusInfinity, .plusEpsilon zero]
-    | .eq => #[.term zero]
-    | _ =>
-      if c.slope < 0 then #[.minusInfinity]
-      else if c.symbol == .geq then #[.term zero] else #[.plusEpsilon zero]
-
 /-- What a conclusion literal can be. -/
 inductive Output
   /-- A literal: the complement `u Symbol 0` complemented back (`create_literal`). -/

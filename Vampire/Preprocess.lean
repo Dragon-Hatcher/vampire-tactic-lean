@@ -56,9 +56,11 @@ exponent above `maxExpandedExponent`.
 private partial def powProduct (e : Expr) : MetaM (Option (Expr × Expr)) := do
   let_expr HPow.hPow _ β _ _ _ n := e | return none
   unless (← whnf β).isConstOf ``Nat do return none
-  -- The exponent as it is written, which for a literal is `OfNat.ofNat`
-  -- around the number rather than the number itself.
-  let some exponent := n.nat? <|> (← withDefault (whnf n)).rawNatLit?
+  -- The exponent as it is written: a numeral, `OfNat.ofNat` around the number,
+  -- or the number itself. Anything else is left as a power.
+  let some exponent := match n.rawNatLit? with
+      | some k => some k
+      | none => n.nat?
     | return none
   if exponent > maxExpandedExponent then return none
   if exponent == 0 then return ← saying ``pow_zero e

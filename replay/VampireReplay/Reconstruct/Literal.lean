@@ -101,11 +101,10 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
       let candidates := pairs.flatMap fun (x, y, p) => #[(x, y, p, false), (y, x, p, true)]
       let differences ← candidates.mapM fun (x, y, _, _) => mkAppM ``HSub.hSub #[x, y]
       let normals ← (← read).ringNormalForms (#[difference] ++ differences)
-      for ((x, y, p, flipped), i) in candidates.zipIdx do
+      for ((_, _, p, flipped), i) in candidates.zipIdx do
         unless normals[i + 1]!.1 == normals[0]!.1 do continue
         let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
         let h ← if flipped then mkEqSymm p else pure p
-        let _ := (x, y)
         return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
       return none
     unless a.isApp && b.isApp do return none

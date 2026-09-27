@@ -604,15 +604,44 @@ partial def coherenceNormalization (step : Step) : ReconstructM Expr := do
     withInto target step.unit.clauseSize? fun into => do
       premiseCases step premises target into fun facts => do
         let h := facts[0]!
-        for i in [0 : into.parts.size] do
-          let some (_, l, r) := into.parts[i]!.eq? | continue
-          for (t, fl, flipped) in [(l, r, false), (r, l, true)] do
-            unless isFloorCast fl && fl.appArg!.appArg! == t do continue
-            let some isInt ← integerOf h t | continue
-            let p ← mkAppM `Vampire.Lemmas.coherence_normalization #[isInt]
-            return into.inject i (← if flipped then mkEqSymm p else pure p)
-        throwError "step {step.unit.number}: its conclusion has no `t = ⌊t⌋` of a `t` its \
-          premise's literal{indentExpr (← inferType h)}\nsays is an integer"
+        -- The literal it built, where the worker recorded it, and which of its
+        -- sides is the floor of the other.
+        let some i := step.unit.introduced[0]?
+          | throwError "step {step.unit.number} recorded no literal it built"
+        let some part := into.parts[i]?
+          | throwError "step {step.unit.number} has no literal {i}"
+        let some (_, l, r) := part.eq?
+          | throwError "step {step.unit.number}: what it built,{indentExpr part}\nis no equation"
+        let floorOf (fl t : Expr) : Bool := isFloorCast fl && fl.appArg!.appArg! == t
+        let (t, flipped) ←
+          if floorOf r l then pure (l, false)
+          else if floorOf l r then pure (r, true)
+          else throwError "step {step.unit.number}: what it built,{indentExpr part}\n\
+            is no `t = ⌊t⌋`"
+        let some isInt ← integerOf h t
+          | throwError "step {step.unit.number}: its premise's literal\
+              {indentExpr (← inferType h)}\ndoes not say{indentExpr t}\nis an integer"
+        let p ← mkAppM `Vampire.Lemmas.coherence_normalization #[isInt]
+        return into.inject i (← if flipped then mkEqSymm p else pure p)
+
+/--
+What the hole `.bvar 0` of `body` stands for in `e`, which is `body` with each
+hole filled by one term: `some none` where `body` has no hole and is `e`, and
+`none` where `e` is not such a filling.
+-/
+private partial def holeIn (body e : Expr) : Option (Option Expr) :=
+  if !body.hasLooseBVars then
+    if body == e then some none else none
+  else
+    match body, e with
+    | .bvar 0, _ => some (some e)
+    | .app f a, .app g b => do
+      match ← holeIn f g, ← holeIn a b with
+      | some x, some y => if x == y then some (some x) else none
+      | some x, none | none, some x => some (some x)
+      | none, none => some none
+    | .mdata _ b', _ => holeIn b' e
+    | _, _ => none
 
 /--
 ALASCA's coherence:
@@ -653,18 +682,26 @@ partial def coherence (step : Step) : ReconstructM Expr := do
           throwError "step {step.unit.number}: its second premise's literal{indentExpr L}\n\
             has no{indentExpr F}"
         let motive := Expr.lam `z α body .default
-        -- The conclusion's literal is `L` with the floor rewritten: `⌊Y⌋ + i w`.
-        for k in [0 : into.parts.size] do
-          let z ← mkFreshExprMVar α
-          unless ← withReducible (isDefEq (body.instantiate1 z) into.parts[k]!) do continue
-          let new ← instantiateMVars z
-          let some fl := (summands new).find? isFloorCast | continue
-          let some hY ← ringEqual fl.appArg!.appArg! (← mkAppM ``HSub.hSub #[X, Iw]) | continue
-          let some same ← ringEqual (← mkAppM ``HAdd.hAdd #[fl, Iw]) new | continue
-          let eq ← mkEqTrans (← mkAppM `Vampire.Lemmas.coherence #[iE, hI, hw, hY]) same
-          return into.inject k (← mkEqMP (← mkCongrArg motive eq) facts[1]!)
-        throwError "step {step.unit.number}: its conclusion has no literal that is{indentExpr L}\n\
-          with{indentExpr F}\nrewritten"
+        -- The conclusion's literal is `L` with the floor rewritten, `⌊Y⌋ + i w`,
+        -- where the worker recorded it; what the floor became is read off it.
+        let some k := step.unit.introduced[0]?
+          | throwError "step {step.unit.number} recorded no literal it built"
+        let some part := into.parts[k]?
+          | throwError "step {step.unit.number} has no literal {k}"
+        let some (some new) := holeIn body part
+          | throwError "step {step.unit.number}: its literal{indentExpr part}\nis not\
+              {indentExpr L}\nwith{indentExpr F}\nrewritten"
+        let some fl := (summands new).find? isFloorCast
+          | throwError "step {step.unit.number}: what it rewrote the floor to,\
+              {indentExpr new}\nhas no floor"
+        let some hY ← ringEqual fl.appArg!.appArg! (← mkAppM ``HSub.hSub #[X, Iw])
+          | throwError "step {step.unit.number}: the floor{indentExpr fl}\nis not of\
+              {indentExpr (← mkAppM ``HSub.hSub #[X, Iw])}"
+        let some same ← ringEqual (← mkAppM ``HAdd.hAdd #[fl, Iw]) new
+          | throwError "step {step.unit.number}:{indentExpr new}\nis not{indentExpr fl} plus \
+              {indentExpr Iw}"
+        let eq ← mkEqTrans (← mkAppM `Vampire.Lemmas.coherence #[iE, hI, hw, hY]) same
+        return into.inject k (← mkEqMP (← mkCongrArg motive eq) facts[1]!)
 
 
 /--
