@@ -580,44 +580,57 @@ def equalityProxyAxiom (step : Step) : ReconstructM Expr := do
     let refuted ← withLocalDeclD `h (mkApp (mkConst ``Not) body) fun h => do
       -- What says each literal fails, the whole clause having failed.
       let failing := refutationsOfShape body h
-      -- A goal of `False` over the equalities denied, and the failing of
-      -- everything else; the equalities are substituted away and what is left
-      -- contradicts itself.
+      -- `EqualityProxy` builds every axiom of the equalities it denies and
+      -- what they carry: one equation (reflexivity, symmetry, transitivity, a
+      -- function's congruence), or a predicate failing of the left arguments
+      -- and holding of the right (a predicate's congruence). Which a literal
+      -- is is its shape; the denied equalities come first in the goal, so
+      -- substituting them leaves the rest where they are.
+      let deniedEquality (part : Expr) : Option Expr :=
+        part.not?.filter (·.isAppOfArity ``Eq 3)
       let mut hypotheses := #[]
       let mut values := #[]
+      let mut rest := #[]
       for (part, fails) in parts.zip failing do
-        match part.not? with
+        match deniedEquality part with
         | some equality =>
-          if equality.isAppOfArity ``Eq 3 then
-            hypotheses := hypotheses.push equality
-            values := values.push (ofNotNot equality fails)
-            continue
-          hypotheses := hypotheses.push (mkApp (mkConst ``Not) part)
-          values := values.push fails
-        | none =>
-          hypotheses := hypotheses.push (mkApp (mkConst ``Not) part)
-          values := values.push fails
+          hypotheses := hypotheses.push equality
+          values := values.push (ofNotNot equality fails)
+        | none => rest := rest.push (part, fails)
+      let denied := hypotheses.size
+      let carried := rest.size
+      for (part, fails) in rest do
+        hypotheses := hypotheses.push (mkApp (mkConst ``Not) part)
+        values := values.push fails
+      -- A goal of `False` over those; each denied equality relates variables,
+      -- and is substituted away in turn, which leaves what they carry
+      -- contradicting itself.
       let goalType ← hypotheses.foldrM (init := mkConst ``False) fun τ acc =>
         mkArrow τ acc
       let goal ← mkFreshExprMVar goalType
-      let (_, mvarId) ← goal.mvarId!.introN hypotheses.size
-      let mvarId ← substVars mvarId
-      mvarId.withContext do
-        let facts ← (← getLCtx).getFVarIds.filterMapM fun id => do
-          let decl ← id.getDecl
-          if decl.isImplementationDetail then return none
-          return some (decl.toExpr, ← instantiateMVars decl.type)
-        let closing ← facts.findSomeM? fun (fact, stated) => do
-          let some denied := stated.not? | return none
-          if let some (_, a, b) := denied.eq? then
-            if a == b then return some (mkApp fact (← mkEqRefl a))
-          for (other, says) in facts do
-            if says == denied then return some (mkApp fact other)
-          return none
-        let some closing := closing
-          | throwError "an equality proxy axiom is not closed by substituting \
-              the equalities it denies:{indentExpr body}"
-        mvarId.assign closing
+      let mut mvarId := goal.mvarId!
+      for _ in [0:denied] do
+        let (equation, next) ← mvarId.intro1
+        mvarId ← subst next equation
+      let (fails, closed) ← mvarId.introN carried
+      closed.withContext do
+        let closing ←
+          match fails with
+          | #[fails] =>
+            let some (_, a, b) := (← instantiateMVars (← fails.getType)).not? >>= Expr.eq?
+              | throwError "an equality proxy axiom carries no equation"
+            unless a == b do
+              throwError "substituting an equality proxy axiom's equalities leaves\
+                {indentExpr (← mkEq a b)}"
+            pure (mkApp (.fvar fails) (← mkEqRefl a))
+          | #[first, second] =>
+            -- `¬¬p(xs)` for the literal `¬p(xs)`, and `¬p(ys)` for `p(ys)`.
+            let some (negated, _) := rest[0]?
+              | throwError "an equality proxy axiom of an unknown shape:{indentExpr body}"
+            if negated.not?.isSome then pure (mkApp (.fvar first) (.fvar second))
+            else pure (mkApp (.fvar second) (.fvar first))
+          | _ => throwError "an equality proxy axiom of an unknown shape:{indentExpr body}"
+        closed.assign closing
       mkLambdaFVars #[h] (mkAppN (← instantiateMVars goal) values)
     mkLambdaFVars xs (ofNotNot body refuted)
   mkExpectedTypeHint proof conclusion

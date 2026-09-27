@@ -463,17 +463,16 @@ introduced.
 -/
 def flipName (name : String) : ReconstructM (Expr × Expr) := do
   let flipped := flippedName name
-  let body ← namedFormula name
   let flippedBody ← namedFormula flipped
   -- Written out rather than elaborated: a propositional refutation asks this
-  -- for every literal of every clause it derives.
-  if flippedBody == mkApp (mkConst ``Not) body then
-    return (flippedBody, mkApp (mkConst ``Iff.refl) flippedBody)
-  if body == mkApp (mkConst ``Not) flippedBody then
-    let notNot := mkApp (mkConst ``Not) body
+  -- for every literal of every clause it derives. `namedFormula` reads `~n` as
+  -- `¬⟦n⟧`, so which of the two carries the negation is which is negated.
+  if (splitName name).1 then
+    -- `⟦~n⟧ = ¬⟦n⟧`, and `⟦n⟧ ↔ ¬¬⟦n⟧`.
+    let notNot := mkApp (mkConst ``Not) (← namedFormula name)
     return (flippedBody, mkApp3 (mkConst ``Iff.symm) notNot flippedBody
       (mkApp (mkConst ``Classical.not_not) flippedBody))
-  throwError "`{name}` and `{flipped}` are not each other's negation"
+  return (flippedBody, mkApp (mkConst ``Iff.refl) flippedBody)
 
 /--
 The one term of this shape, so that two rebuildings of it are the same term.

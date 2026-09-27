@@ -94,25 +94,24 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
   -- stands for is: the conclusion is a formula, not a clause with a count of
   -- its own, and a name's formula can itself be a disjunction.
   let parts ← clauseLiterals target (some parent.splits.size)
+  -- `Splitter::handleEmptyClause` states the negation of each name as a named
+  -- formula of its own, so which disjunct is which name's is the name it has.
+  let some f := step.unit.formula?
+    | throwError "an avatar_contradiction_clause step should state a formula"
+  let disjuncts := if (← connectiveOf f) matches .or then f.subformulas else #[f]
+  let names ← disjuncts.mapM fun g => do
+    let some n := g.name?
+      | throwError "a disjunct of an avatar_contradiction_clause is no name"
+    return n
   -- Were every one of those names to fail, nothing would follow from the
   -- premise; so suppose the disjunction fails and read each name off that.
   let contradiction ← withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
     let refutations := refutationsOf parts h
     let mut proof := premiseProof
-    for (name, k) in parent.splits.zipIdx do
+    for name in parent.splits do
       let (flipped, says) ← flipName name
-      -- The disjunct is usually the name's own place among them.
-      let mut found := none
-      if let some part := parts[k]? then
-        if ← sameFormula part flipped then found := some k
-      if found.isNone then
-        for (part, i) in parts.zipIdx do
-          if ← sameFormula part flipped then
-            found := some i
-            break
-      let some i := found
-        | throwError "the negation of `{name}`{indentExpr flipped}\nis not \
-          among{indentExpr target}"
+      let some i := names.findIdx? (· == flippedName name)
+        | throwError "the negation of `{name}` is not among{indentExpr target}"
       let refuted ← mkExpectedTypeHint refutations[i]! (mkApp (mkConst ``Not) flipped)
       let body ← namedFormula name
       proof := mkApp proof
@@ -200,15 +199,14 @@ Of a name and its flip, one says the negation of what the other does, so this
 is `notNot` itself where the flip is `¬says`, and `¬¬¬flipped` taken down to
 `¬flipped` where `says` is.
 -/
-private def refutingFlip (says flipped notNot : Expr) : ReconstructM Expr := do
-  if flipped == mkApp (mkConst ``Not) says then
-    return notNot
-  if says == mkApp (mkConst ``Not) flipped then
+private def refutingFlip (name : String) (says flipped notNot : Expr) : Expr :=
+  -- `namedFormula` reads `~n` as `¬⟦n⟧`: the flip of `n` is `¬says`, and `~n`
+  -- says `¬flipped`.
+  if !(splitName name).1 then notNot
+  else
     -- `fun f => notNot (fun k => k f)`.
-    return .lam `f flipped
+    .lam `f flipped
       (mkApp notNot (.lam `k says (mkApp (.bvar 0) (.bvar 1)) .default)) .default
-  throwError "neither of{indentExpr says}\nand{indentExpr flipped}\n\
-    is the negation of the other"
 
 /--
 `False`, by unit propagation through the clauses a derived clause was derived
@@ -241,7 +239,7 @@ private partial def propagate (states : Stated)
     let notNot : Expr := .lam `x (mkApp (mkConst ``Not) says)
       (mkAppN proof ((List.range names.size).toArray.map refutation)) .default
     let (flipped, _) ← flipName name
-    let value ← refutingFlip says flipped notNot
+    let value := refutingFlip name says flipped notNot
     withLetDecl (Name.mkSimple s!"p{i}") (mkApp (mkConst ``Not) flipped) value fun p =>
       propagate states proved (refuted.insert (flippedName name) p) premises (i + 1)
         (bound.push p)

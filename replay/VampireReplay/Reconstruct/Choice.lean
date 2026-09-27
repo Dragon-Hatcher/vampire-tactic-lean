@@ -5,34 +5,33 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
-Something of the sort that the goal itself holds.
-
-A sort is a type the goal speaks of and vampire's domains are never empty, so
-where an instance does not say a sort is inhabited the goal may still say it: a
-variable or hypothesis of that type says as much, and a goal can well have the
-one without the other.
+Something of the sort that the goal itself holds: a variable or hypothesis of
+exactly that type, which a sort the goal speaks of is.
 -/
 private def given (τ : Expr) : ReconstructM (Option Expr) := do
   for e in (← read).givens do
-    if ← isDefEq (← inferType e) τ then
+    if (← instantiateMVars (← inferType e)) == τ then
       return some e
   return none
 
-/-- `Nonempty α`, which Hilbert choice needs to pick a witness at all. -/
+/--
+`Nonempty α`, which Hilbert choice needs to pick a witness at all: from a given
+of the sort where the goal has one, and otherwise the sort's instance. Vampire's
+domains are never empty, and a sort the goal has nothing of has to say so by
+an instance.
+-/
 def nonempty (τ : Expr) : ReconstructM Expr := do
   if let some inst := (← get).nonempty[τ]? then
     return inst
-  let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
   let inst ←
-    match ← trySynthInstance goal with
-    | .some inst => pure inst
-    | _ =>
-      match ← given τ with
-      | some element => mkAppOptM ``Nonempty.intro #[some τ, some element]
-      | none =>
-        throwError "cannot show{indentExpr τ}\nis inhabited: it has no \
-          `Nonempty` instance and no variable or hypothesis of the goal has \
-          this type"
+    match ← given τ with
+    | some element => mkAppOptM ``Nonempty.intro #[some τ, some element]
+    | none =>
+      let goal := mkApp (mkConst ``Nonempty [(← getLevel τ)]) τ
+      let .some inst ← trySynthInstance goal
+        | throwError "cannot show{indentExpr τ}\nis inhabited: no variable or \
+            hypothesis of the goal has this type, and it has no `Nonempty` instance"
+      pure inst
   modify fun s => { s with nonempty := s.nonempty.insert τ inst }
   return inst
 
