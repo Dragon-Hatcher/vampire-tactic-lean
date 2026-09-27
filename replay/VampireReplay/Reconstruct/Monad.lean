@@ -241,17 +241,6 @@ def sameFormula (a b : Expr) : MetaM Bool := do
   withTransparency .instances (isDefEq a b)
 
 /--
-`x`, with what it did to the metavariables undone if it fails.
-
-An attempt that may not succeed -- asking a decision procedure, say -- can
-assign metavariables before it gives up, and those assignments would otherwise
-outlive it. Replay's own caches are kept: what they hold is true either way.
--/
-def rollingBack (x : ReconstructM α) : ReconstructM α := do
-  let saved ← Meta.saveState
-  try x catch e => saved.restore; throw e
-
-/--
 Raised for a name that stands for nothing: neither the goal nor anything the
 proof introduced binds it.
 
@@ -371,14 +360,26 @@ a defined function -- and `$lin_mul` read as the product: what says the
 equation or comparison such a symbol stands for, for what has to see it.
 `only` picks which of those.
 -/
-def unfoldDefinitions (e : Expr)
+partial def unfoldDefinitions (e : Expr)
     (only : Name → Bool := fun n => isIntroducedDefinition n || n == ``linMul) : MetaM Expr :=
   Meta.transform e (pre := fun t => do
     let .const n us := t.getAppFn | return .continue
     unless only n do return .continue
     let some info := (← getEnv).find? n | return .continue
     let value ← instantiateValueLevelParams info us
-    return .visit (value.beta t.getAppArgs))
+    return .visit (← reopenLets (value.beta t.getAppArgs)))
+where
+  /--
+  A definition closed over a local definition has it as a `let` of its own
+  (`closedOver`), which unfolding reads back as the local, whose value it is.
+  -/
+  reopenLets (e : Expr) : MetaM Expr := do
+    let .letE _ _ v b _ := e.getAppFn | return e
+    let lctx ← getLCtx
+    let some local_ := lctx.findDecl? fun decl =>
+        if decl.isLet && decl.value == v then some decl.toExpr else none
+      | return e
+    reopenLets ((b.instantiate1 local_).beta e.getAppArgs)
 
 /-- `fact`, restated as what it says with `unfoldDefinitions` applied. -/
 def unfoldFact (fact : Expr) : MetaM Expr := do

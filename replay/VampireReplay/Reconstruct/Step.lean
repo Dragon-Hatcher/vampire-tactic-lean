@@ -277,10 +277,8 @@ disjuncts of what it rebuilds to are not literals of the clause.
 def relateLiterals (step : Step) (parent : Vampire.Unit)
     (premiseProof premiseStated : Expr) : ReconstructM Expr := do
   let (some source, some _) := (parent.clause?, step.unit.clause?)
-    | -- These rules run over formulas too, before clausification, and there a
-      -- formula's shape is what it says.
-      return mkApp (← implies (← instantiateMVars premiseStated)
-        (← step.conclusion)) premiseProof
+    | throwError "step {step.unit.number} ({step.rule.name}) relates the literals of \
+        clauses, and was given a formula"
   step.underVars fun kept target => do
     -- Dropping a literal can drop the last occurrence of a variable with it.
     let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)

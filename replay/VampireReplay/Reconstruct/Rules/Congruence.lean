@@ -51,6 +51,9 @@ def unfolded (step : Step) : ReconstructM Expr := do
       let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
       Definition.carryThroughNames step 0 parent (← instantiateForall stated args) target
         (mkAppN proof args)
-  Clause.restatedLiterals step parent proof stated
+  -- Naming replaces subformulas by names applied to their free variables,
+  -- which unfold to them: the conclusion through the names it introduced is
+  -- the premise.
+  mkExpectedTypeHint (← throughNames proof (← step.conclusion)) (← step.conclusion)
 
 end Vampire.Reconstruct.Congruence

@@ -33,6 +33,23 @@ def literals (step : Step) : ReconstructM Expr := do
   relateLiterals step parent premiseProof premiseStated
 
 /--
+`reorient_equations`: a clause stated again with its equations turned.
+
+Over a formula this is the parser's, or a definition's, turning an equation
+back only for printing: the clause has the formula's literals, which the
+formula states as they stand.
+-/
+def reoriented (step : Step) : ReconstructM Expr := do
+  let ⟨parent, premiseProof, premiseStated⟩ ← step.onlyPremise
+  if parent.clause?.isSome then
+    return ← relateLiterals step parent premiseProof premiseStated
+  let stated ← instantiateMVars premiseStated
+  unless ← sameFormula stated (← step.conclusion) do
+    throwError "reorient_equations: the formula{indentExpr stated}\ndoes not state \
+      the clause{indentExpr (← step.conclusion)}"
+  return premiseProof
+
+/--
 `condensation`: the premise at a substitution that makes two of its literals
 one.
 
@@ -49,8 +66,9 @@ def condensation (step : Step) : ReconstructM Expr := do
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     -- Every literal of the instance is one of the conclusion's, the two that
-    -- were unified having become one of them; `implies` looks each up.
-    pure (mkApp (← implies premiseType target) premiseAt)
+    -- were unified having become one of them, where the worker recorded.
+    carryAll premiseType target premiseAt (placed := step.placedAt 0)
+      (sourceCount := parent.clauseSize?) (targetCount := step.unit.clauseSize?)
 
 /--
 `polarity_flipping`: nothing, once the predicates it flipped are read as
