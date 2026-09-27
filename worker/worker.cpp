@@ -94,7 +94,8 @@
  *             `firstIntroduced` and `numIntroduced` are the entries of
  *             `introducedLits` for the literals the inference built rather
  *             than carried -- a theory axiom's -- in the order it built them,
- *             each the index of the conclusion's literal it is, and
+ *             each the index of the conclusion's literal it is and of the
+ *             literal of the first premise it was made of, or `NONE`, and
  *             `variant` which of the clauses of different shapes a rule
  *             builds this one is (`InferenceStore::recordIntroduced`).
  *             `site` is the string offset of where in vampire the inference
@@ -187,7 +188,9 @@
  *             conclusion against the premises.
  *             flags: 1 = the term was rewritten throughout the premise rather
  *             than only in that literal, which is what simultaneous
- *             superposition does. `other` is a second term of the premise
+ *             superposition does; 2, 4 and 8 = the virtual term VIRAS
+ *             substituted for the variable it eliminated is plus an
+ *             infinitesimal, plus infinity, minus infinity, its term `other`. `other` is a second term of the premise
  *             the inference acted on, or `NONE`: what an arithmetic equation
  *             `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; or
  *             the atom a factoring unified `term` with. Like `term`, it is
@@ -290,7 +293,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 34;
+const uint32_t VERSION = 35;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 38;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -1131,10 +1134,15 @@ struct Encoder {
     if (const auto* introduced = InferenceStore::instance()->introduced(u);
         introduced && u->isClause()) {
       Clause* cl = u->asClause();
-      units[UNIT_WIDTH * idx + 35] = static_cast<uint32_t>(introducedLits.size());
+      units[UNIT_WIDTH * idx + 35] = static_cast<uint32_t>(introducedLits.size() / 2);
       units[UNIT_WIDTH * idx + 36] = static_cast<uint32_t>(introduced->literals.size());
       units[UNIT_WIDTH * idx + 37] = introduced->variant;
-      for (Literal* lit : iterTraits(introduced->literals.iterFifo())) {
+      // A literal made of a premise literal says which, by its index in the
+      // first premise, as the literal is serialised.
+      Inference::Iterator pit = inference.iterator();
+      Unit* first = inference.hasNext(pit) ? inference.next(pit) : nullptr;
+      for (unsigned i = 0; i < introduced->literals.size(); i++) {
+        Literal* lit = introduced->literals[i];
         uint32_t entry = NONE;
         for (unsigned j = 0; j < cl->length() && entry == NONE; j++)
           if ((*cl)[j] == lit)
@@ -1142,7 +1150,18 @@ struct Encoder {
         if (entry == NONE)
           throw UserErrorException("unit " + std::to_string(u->number()) +
             " recorded an introduced literal its conclusion does not have");
+        uint32_t source = NONE;
+        if (!introduced->sources.isEmpty() && first && first->isClause()) {
+          Clause* premise = first->asClause();
+          for (unsigned j = 0; j < premise->length() && source == NONE; j++)
+            if ((*premise)[j] == introduced->sources[i])
+              source = j;
+          if (source == NONE)
+            throw UserErrorException("unit " + std::to_string(u->number()) +
+              " recorded an introduced literal of a literal its premise does not have");
+        }
         introducedLits.push_back(entry);
+        introducedLits.push_back(source);
       }
     }
 
@@ -1237,7 +1256,7 @@ struct Encoder {
               boundSorts.set(term.var(), sort);
           }
         }
-        for (TermList t : {use.term, use.other})
+        for (TermList t : {use.term, use.other, use.factor})
           if (t.isTerm())
             SortHelper::collectVariableSorts(const_cast<Term*>(t.term()),
               boundSorts);
@@ -1702,7 +1721,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
   putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
-  putWord(buf, static_cast<uint32_t>(enc.introducedLits.size()));
+  putWord(buf, static_cast<uint32_t>(enc.introducedLits.size() / 2));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);

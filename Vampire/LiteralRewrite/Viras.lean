@@ -188,7 +188,8 @@ private partial def elimOr (c : Expr) (n : Nat) (h : Expr)
 conclusion vampire made of it by VIRAS fails: `images[i]` is what the premise's
 `i`th literal became, and `denials[i]` a proof that it fails.
 -/
-def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr) :
+def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr)
+    (term : Option Expr) (epsilon : Bool) (infinity : Option Bool) :
     MetaM Expr := do
   let .lam xName τ _ _ := clauseAt
     | throwError "VIRAS: expected the premise as a function of the eliminated variable"
@@ -203,11 +204,17 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr) :
     let parts := disjuncts clause n
     -- Each literal's complement, where it has one.
     let complements ← parts.mapM (complement? x)
-    -- The virtual terms, each literal's elimination set in turn.
-    let mut candidates : Array Virtual := #[]
-    for c? in complements do
-      if let some c := c? then candidates := candidates ++ (← elimSet x c)
-    -- The one that gives the conclusion vampire made.
+    -- The virtual term vampire substituted: the port's are the aperiodic
+    -- ones of linear arithmetic, a term, a term plus an infinitesimal, and
+    -- minus infinity.
+    let vt ← match term, epsilon, infinity with
+      | some t, false, none => pure (Virtual.term t)
+      | some t, true, none => pure (Virtual.plusEpsilon t)
+      | none, false, some false => pure Virtual.minusInfinity
+      | _, _, _ => throwError "VIRAS substituted a virtual term the port has none of: \
+          {if term.isSome then "a term" else "no term"}\
+          {if epsilon then " plus an infinitesimal" else ""}\
+          {match infinity with | some true => " plus infinity" | some false => " minus infinity" | none => ""}"
     let fits (vt : Virtual) : MetaM (Option (Array Output)) := do
       let mut outputs := #[]
       for ((c?, image), part) in (complements.zip images).zip parts do
@@ -220,13 +227,8 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr) :
         unless ← sameStatement expected image do return none
         outputs := outputs.push output
       return some outputs
-    let mut found : Option (Virtual × Array Output) := none
-    for vt in candidates do
-      if let some outputs ← fits vt then
-        found := some (vt, outputs)
-        break
-    let some (vt, _) := found
-      | throwError "VIRAS made a conclusion no term of the elimination set gives"
+    let some _ ← fits vt
+      | throwError "VIRAS made a conclusion its virtual term does not give"
     trace[vampire] "VIRAS took {match vt with
       | .minusInfinity => m!"-∞" | .term t => m!"{t}" | .plusEpsilon t => m!"{t} + ε"}"
     -- The point every complement holds at, and what shows each does.

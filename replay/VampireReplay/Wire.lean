@@ -150,7 +150,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 34
+private def version : UInt32 := 35
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -245,7 +245,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let constraintLits := literalFactors + numLiteralFactors * 4
   let satOrder := constraintLits + numConstraintLits * 4
   let introducedLits := satOrder + numSatOrder * 4
-  let strings := introducedLits + numIntroducedLits * 4
+  let strings := introducedLits + numIntroducedLits * 2 * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -605,6 +605,12 @@ structure PremiseUse where
   superposition does.
   -/
   rewritesWholePremise : Bool
+  /--
+  The virtual term VIRAS substituted for the variable it eliminated, beyond the
+  term `other` gives: plus an infinitesimal, and plus or minus infinity.
+  -/
+  virtualEpsilon : Bool
+  virtualInfinity : Option Bool
   bindings : Array (UInt32 × Term)
   /--
   A second term of the premise the inference acted on: what an arithmetic
@@ -1040,7 +1046,20 @@ def introduced (u : Unit) : Array Nat :=
   let count := u.field 36
   if first == none32 then #[] else
   Array.ofFn (n := count.toNat) fun i =>
-    (readU32 u.proof.data (u.proof.layout.introducedLits + (first.toNat + i.val) * 4)).toNat
+    (readU32 u.proof.data (u.proof.layout.introducedLits + (first.toNat + i.val) * 2 * 4)).toNat
+
+/--
+For each literal `introduced` gives, the literal of the first premise it was
+made of, where it was made of one: a rewrite of one literal into several.
+-/
+def introducedSources (u : Unit) : Array (Option Nat) :=
+  let first := u.field 35
+  let count := u.field 36
+  if first == none32 then #[] else
+  Array.ofFn (n := count.toNat) fun i =>
+    let source := readU32 u.proof.data
+      (u.proof.layout.introducedLits + (first.toNat + i.val) * 2 * 4 + 4)
+    if source == none32 then none else some source.toNat
 
 /-- Which of the clauses of different shapes its rule builds this one is. -/
 def variant (u : Unit) : Nat := (u.field 37).toNat
@@ -1251,6 +1270,9 @@ def premiseUses (u : Unit) : Array PremiseUse :=
       literal := if literal == none32 then none else some literal
       term := if term == none32 then none else some ⟨p, term⟩
       rewritesWholePremise := flags &&& 1 != 0
+      virtualEpsilon := flags &&& 2 != 0
+      virtualInfinity := if flags &&& 4 != 0 then some true
+        else if flags &&& 8 != 0 then some false else none
       bindings := Array.ofFn (n := numBindings.toNat) fun j =>
         let b := p.layout.bindings + (firstBinding.toNat + j.val) * 2 * 4
         (readU32 p.data b, ⟨p, readU32 p.data (b + 4)⟩)

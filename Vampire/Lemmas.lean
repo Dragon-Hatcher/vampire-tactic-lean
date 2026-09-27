@@ -431,4 +431,57 @@ theorem fb_5 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (-((⌊s⌋ :
 
 end FloorBounds
 
+/-- `tha_divisibility`: multiplication by anything but zero cancels. -/
+theorem tha_divisibility {α : Type*} [CommRing α] [NoZeroDivisors α] (x y z w : α) :
+    x = 0 ∨ ¬x * z = y ∨ ¬x * w = y ∨ z = w := by
+  by_cases hx : x = 0
+  · exact Or.inl hx
+  by_cases hz : x * z = y
+  · by_cases hw : x * w = y
+    · exact Or.inr (Or.inr (Or.inr (mul_left_cancel₀ hx (hz.trans hw.symm))))
+    · exact Or.inr (Or.inr (Or.inl hw))
+  · exact Or.inr (Or.inl hz)
+
+/-- `k s + … = 0` from `s = t`, where the sum is `k (s - t)`: an equation as ALASCA states it. -/
+theorem eq_zero_of_scaled {α : Type*} [CommRing α] {e k a b : α} (he : e = k * (a - b))
+    (h : a = b) : e = 0 := by
+  rw [he, h, sub_self, mul_zero]
+
+/-!
+### ALASCA's literal factoring
+
+    j s + t₁ >₁ 0    ¬(k s + t₂ >₂ 0)
+    ─────────────────────────────────
+    k t₁ - j t₂ >₃ 0
+
+for positive `j` and `k`, `>₃` being `≥` for (`≥`, `>`) and `>` otherwise: the
+pivot is `k e₁ - j e₂` for the two terms.
+-/
+
+section LiteralFactoring
+variable {α : Type*} [CommRing α] [LinearOrder α] [IsStrictOrderedRing α]
+
+theorem lf_gt_gt {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 < e₁) (h₂ : ¬0 < e₂) :
+    0 < k * e₁ - j * e₂ := by
+  have := mul_pos hk h₁
+  have := mul_nonneg hj.le (not_lt.mp h₂ |> neg_nonneg.mpr)
+  nlinarith
+theorem lf_gt_ge {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 < e₁) (h₂ : ¬0 ≤ e₂) :
+    0 < k * e₁ - j * e₂ := by
+  have := mul_pos hk h₁
+  have := mul_pos hj (neg_pos.mpr (not_le.mp h₂))
+  nlinarith
+theorem lf_ge_gt {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 ≤ e₁) (h₂ : ¬0 < e₂) :
+    0 ≤ k * e₁ - j * e₂ := by
+  have := mul_nonneg hk.le h₁
+  have := mul_nonneg hj.le (not_lt.mp h₂ |> neg_nonneg.mpr)
+  nlinarith
+theorem lf_ge_ge {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 ≤ e₁) (h₂ : ¬0 ≤ e₂) :
+    0 < k * e₁ - j * e₂ := by
+  have := mul_nonneg hk.le h₁
+  have := mul_pos hj (neg_pos.mpr (not_le.mp h₂))
+  nlinarith
+
+end LiteralFactoring
+
 end Vampire.Lemmas

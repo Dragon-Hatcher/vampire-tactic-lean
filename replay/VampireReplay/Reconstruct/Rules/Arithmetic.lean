@@ -308,6 +308,57 @@ private partial def rewriteAtoms (rewrite : Expr → ReconstructM (Expr × Expr)
 private def inequalityPredicateNormalization : Nat := 9
 
 /--
+ALASCA's strong normalization of comparisons: `s ≥ t` as `s > t ∨ s = t`, and
+`s ≠ t` as `s > t ∨ t > s`, every other literal carried. The two literals each
+rewritten one became are recorded with the literal they were made of, and are
+`lt_or_eq_of_le` and `Ne.lt_or_lt` of it, each disjunct at its literal, an
+equation turned round where vampire shares it so.
+-/
+def strongNormalization (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let introduced := step.unit.introduced
+  let sources := step.unit.introducedSources
+  step.underVars fun kept target => do
+    let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
+    let premiseType ← instantiateForall stated args
+    let some placement := step.placedAt 0
+      | throwError "step {step.unit.number} recorded no placement of its premise"
+    let place (into : Into) (k : Nat) (h : Expr) : ReconstructM Expr := do
+      let some part := into.parts[k]?
+        | throwError "step {step.unit.number}'s clause has no literal {k}"
+      -- One up to instances: the lemmas state their comparisons over classes.
+      let same (a b : Expr) : ReconstructM Bool := do
+        if a == b then return true
+        withNewMCtxDepth <| withTransparency .instances <| isDefEq a b
+      let said ← instantiateMVars (← inferType h)
+      if ← same said part then return into.inject k (← mkExpectedTypeHint h part)
+      let some turned ← flipEquality h
+        | throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}"
+      unless ← same (← instantiateMVars (← inferType turned)) part do
+        throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}"
+      return into.inject k (← mkExpectedTypeHint turned part)
+    step.withInto target fun into =>
+      carryPast premiseType target (mkAppN proof args) into
+        (fun i => (placement[i]?.join).isNone) (placed := some placement)
+        (sourceCount := parent.clauseSize?) (fun i h => do
+          let built := (List.range introduced.size).filter (sources[·]? == some (some i))
+          let [a, b] := built
+            | throwError "step {step.unit.number} made {built.length} literals of its literal {i}"
+          let said ← instantiateMVars (← inferType h)
+          -- `y ≤ x`, which is `x ≥ y`, as `y < x ∨ y = x`; `¬x = y` as `y < x ∨ x < y`.
+          let split ← if said.isAppOfArity ``LE.le 4 then mkAppM `lt_or_eq_of_le #[h]
+            else if said.not?.any (·.isAppOfArity ``Eq 3) then
+              mkAppM `Ne.lt_or_lt #[← mkAppM ``Ne.symm #[h]]
+            else throwError "step {step.unit.number} rewrote{indentExpr said}\n\
+              which is neither a comparison nor a disequality"
+          let splitType ← whnfR (← instantiateMVars (← inferType split))
+          let onLeft ← withLocalDeclD `h splitType.appFn!.appArg! fun h => do
+            mkLambdaFVars #[h] (← place into (introduced[a]!) h)
+          let onRight ← withLocalDeclD `h splitType.appArg! fun h => do
+            mkLambdaFVars #[h] (← place into (introduced[b]!) h)
+          mkAppOptM ``Or.elim #[none, none, some target, some split, some onLeft, some onRight])
+
+/--
 A literal-wise simplification: each literal of the premise became the literal
 of the conclusion the worker recorded, by the rewrites of the procedure it
 recorded, or was found false and dropped.
@@ -338,7 +389,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
   -- two literals of one, so it records no images: its conclusion follows from
   -- its premise by the arithmetic, a literal at a time.
   if step.unit.literalProcedure? == some inequalityPredicateNormalization then
-    return ← theoryStep step
+    return ← strongNormalization step
   let some procedure := step.unit.literalProcedure?.bind LiteralRewrite.ofRecorded?
     | throwError "step {step.unit.number} ({step.rule.name}) recorded no procedure"
   let some images := step.placedAt 0
@@ -400,7 +451,10 @@ def viras (step : Step) : ReconstructM Expr := do
   let some (_, sortName) := parent.varSorts.find? (·.1 == x)
     | throwError "the eliminated variable X{x} has no recorded sort"
   let n := (parent.clauseSize?).getD 0
-  step.underVars fun vars target => step.withInto target fun into => do
+  step.underVars fun kept target => step.withInto target fun into => do
+    -- The virtual term can mention a variable of the premise the conclusion
+    -- does not keep, which stands for the same element in both.
+    let vars ← coverVars kept step.unit.boundVarSorts
     let τ ← sortType sortName
     -- The premise with `x` left free, its other variables the conclusion's.
     let (clauseAt, premiseAll) ← withLocalDeclD (Name.mkSimple s!"X{x}") τ fun xv => do
@@ -420,7 +474,10 @@ def viras (step : Step) : ReconstructM Expr := do
           | throwError "step {step.unit.number}: VIRAS dropped a literal, which it never does"
         imagesOf := imagesOf.push into.parts[j]!
         denialsOf := denialsOf.push denials[j]!
+      -- The virtual term vampire substituted, in the conclusion's variables.
+      let term ← use.other.mapM (termAt parent use vars ·)
       let falsity ← (← read).virasRefute clauseAt premiseAll n imagesOf denialsOf
+        term use.virtualEpsilon use.virtualInfinity
       mkLambdaFVars #[h] falsity
     mkAppOptM ``Classical.byContradiction #[some target, some refuted]
 
@@ -432,95 +489,6 @@ private def asProduct (e : Expr) : Option (Expr × Expr) :=
 
 /-- Whether a term is the number zero. -/
 private def isZero (e : Expr) : Bool := e.nat? == some 0
-
-/--
-`tha_divisibility`: `x = 0 ∨ x * z ≠ y ∨ x * w ≠ y ∨ z = w`.
-
-`TheoryAxioms::addMultiplyAxioms` states that multiplication by anything but
-zero cancels, in exactly those four literals. No procedure that reads its
-facts as linear constraints can see it -- both products are of two variables
--- so the clause is proved from its own literals instead: suppose the
-multiplier is not zero and both products hold, and what is left is the
-cancellation itself.
-
-The literals are found by their shape, and each equality either way round,
-because what orders a clause's literals and orients its equations is
-vampire's term order rather than the order the axiom was written in.
--/
-def divisibility (step : Step) : ReconstructM Expr := do
-  forallBoundedTelescope (← step.conclusion) (some step.unit.varSorts.size)
-      fun xs target => do
-    let parts := junctionParts ``Or target
-    -- `x = 0`: which number the products multiply by.
-    let some (zeroed, x, zero, statedOfX) := parts.findSome? (fun part => do
-        let some (_, a, b) := part.eq? | none
-        if isZero b then some (part, a, b, true)
-        else if isZero a then some (part, b, a, false)
-        else none)
-      | throwError "a divisibility axiom without a literal saying a number is \
-        zero:{indentExpr target}"
-    -- `¬(x * z = y)` and `¬(x * w = y)`, which multiply that number and reach
-    -- the same one.
-    let products := parts.filterMap fun part => do
-      let some equation := part.not? | none
-      let some (_, a, b) := equation.eq? | none
-      if let some (l, r) := asProduct a then
-        if l == x then return (part, r, b)
-      if let some (l, r) := asProduct b then
-        if l == x then return (part, r, a)
-      none
-    let #[(failsZ, z, y), (failsW, w, y')] := products
-      | throwError "expected a divisibility axiom to state two products of the \
-        number it says is zero, got {products.size}:{indentExpr target}"
-    unless y == y' do
-      throwError "a divisibility axiom's products reach{indentExpr y}\nand\
-        {indentExpr y'}, which are not the same"
-    -- `z = w`, which is what cancelling the multiplier gives.
-    let some equal := parts.find? (fun part =>
-        match part.eq? with
-        | some (_, a, b) => (a == z && b == w) || (a == w && b == z)
-        | none => false)
-      | throwError "a divisibility axiom without the equation it \
-        concludes:{indentExpr target}"
-    let some cancel ← (← read).cancelling x z w
-      | throwError "step {step.unit.number}: no cancellation lemma for \
-        multiplication on{indentExpr (← inferType x)}"
-    let suffix := suffixJunctions ``Or ``False parts
-    let inject (part h : Expr) : ReconstructM Expr := do
-      let some i := parts.findIdx? (· == part)
-        | throwError "the clause does not say{indentExpr part}"
-      injectGiven parts i h (suffix? := some suffix)
-    -- Either the multiplier is zero, or one of the products fails, or both
-    -- hold and the multiplier cancels.
-    let byCases (p : Expr) (yes no : Expr → ReconstructM Expr) :
-        ReconstructM Expr := do
-      let positive ← withLocalDeclD `h p fun h => do
-        mkLambdaFVars #[h] (← yes h)
-      let negative ← withLocalDeclD `h (mkApp (mkConst ``Not) p) fun h => do
-        mkLambdaFVars #[h] (← no h)
-      mkAppOptM ``Classical.byCases #[some p, some target, some positive,
-        some negative]
-    let body ← byCases zeroed (fun h => inject zeroed h) fun refuted => do
-      -- What cancellation asks for is that `x` is not zero; the clause can
-      -- say that the other way round.
-      let nonzero ←
-        if statedOfX then pure refuted
-        else withLocalDeclD `h (← mkEq x zero) fun h => do
-          mkLambdaFVars #[h] (mkApp refuted (← mkAppM ``Eq.symm #[h]))
-      let some statedZ := failsZ.not? | throwError "a refuted product is not one"
-      let some statedW := failsW.not? | throwError "a refuted product is not one"
-      byCases statedZ (fun holdsZ =>
-        byCases statedW (fun holdsW => do
-          -- `x * z = y` and `x * w = y`, so `x * z = x * w`, and `x` cancels.
-          let same ← mkAppM ``Eq.trans #[holdsZ, ← mkAppM ``Eq.symm #[holdsW]]
-          let equated ← mkAppM' cancel #[nonzero, same]
-          -- The clause can state it the other way round.
-          let some (_, a, _) := equal.eq? | throwError "not an equation"
-          let stated ← if a == z then pure equated else mkAppM ``Eq.symm #[equated]
-          inject equal stated)
-          (fun failsW' => inject failsW failsW'))
-        (fun failsZ' => inject failsZ failsZ')
-    mkLambdaFVars xs body
 
 /-!
 ### Steps certified by a lemma
@@ -951,6 +919,7 @@ private def axiomLemma (step : Step) : ReconstructM (Name × Array UInt32) := do
   | .thaQuotientNonZero => return (l "tha_quotient_non_zero", #[1])
   | .thaQuotientMultiply => return (l "tha_quotient_multiply", #[1, 2])
   | .thaExtraIntegerOrdering => return (l "tha_extra_integer_ordering", #[0, 1])
+  | .thaDivisibility => return (l "tha_divisibility", #[0, 1, 2, 3])
   | .thaFloorSmall => return (l "tha_floor_small", #[0])
   | .thaFloorBig => return (l "tha_floor_big", #[0])
   | .thaCeilingBig => return (l "tha_ceiling_big", #[0])
@@ -1242,5 +1211,218 @@ def floorBounds (step : Step) : ReconstructM Expr := do
           let onRight ← withLocalDeclD `h concludedType.appArg! fun h => do
             mkLambdaFVars #[h] (← placeByRing step into second h)
           mkAppOptM ``Or.elim #[none, none, some target, some concluded, some onLeft, some onRight])
+
+/--
+ALASCA's equality factoring:
+
+    C ∨ s₁ ≈ t₁ ∨ s₂ ≈ t₂
+    ─────────────────────────
+    (C ∨ s₁ ≈ t₁ ∨ t₁ ≉ t₂)σ
+
+at the unifier, which makes `s₁` and `s₂` one up to arithmetic. Where `s₂ ≈ t₂`
+holds, either `t₁` and `t₂` differ, which is the literal the step put in its
+place, or `s₁ = s₂ = t₂ = t₁`, which is the first equation, carried. An
+arithmetic equation `k s + … = 0` is `s = t` by `eq_of_scaled` at the
+recorded coefficient, and back by `eq_zero_of_scaled`.
+-/
+def eqFactoring (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+  let #[first, second] := uses
+    | throwError "step {step.unit.number}: equality factoring recorded {uses.size} uses, \
+        expected both equations"
+  let (some carried, some replaced) := (first.literal, second.literal)
+    | throwError "step {step.unit.number}: equality factoring recorded no equations"
+  let some built := step.unit.introduced[0]?
+    | throwError "step {step.unit.number}: equality factoring recorded no literal it built"
+  step.underVars fun kept target => do
+    let vars ← coverVars kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ← instantiateAt parent first vars proof stated
+    let sides (use : PremiseUse) : ReconstructM (Expr × Expr × Option Expr) := do
+      let (some s, some t) := (use.term, use.other)
+        | throwError "step {step.unit.number}: an equation factored recorded no sides"
+      return (← termAt parent use vars s, ← termAt parent use vars t,
+        ← use.factor.mapM (termAt parent use vars ·))
+    let (s₁, t₁, k₁) ← sides first
+    let (s₂, t₂, k₂) ← sides second
+    let α ← inferType s₁
+    let zero ← wholeNumeral α 0
+    let ring (a b : Expr) : ReconstructM Expr := do
+      let some h ← ringEqual a b
+        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
+            are not one up to the identities of a ring"
+      return h
+    -- `s = t` from the equation's literal, and the literal from `s = t`.
+    let solved (h : Expr) (s t : Expr) (k? : Option Expr) : ReconstructM Expr := do
+      let said ← instantiateMVars (← inferType h)
+      let some (_, a, b) := said.eq?
+        | throwError "step {step.unit.number}: an equation factored{indentExpr said}\nis none"
+      match k? with
+      | some k =>
+        let (e, h) ← if a == zero then pure (b, ← mkEqSymm h) else pure (a, h)
+        let he ← ring e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[s, t]])
+        let hk ← (← read).numerically (← mkAppM ``Ne #[k, zero])
+        mkAppM `Vampire.Lemmas.eq_of_scaled #[hk, h, he]
+      | none =>
+        if a == s && b == t then pure h
+        else if a == t && b == s then mkEqSymm h
+        else throwError "step {step.unit.number}:{indentExpr said}\nis not{indentExpr s}\n= {t}"
+    let asLiteral (statement : Expr) (eq : Expr) (s t : Expr) (k? : Option Expr) :
+        ReconstructM Expr := do
+      let some (_, a, b) := statement.eq?
+        | throwError "step {step.unit.number}:{indentExpr statement}\nis no equation"
+      match k? with
+      | some k =>
+        let (e, flipped) := if a == zero then (b, true) else (a, false)
+        let he ← ring e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[s, t]])
+        let h ← mkAppM `Vampire.Lemmas.eq_zero_of_scaled #[he, eq]
+        let h ← if flipped then mkEqSymm h else pure h
+        -- The lemma's zero is its own class's; the literal's is the type's.
+        unless ← withNewMCtxDepth <| withTransparency .instances <|
+            isDefEq (← instantiateMVars (← inferType h)) statement do
+          throwError "step {step.unit.number}:{indentExpr (← inferType h)}\nis not\
+            {indentExpr statement}"
+        mkExpectedTypeHint h statement
+      | none => if a == s then pure eq else mkEqSymm eq
+    let some placement := step.placedAt 0
+      | throwError "step {step.unit.number} recorded no placement of its premise"
+    let premiseParts ← clauseLiterals premiseType parent.clauseSize?
+    step.withInto target fun into =>
+      carryPast premiseType target premiseAt into (· == replaced.toNat)
+        (placed := some placement) (sourceCount := parent.clauseSize?) (fun _ h₂ => do
+          let e₂ ← solved h₂ s₂ t₂ k₂
+          let apart ← mkEq t₁ t₂
+          let differ ← withLocalDeclD `h (mkNot apart) fun hne => do
+            let some part := into.parts[built]?
+              | throwError "step {step.unit.number}'s clause has no literal {built}"
+            let hne ← if (← instantiateMVars (← inferType hne)) == part then pure hne else
+              let some turned ← flipEquality hne
+                | throwError "step {step.unit.number}: its disequality is not{indentExpr part}"
+              pure turned
+            unless (← instantiateMVars (← inferType hne)) == part do
+              throwError "step {step.unit.number}: its disequality is not{indentExpr part}"
+            mkLambdaFVars #[hne] (into.inject built hne)
+          let agree ← withLocalDeclD `h apart fun he => do
+            -- `s₁ = s₂ = t₂ = t₁`.
+            let e₁ ← mkEqTrans (← ring s₁ s₂) (← mkEqTrans e₂ (← mkEqSymm he))
+            let some statement := premiseParts[carried.toNat]?
+              | throwError "step {step.unit.number}: its premise has no literal {carried}"
+            let literal ← asLiteral statement e₁ s₁ t₁ k₁
+            mkLambdaFVars #[he] (← into.placeAt (some placement) carried.toNat literal)
+          mkAppM ``Classical.byCases #[agree, differ])
+
+/--
+ALASCA's literal factoring:
+
+    C ∨ j s₁ + t₁ >₁ 0 ∨ k s₂ + t₂ >₂ 0
+    ─────────────────────────────────────────────
+    (C ∨ k s₂ + t₂ >₂ 0 ∨ k t₁ - j t₂ >₃ 0)σ
+
+at the unifier, which makes `s₁` and `s₂` one up to arithmetic. Where the
+first holds, the second either does, and is carried, or does not, and the pivot
+is `Vampire.Lemmas.lf_*` at the recorded coefficients, equal to it by ring
+arithmetic.
+-/
+def literalFactoring (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+  let #[first, second] := uses
+    | throwError "step {step.unit.number}: literal factoring recorded {uses.size} uses, \
+        expected both comparisons"
+  let (some pivoted, some other) := (first.literal, second.literal)
+    | throwError "step {step.unit.number}: literal factoring recorded no comparisons"
+  let (some jTerm, some kTerm) := (first.factor, second.factor)
+    | throwError "step {step.unit.number}: literal factoring recorded no coefficients"
+  let some built := step.unit.introduced[0]?
+    | throwError "step {step.unit.number}: literal factoring recorded no pivot"
+  step.underVars fun kept target => do
+    let vars ← coverVars kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ← instantiateAt parent first vars proof stated
+    let j ← termAt parent first vars jTerm
+    let k ← termAt parent second vars kTerm
+    let some placement := step.placedAt 0
+      | throwError "step {step.unit.number} recorded no placement of its premise"
+    let premiseParts ← clauseLiterals premiseType parent.clauseSize?
+    let some otherStatement := premiseParts[other.toNat]?
+      | throwError "step {step.unit.number}: its premise has no literal {other}"
+    let comparison (e : Expr) : ReconstructM (Bool × Expr) := do
+      if e.isAppOfArity ``LT.lt 4 then return (true, e.appArg!)
+      if e.isAppOfArity ``LE.le 4 then return (false, e.appArg!)
+      throwError "step {step.unit.number}: {indentExpr e}\nis no comparison with zero"
+    step.withInto target fun into =>
+      carryPast premiseType target premiseAt into (· == pivoted.toNat)
+        (placed := some placement) (sourceCount := parent.clauseSize?) (fun _ h₁ => do
+          let (strict₁, _) ← comparison (← instantiateMVars (← inferType h₁))
+          let (strict₂, _) ← comparison otherStatement
+          let holds ← withLocalDeclD `h otherStatement fun h₂ => do
+            mkLambdaFVars #[h₂] (← into.placeAt (some placement) other.toNat h₂)
+          let fails ← withLocalDeclD `h (mkNot otherStatement) fun h₂ => do
+            let lemma_ := match strict₁, strict₂ with
+              | true, true => "lf_gt_gt" | true, false => "lf_gt_ge"
+              | false, true => "lf_ge_gt" | false, false => "lf_ge_ge"
+            let pivot ← mkAppM ((`Vampire.Lemmas).str lemma_)
+              #[← positive j, ← positive k, h₁, h₂]
+            mkLambdaFVars #[h₂] (← placeByRing step into built pivot)
+          mkAppM ``Classical.byCases #[holds, fails])
+
+/--
+A premise with terms abstracted into fresh variables, `x ≠ t ∨ C[x]` of `C[t]`:
+theory flattening, and ALASCA's abstraction. Either some `x` is not its `t`,
+and that disequality is a literal of the conclusion, or each is, and then each
+literal the step rewrote is the premise's with `x := t` -- the disequalities
+taken in the order of their variables, a term mentioning only variables made
+after it -- which the equations rewrite back; every other literal is carried.
+-/
+partial def abstraction (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let introduced := step.unit.introduced
+  step.underVars fun kept target => do
+    let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
+    let premiseType ← instantiateForall stated args
+    let (some placement, some rewritten) := (step.placedAt 0, step.rewrittenAt 0)
+      | throwError "step {step.unit.number} recorded no placement of its premise"
+    let bound := kept.toList.map (·.2)
+    step.withInto target fun into => do
+      -- Each disequality, as the variable and the term it abstracts.
+      let abstractions ← introduced.mapM fun k => do
+        let some part := into.parts[k]?
+          | throwError "step {step.unit.number}'s clause has no literal {k}"
+        let some equation := part.not?
+          | throwError "step {step.unit.number}: its abstraction{indentExpr part}\nis no disequality"
+        let some (_, a, b) := equation.eq?
+          | throwError "step {step.unit.number}: its abstraction{indentExpr part}\nis no disequality"
+        let isVariable (e : Expr) : Bool := e.isFVar && bound.contains e
+        if isVariable a && !isVariable b then return (k, a, b, equation, false)
+        if isVariable b && !isVariable a then return (k, b, a, equation, true)
+        throwError "step {step.unit.number}: its abstraction{indentExpr part}\n\
+          abstracts no term into one of its variables"
+      -- `wanted` from `h`, what it is at `x := t` for each abstraction in turn.
+      let undone (equations : Array (Expr × Expr × Expr)) (h wanted : Expr) :
+          ReconstructM Expr := do
+        let mut stages := #[← instantiateMVars wanted]
+        for (x, t, _) in equations do
+          stages := stages.push (stages.back!.replaceFVar x t)
+        let said ← instantiateMVars (← inferType h)
+        unless stages.back! == said do
+          throwError "step {step.unit.number}:{indentExpr wanted}\nis not{indentExpr said}\n\
+            with its abstractions undone, but{indentExpr stages.back!}"
+        let mut proof := h
+        for i in (List.range equations.size).reverse do
+          let (x, _, e) := equations[i]!
+          let motive ← withLocalDeclD `z (← inferType x) fun z => do
+            mkLambdaFVars #[z] (stages[i]!.replaceFVar x z)
+          proof ← mkEqMPR (← mkCongrArg motive e) proof
+        return proof
+      let rec cases (i : Nat) (equations : Array (Expr × Expr × Expr)) : ReconstructM Expr := do
+        let some (k, x, t, equation, flipped) := abstractions[i]?
+          | return ← carryRewritten premiseType target (mkAppN proof args) into placement
+              rewritten parent.clauseSize? (undone equations)
+        let holds ← withLocalDeclD `h equation fun h => do
+          let e ← if flipped then mkEqSymm h else pure h
+          mkLambdaFVars #[h] (← cases (i + 1) (equations.push (x, t, e)))
+        let fails ← withLocalDeclD `h (mkNot equation) fun h => do
+          mkLambdaFVars #[h] (into.inject k h)
+        mkAppM ``Classical.byCases #[holds, fails]
+      cases 0 #[]
 
 end Vampire.Reconstruct.Arithmetic
