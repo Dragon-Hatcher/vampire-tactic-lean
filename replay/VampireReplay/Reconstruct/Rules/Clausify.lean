@@ -168,26 +168,86 @@ private def subformulaParts (sorts : Array (UInt32 × String)) (vars : Vars)
   | .not => return #[← negated (← body)]
   | _ => subs.mapM (Reconstruct.formula sorts vars)
 
+/--
+What a literal a step pushed says, from the part it went to: the same, unless
+the push turned `¬f` at a negative sign into `f` at a positive one, which the
+part states as `f` and the literal as `¬¬f`.
+-/
+private def pushedStatement (part : Expr) (sign turned : Bool) : Expr :=
+  if turned && !sign then mkNot (mkNot part) else part
+
+/-- The part a pushed literal went to, from what the literal says. -/
+private def pushedPart (statement : Expr) (sign turned : Bool) : ReconstructM Expr := do
+  unless turned && !sign do return statement
+  let some part := statement.not? >>= Expr.not?
+    | throwError "clausify: a literal pushed turned at a negative sign, which is \
+        no negation{indentExpr statement}"
+  return part
+
+/-- Where a step recorded its `pushed`th literal went, and whether it was turned. -/
+private def landing (c : GenClause) (pushed : Nat) : ReconstructM (Nat × Bool) := do
+  let some landed := c.placements[pushed]?
+    | throwError "clausify: nothing records where literal {pushed} a step pushed went"
+  return landed
+
+/--
+Which literal a step extending its parent pushed for the parent's `i`th: the
+step pushes the parent's literals in order, what it replaced `position` by in
+that position's place.
+-/
+private def keptPushed (c : GenClause) (position i : Nat) : Nat :=
+  if i < position then i else i - 1 + c.replacement.size
+
 private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
     (c : GenClause) (parent : Array (Formula × Bool)) (parentParts : Array Expr) :
     ReconstructM (Array Expr) := do
-  -- What the step replaced, and the parts of it, which are what it put there.
-  let replaced ← do
-    let some position := c.position? | pure none
-    let some (g, sign) := parent[position.toNat]? | pure none
-    let some part := parentParts[position.toNat]? | pure none
+  let some position := c.position?
+    | throwError "a clausification step without the position it replaced"
+  let position := position.toNat
+  match c.how with
+  | .introduced => throwError "a clause clausification started from has no parent"
+  | .replaced | .named =>
+    -- Rewritten in place: every other position stays where it was.
+    let some l := c.literals[position]?
+      | throwError "a clausification step replaced a position that is not there"
+    unless position < parentParts.size do
+      throwError "a clausification step replaced a position that is not there"
+    return parentParts.set! position (← genLit sorts vars l)
+  | .extended =>
+  let some (g, sign) := parent[position]?
+    | throwError "a clausification step replaced a position that is not there"
+  let some part := parentParts[position]?
+    | throwError "a clausification step replaced a position that is not there"
+  -- What the step put there is made of the parts of what it replaced, taken
+  -- apart rather than built again.
+  let subParts? ← do
     match ← connectiveOf g with
     | .«forall» | .«exists» | .name | .literal => pure none
-    | _ => pure (some (g.subformulas, ← subformulaParts sorts vars g sign part))
-  c.literals.mapM fun l => do
-    if let some i := parent.findIdx? (· == l) then
-      if let some part := parentParts[i]? then
-        return part
-    if let some (subs, parts) := replaced then
-      if let some j := subs.findIdx? (· == l.1) then
-        if let some part := parts[j]? then
-          return if l.2 then part else mkApp (mkConst ``Not) part
+    | _ => pure (some (← subformulaParts sorts vars g sign part))
+  let statementOf (l : Formula × Bool) : ReconstructM Expr := do
+    if let some subParts := subParts? then
+      if let some j := g.subformulas.findIdx? (· == l.1) then
+        if let some sub := subParts[j]? then
+          return if l.2 then sub else mkNot sub
     genLit sorts vars l
+  -- The literals in the order the step pushed them: each goes where it was
+  -- recorded to, and one repeating a literal already there goes with it.
+  let mut parts : Array (Option Expr) := c.literals.map fun _ => none
+  let pushed : Array (ReconstructM (Expr × Bool)) :=
+    (parentParts.extract 0 position).map (fun p => pure (p, true)) ++
+    c.replacement.map (fun l => do return (← statementOf l, l.2)) ++
+    (parentParts.extract (position + 1) parentParts.size).map (fun p => pure (p, true))
+  for (item, i) in pushed.zipIdx do
+    let (k, turned) ← landing c i
+    let some slot := parts[k]?
+      | throwError "clausify: a literal went to position {k}, which the clause does not have"
+    if slot.isSome then continue
+    let (statement, sign) ← item
+    parts := parts.set! k (some (← pushedPart statement sign turned))
+  parts.mapIdxM fun k part? => do
+    let some part := part?
+      | throwError "clausify: nothing the step pushed went to position {k}"
+    return part
 
 /-- Everything replaying one clausification needs to hand. -/
 private structure Replay where
@@ -222,30 +282,22 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
   let contradiction ←
     withLocalDeclD `n (mkApp (mkConst ``Not) target) fun n => do
       let refutations := refutationsOf parts n
-      -- The clause's parts with their double negations stripped, to find a
-      -- part by what it says without comparing it with each of them.
-      let strippedParts := parts.map stripped
-      let refuted (e : Expr) : ReconstructM Expr := do
-        -- The clause usually says just what the step put in it, so that is
-        -- looked for first: a clause of a few hundred literals is refuted a
-        -- literal at a time, once for every step of the clausification.
-        let refuting (i : Nat) : ReconstructM Expr := do
-          let some refutation := refutations[i]? | throwError "the clause has no part {i}"
-          return refutation
-        if let some i := parts.findIdx? (· == e) then
-          return ← refuting i
-        -- What a step put in a clause is recorded before the clausifier's own
-        -- normalisation has unwrapped a negation into the sign it carries, so
-        -- the part is looked up by what the two say with that undone.
-        if let some i := strippedParts.findIdx? (· == stripped e) then
-          let part := parts[i]!
-          if let some says ← sameUpToDoubleNegation part e then
-            return ← mkAppM ``Iff.mp #[← mkAppM ``not_congr #[says], ← refuting i]
-        throwError "clausify: the clause is missing the literal{indentExpr e}\n\
-          which an earlier clausification step produced"
+      let refuting (k : Nat) : ReconstructM Expr := do
+        let some refutation := refutations[k]? | throwError "the clause has no part {k}"
+        return refutation
+      -- What the step's `pushed`th literal says, refuted where it went.
+      let refutePushed (pushed : Nat) (sign : Bool) : ReconstructM (Expr × Expr) := do
+        let (k, turned) ← landing c pushed
+        let some part := parts[k]? | throwError "the clause has no part {k}"
+        let refutation ← refuting k
+        if turned && !sign then
+          -- `¬¬f`, refuted by what refutes `f`.
+          let statement := pushedStatement part sign turned
+          return (statement, .lam `h statement (mkApp (.bvar 0) refutation) .default)
+        return (part, refutation)
       let body ←
         match c.parent? with
-        | none => root r parts refuted
+        | none => root r c refutePushed
         | some p => do
           let stated := parentParts
           let some position := c.position?
@@ -253,12 +305,33 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
           let some parentProof := parent?
             | throwError "a clausification step without a proof of what it \
               was reached from"
+          let position := position.toNat
+          -- What the step put in the position, refuted: a rewriting in place
+          -- pushes one literal, at the sign that stood there.
+          let refuteReplacement (j : Nat) : ReconstructM Expr := do
+            match c.how with
+            | .extended =>
+              let some (_, sign) := c.replacement[j]?
+                | throwError "a clausification step has no replacement {j}"
+              return (← refutePushed (position + j) sign).2
+            | _ =>
+              let some (_, sign) := p.literals[position]?
+                | throwError "a clausification step replaced a position that is not there"
+              return (← refutePushed 0 sign).2
           elimGiven stated (fun i h => do
-              if i == position.toNat then
-                replaced r c p position.toNat parts parentParts h refuted
+              if i == position then
+                replaced r c p position parentParts h refuteReplacement
               else
-                -- A position the step kept is one of this clause's own.
-                return mkApp (← refuted (← instantiateMVars (← inferType h))) h)
+                -- A position the step kept is one of this clause's own, where
+                -- the step recorded it went.
+                match c.how with
+                | .extended =>
+                  let (k, turned) ← landing c (keptPushed c position i)
+                  if turned then
+                    throwError "clausify: a kept literal turned, which only one \
+                      that was not stored yet can be"
+                  return mkApp (← refuting k) h
+                | _ => return mkApp (← refuting i) h)
             parentProof
       -- Abstracted directly where there is nothing for `mkLambdaFVars` to do
       -- beyond it: no metavariable for it to account for.
@@ -271,57 +344,52 @@ private partial def prove (r : Replay) (c : GenClause) (parent? : Option Expr)
 The clauses clausification begins at: the formula itself, and, for a subformula
 it names, that the name and the subformula say the same thing.
 -/
-private partial def root (r : Replay) (parts : Array Expr)
-    (refuted : Expr → ReconstructM Expr) : ReconstructM Expr := do
-  if h : parts.size = 1 then
-    return mkApp (← refuted parts[0]) r.premise
-  if parts.size == 2 then
-    -- A name stands for what it names, so the two parts are one thing under
-    -- opposite signs and refuting both is a contradiction outright.
-    let (positive, negative) :=
-      if (parts[0]!).not?.isSome then (parts[1]!, parts[0]!) else (parts[0]!, parts[1]!)
-    let some inner := negative.not?
-      | throwError "neither part of a definition is a negation"
-    unless ← isDefEq inner positive do
-      throwError "a definition's parts{indentExpr positive}\nand\
-        {indentExpr negative}\nare not each other's negation"
-    return mkApp (← refuted negative) (← refuted positive)
-  throwError "clausify: the first clause of the chain has {parts.size} literals, \
-    expected 1 (the formula) or 2 (a definition)"
+private partial def root (r : Replay) (c : GenClause)
+    (refutePushed : Nat → Bool → ReconstructM (Expr × Expr)) : ReconstructM Expr := do
+  match c.replacement with
+  | #[(_, sign)] =>
+    -- The formula, pushed at a positive sign.
+    return mkApp (← refutePushed 0 sign).2 r.premise
+  | #[(_, nameSign), (_, sign)] =>
+    -- A name and what it names, pushed first and at opposite signs: the two
+    -- are one thing, so refuting both is a contradiction outright.
+    let (negated, holding) ←
+      if nameSign then pure ((← refutePushed 1 sign), (← refutePushed 0 nameSign))
+      else pure ((← refutePushed 0 nameSign), (← refutePushed 1 sign))
+    let some inner := negated.1.not?
+      | throwError "the negative part of a definition is no negation"
+    unless ← isDefEq inner holding.1 do
+      throwError "a definition's parts{indentExpr holding.1}\nand\
+        {indentExpr negated.1}\nare not each other's negation"
+    return mkApp negated.2 holding.2
+  | pushed => throwError "clausify: the first clause of the chain pushed {pushed.size} \
+      literals, expected 1 (the formula) or 2 (a definition)"
 
 /--
 The step that replaced one position: what was put there follows from what was
 there, so refuting all of it refutes what was there.
 -/
 private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
-    (childParts parentParts : Array Expr)
-    (h : Expr) (refuted : Expr → ReconstructM Expr) : ReconstructM Expr := do
+    (parentParts : Array Expr)
+    (h : Expr) (refuteReplacement : Nat → ReconstructM Expr) : ReconstructM Expr := do
   let some (g, sign) := p.literals[position]?
     | throwError "a clausification step replaced a position that is not there"
-  -- Both clauses have said what they say already, so a position is read off
-  -- them rather than rebuilt: rebuilding gives a second term saying the same
-  -- thing, which then has to be compared rather than recognised.
-  let literalOf (all : Array (Formula × Bool)) (built : Array Expr)
-      (l : Formula × Bool) : ReconstructM Expr := do
-    match all.findIdx? (· == l) with
-    | some i =>
-      match built[i]? with
-      | some part => pure part
-      | none => genLit r.sorts r.vars l
-    | none => genLit r.sorts r.vars l
-  let stated ←
-    match parentParts[position]? with
-    | some part => pure part
-    | none => genLit r.sorts r.vars (g, sign)
+  let some stated := parentParts[position]?
+    | throwError "a clausification step replaced a position that is not there"
   let replacement := c.replacement
   -- What the step put there, refuted.
-  let against ← replacement.mapM fun l => do
-    refuted (← literalOf c.literals childParts l)
-  -- Naming, and the shuffling of a negation between a formula and its sign,
-  -- leave what is said untouched.
-  if h' : replacement.size = 1 then
-    if ← sameFormula (← literalOf c.literals childParts replacement[0]) stated then
-      return mkApp against[0]! h
+  let against ← (Array.range replacement.size).mapM refuteReplacement
+  let connective ← connectiveOf g
+  -- A name, a let's contents or a term's truth put in place of what stood
+  -- there says what it said.
+  if c.how == .named || (c.how == .replaced && !(connective matches .«forall» | .«exists»)) then
+    let some negation := against[0]? | throwError "a rewriting in place without a refutation"
+    let some says := asNegation (← instantiateMVars (← inferType negation))
+      | throwError "expected a refutation to be a negation"
+    unless ← sameFormula says stated do
+      throwError "clausify: what was put in place of{indentExpr stated}\nsays\
+        {indentExpr says}"
+    return mkApp negation h
   if replacement.isEmpty then
     -- A constant: either the clause said `False`, or it said `¬True`.
     if stated.isConstOf ``False then
@@ -367,7 +435,6 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
     let some innermost := asNegation inner
       | throwError "expected the refutation of a negation to be a double negation"
     return ofNotNot innermost negation
-  let connective ← connectiveOf g
   match connective with
   | .and =>
     if sign then
@@ -440,19 +507,15 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
         | some image => acc.insert v image
         | none => acc
       let (_, body) ← peelBlock r.sorts sign skolems r.vars g h
-      -- What the block leaves and what the step recorded in its place can meet
-      -- with a double negation between them, for the same reason a literal can:
-      -- the record is taken before the clausifier's own normalisation.
+      -- What the block leaves is what the step put in its place.
       let some refuted := asNegation (← instantiateMVars (← inferType negation))
         | throwError "expected the refutation of a quantifier's replacement to be \
             a negation"
       let stated ← instantiateMVars (← inferType body)
-      if ← sameFormula refuted stated then
-        return mkApp negation body
-      let some says ← sameUpToDoubleNegation stated refuted
-        | throwError "a skolemised block leaves{indentExpr stated}\nwhich is \
+      unless ← sameFormula refuted stated do
+        throwError "a skolemised block leaves{indentExpr stated}\nwhich is \
           not what the step put in its place:{indentExpr refuted}"
-      return mkApp negation (← mkAppM ``Iff.mp #[says, body])
+      return mkApp negation body
     else
       -- The quantifier is instantiated, at the variables the clause keeps.
       let args ← bound.mapM fun (v, sortName) => do

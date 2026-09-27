@@ -50,39 +50,6 @@ def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
     | return none
   return some (← symmLiteral τ lhs rhs negated h)
 
-/-- `a` with its double negations stripped. -/
-partial def stripped (a : Expr) : Expr :=
-  match a.not? with
-  | some inner =>
-    match inner.not? with
-    | some innermost => stripped innermost
-    | none => a
-  | none => a
-
-/-- `a` with its double negations stripped, and that it says the same. -/
-private partial def strippedOf (a : Expr) : ReconstructM (Expr × Expr) := do
-  if let some inner := a.not? then
-    if let some innermost := inner.not? then
-      let (stripped, proof) ← strippedOf innermost
-      return (stripped, ← mkAppM ``Iff.trans
-        #[← mkAppOptM ``Classical.not_not #[some innermost], proof])
-  return (a, ← mkAppOptM ``Iff.refl #[some a])
-
-/--
-`a ↔ b`, when the two differ only by double negations.
-
-Clausification records what it put in a clause before its own normalisation
-has unwrapped a negation into the sign it carries -- a negative literal under a
-negative sign, which the clause states as the positive one -- so the two can
-meet with a double negation between them. Which double negations is a matter
-of their shape, so the two are compared stripped of them, as they stand.
--/
-def sameUpToDoubleNegation (a b : Expr) : ReconstructM (Option Expr) := do
-  unless stripped a == stripped b do return none
-  let (_, saysA) ← strippedOf a
-  let (_, saysB) ← strippedOf b
-  return some (← mkAppM ``Iff.trans #[saysA, ← mkAppM ``Iff.symm #[saysB]])
-
 /--
 Whether ALASCA's unifier reads a term as arithmetic: a sum, a product, a
 difference, a negation or a numeral, rather than an uninterpreted symbol

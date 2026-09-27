@@ -12,7 +12,7 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 47
+private def headerWords : Nat := 48
 
 /-- A unit's record's length, in words. -/
 private def unitWidth : Nat := 38
@@ -64,6 +64,7 @@ private structure Layout where
   constraintLits : Nat
   satOrder : Nat
   introducedLits : Nat
+  genPlacements : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -150,7 +151,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 35
+private def version : UInt32 := 36
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -212,6 +213,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numConstraintLits := word 44
   let numSatOrder := word 45
   let numIntroducedLits := word 46
+  let numGenPlacements := word 47
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -233,7 +235,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let namings := satPremises + numSatPremises * 4
   let namingArgs := namings + numNamings * 4 * 4
   let genStates := namingArgs + numNamingArgs * 4
-  let genLits := genStates + numGenStates * 8 * 4
+  let genLits := genStates + numGenStates * 11 * 4
   let choices := genLits + numGenLits * 2 * 4
   let uses := choices + numChoices * 2 * 4
   let bindings := uses + numUses * 8 * 4
@@ -245,7 +247,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let constraintLits := literalFactors + numLiteralFactors * 4
   let satOrder := constraintLits + numConstraintLits * 4
   let introducedLits := satOrder + numSatOrder * 4
-  let strings := introducedLits + numIntroducedLits * 2 * 4
+  let genPlacements := introducedLits + numIntroducedLits * 2 * 4
+  let strings := genPlacements + numGenPlacements * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -388,15 +391,16 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
     range "naming arguments" (at_ namings 4 i 1) (at_ namings 4 i 2) numNamingArgs
     index "named formula" (at_ namings 4 i 3) numFormulas
   for i in [0:numGenStates] do
-    let parent := at_ genStates 8 i 0
+    let parent := at_ genStates 11 i 0
     optional "generalised clause parent" parent numGenStates
     -- The position replaced is one of the parent's signed subformulas.
-    let position := at_ genStates 8 i 1
+    let position := at_ genStates 11 i 1
     if parent != none && position != none then
-      index "replaced position" position (at_ genStates 8 parent 3)
-    range "generalised literals" (at_ genStates 8 i 2) (at_ genStates 8 i 3) numGenLits
-    range "replacement" (at_ genStates 8 i 4) (at_ genStates 8 i 5) numGenLits
-    range "generalised bindings" (at_ genStates 8 i 6) (at_ genStates 8 i 7) numBindings
+      index "replaced position" position (at_ genStates 11 parent 3)
+    range "generalised literals" (at_ genStates 11 i 2) (at_ genStates 11 i 3) numGenLits
+    range "replacement" (at_ genStates 11 i 4) (at_ genStates 11 i 5) numGenLits
+    range "generalised bindings" (at_ genStates 11 i 6) (at_ genStates 11 i 7) numBindings
+    range "generalised placements" (at_ genStates 11 i 9) (at_ genStates 11 i 10) numGenPlacements
   for i in [0:numGenLits] do index "generalised literal" (at_ genLits 2 i 0) numFormulas
   for i in [0:numChoices] do
     let conjunction := at_ choices 2 i 0
@@ -450,7 +454,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, constraintLits, satOrder, introducedLits, strings, stringsLen, proofText, numFunctions,
+      literalFactors, constraintLits, satOrder, introducedLits, genPlacements, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -1298,7 +1302,7 @@ end Unit
 namespace GenClause
 
 @[inline] private def field (c : GenClause) (off : Nat) : UInt32 :=
-  c.proof.field c.proof.layout.genStates 8 c.idx.toNat off
+  c.proof.field c.proof.layout.genStates 11 c.idx.toNat off
 
 private def lits (p : Proof) (first count : UInt32) :
     Array (Formula × Bool) :=
@@ -1335,6 +1339,41 @@ def bindings (c : GenClause) : Array (UInt32 × Term) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.bindings + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+/-- How a generalised clause state was reached. -/
+inductive GenHow where
+  /-- A clause clausification started from: the formula, or a definition. -/
+  | introduced
+  /-- A position replaced by `replacement`, the rest kept. -/
+  | extended
+  /-- A position rewritten in place: a quantifier's body, a let's contents. -/
+  | replaced
+  /-- A position rewritten in place by a name for what stood there. -/
+  | named
+deriving Inhabited, Repr, BEq
+
+/-- How the clause was reached. -/
+def how (c : GenClause) : GenHow :=
+  match c.field 8 with
+  | 0 => .introduced
+  | 1 => .extended
+  | 2 => .replaced
+  | _ => .named
+
+/--
+Where each literal the step pushed went in the clause, in the order it pushed
+them, and whether the push turned it, storing `¬f` at a sign as `f` at the
+other: a clause started from pushes `replacement`; one extended pushes its
+parent's literals with `replacement` in place of `position`; one replaced in
+place has one entry, for `position`.
+-/
+def placements (c : GenClause) : Array (Nat × Bool) :=
+  let p := c.proof
+  let first := c.field 9
+  let count := c.field 10
+  Array.ofFn (n := count.toNat) fun i =>
+    let w := readU32 p.data (p.layout.genPlacements + (first.toNat + i.val) * 4)
+    ((w &&& 0x7FFFFFFF).toNat, w &&& 0x80000000 != 0)
 
 end GenClause
 

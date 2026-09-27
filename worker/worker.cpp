@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    47 words, see `write`:
+ *   header    48 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -37,6 +37,8 @@
  *                  `placementEntries`
  *              43  how many words `literalFactors` holds, and 44
  *                  `constraintLits`
+ *              45  how many words `satOrder` holds, 46 how many pairs
+ *                  `introducedLits` and 47 how many words `genPlacements`
  *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
@@ -160,7 +162,8 @@
  *             what the name stands for
  *   namingArgs variable numbers, the arguments of a naming
  *   genStates {parent, position, firstLit, numLits, firstReplacement,
- *              numReplacements, firstBinding, numBindings}: one state of one of
+ *              numReplacements, firstBinding, numBindings, how,
+ *              firstPlacement, numPlacements}: one state of one of
  *             clausification's generalised clauses -- a disjunction of signed
  *             subformulas, together with what the variables it quantifies have
  *             been bound to. `parent` is the state this one was reached from
@@ -169,8 +172,15 @@
  *             from, which way round an equivalence was taken and what a
  *             quantifier was skolemised at are all here, and would otherwise
  *             have to be searched for
+ *             `how` says how the state was reached (`InferenceStore::gen*`):
+ *             0 = a clause clausification started from, 1 = a position
+ *             replaced by `replacement`, 2 = a position rewritten in place,
+ *             3 = one rewritten in place by a name
  *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
  *             clause and of what replaced a position in one
+ *   genPlacements where each literal a step pushed went in the clause it
+ *             made, in the order it pushed them, bit 31 set where the push
+ *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
  *   choices   {formula, argument} pairs: which argument of each conjunction
  *             the clausification of a clause went into. The other clausifier
  *             walks a formula in negation normal form, taking every disjunct
@@ -293,7 +303,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 35;
+const uint32_t VERSION = 36;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 38;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -628,7 +638,8 @@ struct Encoder {
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
-      placementEntries, literalFactors, constraintLits, introducedLits;
+      placementEntries, literalFactors, constraintLits, introducedLits,
+      genPlacements;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -908,8 +919,8 @@ struct Encoder {
     if (!state)
       return NONE;
 
-    uint32_t idx = static_cast<uint32_t>(genStates.size() / 8);
-    genStates.resize(genStates.size() + 8, 0);
+    uint32_t idx = static_cast<uint32_t>(genStates.size() / 11);
+    genStates.resize(genStates.size() + 11, 0);
     genSeen.emplace(id, idx);
 
     uint32_t parent = encodeGenClauseState(state->parent);
@@ -930,16 +941,23 @@ struct Encoder {
       bindings.push_back(encodeTerm(term));
     }
 
-    genStates[8 * idx + 0] = parent;
-    genStates[8 * idx + 1] =
+    uint32_t firstPlacement = static_cast<uint32_t>(genPlacements.size());
+    for (unsigned placed : iterTraits(state->placement.iterFifo()))
+      genPlacements.push_back(placed);
+
+    genStates[11 * idx + 0] = parent;
+    genStates[11 * idx + 1] =
       state->position == InferenceStore::positionNone ? NONE : state->position;
-    genStates[8 * idx + 2] = state->literals.isEmpty() ? NONE : firstLit;
-    genStates[8 * idx + 3] = static_cast<uint32_t>(state->literals.size());
-    genStates[8 * idx + 4] =
+    genStates[11 * idx + 2] = state->literals.isEmpty() ? NONE : firstLit;
+    genStates[11 * idx + 3] = static_cast<uint32_t>(state->literals.size());
+    genStates[11 * idx + 4] =
       state->replacement.isEmpty() ? NONE : firstReplacement;
-    genStates[8 * idx + 5] = static_cast<uint32_t>(state->replacement.size());
-    genStates[8 * idx + 6] = state->bindings.isEmpty() ? NONE : firstBinding;
-    genStates[8 * idx + 7] = static_cast<uint32_t>(state->bindings.size());
+    genStates[11 * idx + 5] = static_cast<uint32_t>(state->replacement.size());
+    genStates[11 * idx + 6] = state->bindings.isEmpty() ? NONE : firstBinding;
+    genStates[11 * idx + 7] = static_cast<uint32_t>(state->bindings.size());
+    genStates[11 * idx + 8] = state->how;
+    genStates[11 * idx + 9] = state->placement.isEmpty() ? NONE : firstPlacement;
+    genStates[11 * idx + 10] = static_cast<uint32_t>(state->placement.size());
     return idx;
   }
 
@@ -1697,7 +1715,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.satPremises.size()));
   putWord(buf, static_cast<uint32_t>(enc.namings.size() / 4));
   putWord(buf, static_cast<uint32_t>(enc.namingArgs.size()));
-  putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 8));
+  putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 11));
   putWord(buf, static_cast<uint32_t>(enc.genLits.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.uses.size() / 8));
@@ -1722,6 +1740,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
   putWord(buf, static_cast<uint32_t>(enc.introducedLits.size() / 2));
+  putWord(buf, static_cast<uint32_t>(enc.genPlacements.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1756,6 +1775,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.constraintLits);
   putWords(buf, enc.satOrder);
   putWords(buf, enc.introducedLits);
+  putWords(buf, enc.genPlacements);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 
