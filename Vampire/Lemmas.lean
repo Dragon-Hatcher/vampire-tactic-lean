@@ -110,15 +110,15 @@ A term is an integer where an equation says it is a floor: ALASCA states
 `isInt(w)` as `a = b` with `b - a = c (⌊…⌋ - w)`, for a positive `c` -- the
 floor the summand it orders biggest, the rest over its coefficient `w`.
 -/
-theorem int_of_eq {a b c w : α} {n : ℤ} (h : a = b) (hc : 0 < c) (he : b - a = c * ((n : α) - w)) :
+theorem isint_of_eq {a b c w : α} {n : ℤ} (h : a = b) (hc : 0 < c) (he : b - a = c * ((n : α) - w)) :
     ∃ m : ℤ, (m : α) = w :=
   ⟨n, by
     have h0 : c * ((n : α) - w) = 0 := by rw [← he, h]; ring
     have := (mul_eq_zero.mp h0).resolve_left hc.ne'
     linarith⟩
 
-/-- `int_of_eq`, for a floor of negative coefficient. -/
-theorem int_of_eq' {a b c w : α} {n : ℤ} (h : a = b) (hc : 0 < c) (he : b - a = c * (w - (n : α))) :
+/-- `isint_of_eq`, for a floor of negative coefficient. -/
+theorem isint_of_eq' {a b c w : α} {n : ℤ} (h : a = b) (hc : 0 < c) (he : b - a = c * (w - (n : α))) :
     ∃ m : ℤ, (m : α) = w :=
   ⟨n, by
     have h0 : c * (w - (n : α)) = 0 := by rw [← he, h]; ring
@@ -130,7 +130,7 @@ An integer's negation is one: the third premise states `isInt(-(j s + u))`
 where vampire's coefficient of `s` in it was negative, `j` being its absolute
 value.
 -/
-theorem ifm_int_neg {w : α} (h : ∃ n : ℤ, (n : α) = -w) : ∃ n : ℤ, (n : α) = w :=
+theorem isint_neg {w : α} (h : ∃ n : ℤ, (n : α) = -w) : ∃ n : ℤ, (n : α) = w :=
   let ⟨n, hn⟩ := h
   ⟨-n, by push_cast; rw [hn]; ring⟩
 
@@ -142,7 +142,7 @@ theorem ifm_int_neg {w : α} (h : ∃ n : ℤ, (n : α) = -w) : ∃ n : ℤ, (n 
 Floor elimination: `k ⌊s⌋ + r = 0` is false where `-r / k` is not an integer,
 which is that it lies strictly between one, `m`, and the next.
 -/
-theorem floor_elim {a b k r : α} {n : ℤ} (m : ℤ) (h : a = b) (he : b - a = r + k * (n : α))
+theorem fe_elim {a b k r : α} {n : ℤ} (m : ℤ) (h : a = b) (he : b - a = r + k * (n : α))
     (hk : k ≠ 0) (hlo : (m : α) < -r / k) (hhi : -r / k < (m : α) + 1) : False := by
   have hn : (n : α) = -r / k := by
     rw [eq_div_iff hk]
@@ -154,7 +154,7 @@ theorem floor_elim {a b k r : α} {n : ℤ} (m : ℤ) (h : a = b) (he : b - a = 
   omega
 
 /-- Coherence normalization: a term equal to an integer is its own floor. -/
-theorem coherence_normalization {t : α} (h : ∃ n : ℤ, (n : α) = t) : t = ((⌊t⌋ : ℤ) : α) := by
+theorem coh_normalize {t : α} (h : ∃ n : ℤ, (n : α) = t) : t = ((⌊t⌋ : ℤ) : α) := by
   obtain ⟨n, rfl⟩ := h
   simp
 
@@ -162,7 +162,7 @@ theorem coherence_normalization {t : α} (h : ∃ n : ℤ, (n : α) = t) : t = (
 Coherence: a floor is unchanged by taking out an integer multiple `i` of an
 integer `w`, `⌊X⌋ = ⌊X - i w⌋ + i w`; `Y` is `X - i w` as the step writes it.
 -/
-theorem coherence {X Y I w : α} (i : ℤ) (hI : (i : α) = I) (hw : ∃ n : ℤ, (n : α) = w)
+theorem coh_rewrite {X Y I w : α} (i : ℤ) (hI : (i : α) = I) (hw : ∃ n : ℤ, (n : α) = w)
     (hY : Y = X - I * w) : ((⌊X⌋ : ℤ) : α) = ((⌊Y⌋ : ℤ) : α) + I * w := by
   obtain ⟨n, rfl⟩ := hw
   subst hI

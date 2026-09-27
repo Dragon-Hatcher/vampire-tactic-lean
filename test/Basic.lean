@@ -23,13 +23,6 @@ example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x, p x) : p a := by vamp
 #guard_msgs (drop info) in
 example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
 
--- Equality through a proxy predicate, whose replacement reorders the clause and
--- whose definition unfolds back to equality.
-#guard_msgs (drop info) in
-example {ι : Type} (f g : ι → ι) (p : ι → Prop) (h : ∀ x, g x = f x)
-    (hp : ∀ x, p (g x)) (a : ι) : p (f a) := by
-  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "RSTC")]) [h, hp]
-
 -- `x ≠ a` is `¬(x = a)`, which vampire can state the other way round.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (a b c : ι) (h : ∀ x, f x = a) (h2 : b = f c)

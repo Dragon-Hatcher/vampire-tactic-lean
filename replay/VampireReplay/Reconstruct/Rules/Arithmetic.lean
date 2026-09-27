@@ -347,8 +347,8 @@ private def integerOf (fact w : Expr) : ReconstructM (Option Expr) := do
   if net.num == 0 then return none
   let c ← ratNumeral τ (if 0 < net.num then net else -net)
   let (inner, lemma_) ← if 0 < net.num then
-      pure (← mkAppM ``HSub.hSub #[floor, w], `Vampire.Lemmas.int_of_eq)
-    else pure (← mkAppM ``HSub.hSub #[w, floor], `Vampire.Lemmas.int_of_eq')
+      pure (← mkAppM ``HSub.hSub #[floor, w], `Vampire.Lemmas.isint_of_eq)
+    else pure (← mkAppM ``HSub.hSub #[w, floor], `Vampire.Lemmas.isint_of_eq')
   let some he ← ringEqual difference (← mkAppM ``HMul.hMul #[c, inner]) | return none
   return some (← mkAppM lemma_ #[fact, ← positive c, he])
 
@@ -359,7 +359,7 @@ vampire's coefficient of `s` was negative, `j` being its absolute value.
 private def integerAsRecorded (use : PremiseUse) (fact w : Expr) : ReconstructM (Option Expr) := do
   unless use.negated do return ← integerOf fact w
   let some h ← integerOf fact (← mkAppM ``Neg.neg #[w]) | return none
-  return some (← mkAppM `Vampire.Lemmas.ifm_int_neg #[h])
+  return some (← mkAppM `Vampire.Lemmas.isint_neg #[h])
 
 /--
 `leaf` in each case of the step's premises: each premise holds, so one of its
@@ -523,7 +523,7 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
 
 /--
 ALASCA's floor elimination: a literal `k ⌊s⌋ + r = 0` dropped where `-r / k` is
-no integer, which makes it false. `Vampire.Lemmas.floor_elim`, at the integer
+no integer, which makes it false. `Vampire.Lemmas.fe_elim`, at the integer
 below `-r / k`, with that `-r / k` lies between it and the next evaluated.
 -/
 def floorElimination (step : Step) : ReconstructM Expr := do
@@ -574,7 +574,7 @@ def floorElimination (step : Step) : ReconstructM Expr := do
         let hk ← numerically (← mkAppM ``Ne #[kE, ← wholeNumeral τ 0])
         let hlo ← numerically (← mkAppM ``LT.lt #[mCast, v])
         let hhi ← numerically (← mkAppM ``LT.lt #[v, ← mkAppM ``HAdd.hAdd #[mCast, ← wholeNumeral τ 1]])
-        mkFalseElim target (← mkAppM `Vampire.Lemmas.floor_elim #[mE, h, he, hk, hlo, hhi])
+        mkFalseElim target (← mkAppM `Vampire.Lemmas.fe_elim #[mE, h, he, hk, hlo, hhi])
 
 /--
 ALASCA's coherence normalization:
@@ -584,7 +584,7 @@ ALASCA's coherence normalization:
     C ∨ t = ⌊t⌋
 
 `t` is an integer, being a floor (`integerOf`), and so its own floor:
-`Vampire.Lemmas.coherence_normalization`.
+`Vampire.Lemmas.coh_normalize`.
 -/
 def coherenceNormalization (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
@@ -609,7 +609,7 @@ def coherenceNormalization (step : Step) : ReconstructM Expr := do
         let some isInt ← integerOf h t
           | throwError "step {step.unit.number}: its premise's literal\
               {indentExpr (← inferType h)}\ndoes not say{indentExpr t}\nis an integer"
-        let p ← mkAppM `Vampire.Lemmas.coherence_normalization #[isInt]
+        let p ← mkAppM `Vampire.Lemmas.coh_normalize #[isInt]
         return into.inject i (← if flipped then mkEqSymm p else pure p)
 
 /--
@@ -638,7 +638,7 @@ ALASCA's coherence:
     ──────────────────────────────────────
     C ∨ D ∨ L[⌊k s + t - i (j s + u)⌋ + i (j s + u)]
 
-for an integer `i`. `Vampire.Lemmas.coherence` at the terms the worker
+for an integer `i`. `Vampire.Lemmas.coh_rewrite` at the terms the worker
 recorded -- `j s + u` and `i` of the first premise, the floor rewritten of the
 second -- and the literal rewritten by it where it stands.
 -/
@@ -690,7 +690,7 @@ def coherence (step : Step) : ReconstructM Expr := do
         let some same ← ringEqual (← mkAppM ``HAdd.hAdd #[fl, Iw]) new
           | throwError "step {step.unit.number}:{indentExpr new}\nis not{indentExpr fl} plus \
               {indentExpr Iw}"
-        let eq ← mkEqTrans (← mkAppM `Vampire.Lemmas.coherence #[iE, hI, hw, hY]) same
+        let eq ← mkEqTrans (← mkAppM `Vampire.Lemmas.coh_rewrite #[iE, hI, hw, hY]) same
         return into.inject k (← mkEqMP (← mkCongrArg motive eq) facts[1]!)
 
 

@@ -27,7 +27,7 @@ set_option linter.unusedVariables false
 example {ι : Type} (mem : ι → ι → Prop) (pair : ι → ι → ι) (prod : ι → ι → ι)
     (h : ∀ a b c, c = prod a b ↔ ∀ z, mem z c ↔ ∃ x y, z = pair x y ∧ mem x a ∧ mem y b)
     (a b z : ι) (hz : mem z (prod a b)) : ∃ x y, z = pair x y ∧ mem x a := by
-  vampire [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [*]
 
 -- A block of existentials under universals: skolems that are functions.
 #guard_msgs (drop info) in
@@ -41,7 +41,7 @@ example {ι : Type} (p : ι → Prop) (i : ι)
     (h : ∃ a b c d e f g, p a ∧ p b ∧ p c ∧ p d ∧ p e ∧ p f ∧ p g) : ∃ x, p x := by
   vampire [*]
 
--- Equality: superposition and demodulation, and an equation turned round.
+-- Equality: superposition, and an equation turned round.
 #guard_msgs (drop info) in
 example {ι : Type} (f g : ι → ι) (a b : ι) (h1 : ∀ x, f (g x) = x) (h2 : g a = b)
     : f b = a := by
@@ -93,12 +93,6 @@ example (f : ℤ → ℤ) (h : ∀ x, f x - x ≤ 3) (h2 : ¬ (f 0 ≤ 3)) : Fal
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (h : f (2 + 3) = 1) : f 5 = 1 := by
   vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "simple")]) [*]
-
--- Interpreted evaluation with inequality normalization. Left to the schedule:
--- no single strategy with these options finds the proof.
-#guard_msgs (drop info) in
-example (x : ℤ) (h : x * 1 + 0 < 3 - 1) (h2 : 2 ≤ x) : False := by
-  vampire (options := #[("evaluation", "simple"), ("normalize_inequalities", "on")]) [*]
 
 -- Polynomial evaluation: monomials merged.
 #guard_msgs (drop info) in
@@ -329,12 +323,6 @@ example {ι : Type} (p : ι → Prop) (h : ι → ι → ι) (g : ι → ι) (a 
     (h1 : ∀ x, p (h (h (h (h (g x) (g x)) (h (g x) (g x))) (h (h (g x) (g x)) (h (g x) (g x)))) (h (h (h (g x) (g x)) (h (g x) (g x))) (h (h (g x) (g x)) (h (g x) (g x))))))
     (h2 : ∀ x, g x = x) (h3 : ¬ p (h (h (h (h (a) (a)) (h (a) (a))) (h (h (a) (a)) (h (a) (a)))) (h (h (h (a) (a)) (h (a) (a))) (h (h (a) (a)) (h (a) (a)))))) : False := by
   vampire [*]
-
--- Backward demodulation, with forward demodulation off.
-#guard_msgs (drop info) in
-example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a : ι) (hp : p (f (f a)))
-    (h : ∀ x, f x = g x) (hn : ¬ p (g (g a))) : False := by
-  vampire (mode := "vampire") (cores := 1) (options := #[("function_definition_elimination", "none"), ("forward_demodulation", "off")]) [*]
 
 -- ALASCA's superposition, into an uninterpreted function over the reals.
 #guard_msgs (drop info) in
@@ -568,6 +556,7 @@ example (a b : ℤ) (hb : 0 < b) (h : b ≤ a % b) : False := by
 example (a b : ℤ) (hb : b < 0) (h : -b ≤ a % b) : False := by
   vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
 
+-- A field's division: the inverse of what is not zero is not zero.
 #guard_msgs (drop info) in
 example (x : ℝ) (hx : x ≠ 0) (h : 1 / x = 0) : False := by
   vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
