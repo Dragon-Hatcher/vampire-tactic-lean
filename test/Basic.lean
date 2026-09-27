@@ -23,12 +23,12 @@ example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x, p x) : p a := by vamp
 #guard_msgs (drop info) in
 example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
 
--- Equality through a proxy predicate, whose congruence axiom says a predicate
--- holds of equal things alike; and the replacement reorders the clause.
+-- Equality through a proxy predicate, whose replacement reorders the clause and
+-- whose definition unfolds back to equality.
 #guard_msgs (drop info) in
 example {ι : Type} (f g : ι → ι) (p : ι → Prop) (h : ∀ x, g x = f x)
     (hp : ∀ x, p (g x)) (a : ι) : p (f a) := by
-  vampire (options := #[("equality_proxy", "RSTC")]) [h, hp]
+  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "RSTC")]) [h, hp]
 
 -- `x ≠ a` is `¬(x = a)`, which vampire can state the other way round.
 #guard_msgs (drop info) in
@@ -41,14 +41,14 @@ example {ι : Type} (f : ι → ι) (a b c : ι) (h : ∀ x, f x = a) (h2 : b = 
 example {ι : Type} (p s : ι → Prop) (r q : ι → ι → Prop) (a : ι)
     (h : ∀ x y z, p x ∨ r x y ∨ q y z ∨ s z) (h1 : ∀ x, ¬ p x) (h2 : ∀ y z, ¬ q y z)
     (h3 : ∀ x y, ¬ r x y) (h4 : ∀ z, ¬ s z) : False := by
-  vampire (options := #[("general_splitting", "on")]) [h, h1, h2, h3, h4]
+  vampire (mode := "vampire") (cores := 1) (options := #[("general_splitting", "on")]) [h, h1, h2, h3, h4]
 
 -- Inner rewriting: a clause's own disequality rewrites its other literals.
 #guard_msgs (drop info) in
 example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a b : ι)
     (h : f a ≠ b ∨ p (g (f a)) ∨ p (f a)) (h1 : ¬ p (g b)) (h2 : ¬ p b)
     (h3 : f a = b) : False := by
-  vampire (options := #[("inner_rewriting", "on"), ("forward_demodulation", "off")])
+  vampire (mode := "vampire") (cores := 1) (options := #[("inner_rewriting", "on"), ("forward_demodulation", "off")])
     [h, h1, h2, h3]
 
 -- And under a variable, where the rewritten term is every occurrence of `f X`
@@ -57,13 +57,13 @@ example {ι : Type} (f g : ι → ι) (p : ι → Prop) (a b : ι)
 example {ι : Type} (f g : ι → ι) (c : ι) (p : ι → Prop)
     (h1 : ∀ x, f x ≠ c ∨ p (g (f x))) (h2 : ∀ x, ¬ p (g x)) (h3 : ∀ x, f x = c ∨ p x)
     (h4 : ∀ x, ¬ p x) : False := by
-  vampire (options := #[("inner_rewriting", "on")]) [h1, h2, h3, h4]
+  vampire (mode := "vampire") (cores := 1) (options := #[("inner_rewriting", "on")]) [h1, h2, h3, h4]
 
 -- Subsumption equality resolution: a disequality whose sides unify, dropped.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (p : ι → ι → Prop) (a : ι)
     (h : ∀ x y z, f x ≠ f y ∨ p z x) (h1 : ∀ x, ¬ p x a) : False := by
-  vampire (options := #[("subsumption_equality_resolution", "on")]) [h, h1]
+  vampire (mode := "vampire") (cores := 1) (options := #[("subsumption_equality_resolution", "on")]) [h, h1]
 
 -- Truth values absorbed out of a formula, by core's own absorption lemmas.
 #guard_msgs (drop info) in
@@ -72,17 +72,33 @@ example (p q : Prop)
     (h2 : ¬ q ∨ (¬ p ∧ True)) : False := by
   vampire [h, h2]
 
+-- A negation under an equivalence, turned into a sign: by the clausifier the
+-- goal is stated with, and by the other one.
+#guard_msgs (drop info) in
+example (a b : Prop) (h : ¬(a ↔ ¬b)) (ha : a) (hb : ¬b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "off")]) [*]
+#guard_msgs (drop info) in
+example (a b : Prop) (h : ¬(a ↔ ¬b)) (ha : a) (hb : ¬b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [*]
+
+-- A function defined right to left, unfolded where it is used.
+#guard_msgs (drop info) in
+example {ι : Type} (f g : ι → ι) (a : ι) (h : ∀ x, g (g x) = f x) (h2 : f a ≠ g (g a)) :
+    False := by
+  vampire (mode := "vampire") (cores := 1)
+    (options := #[("function_definition_elimination", "all")]) [*]
+
 -- The other clausifier, through negations stacked over quantifiers, junctions
 -- and equivalences.
 #guard_msgs (drop info) in
 example {ι : Type} (p q : ι → Prop) (r : Prop) (a : ι)
     (h : ¬¬(∀ x, ¬¬p x ∨ ¬¬(q x ↔ ¬r))) (h2 : ¬ ∃ x, ¬¬ p x) (h3 : ¬¬ (∀ x, q x))
     (h4 : ¬¬ r) : False := by
-  vampire (options := #[("newcnf", "on")]) [h, h2, h3, h4]
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [h, h2, h3, h4]
 
 #guard_msgs (drop info) in
 example (a b c : Prop) (h : ¬¬(a ↔ ¬(b ↔ ¬¬c))) (ha : a) (hb : b) (hc : c) : False := by
-  vampire (options := #[("newcnf", "on")]) [h, ha, hb, hc]
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [h, ha, hb, hc]
 
 -- A term-level if-then-else, which vampire does not read: lifted out into a
 -- function defined by its two cases, under a binder and at the top.

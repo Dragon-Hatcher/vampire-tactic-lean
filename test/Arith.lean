@@ -40,7 +40,7 @@ example (x : ℚ) (h : 3 * x = 12) : x = 4 := by vampire [h]
 #guard_msgs (drop info) in
 example (x y : ℤ) (f : ℤ → ℤ) (p : ℤ → Prop) (h1 : x = y ∨ p x) (h3 : ¬ p x)
     (h5 : f (x + x) ≠ f (y + y) ∨ p y) (h4 : ¬ p y) : False := by
-  vampire (options := #[("avatar_congruence_closure", "on"),
+  vampire (mode := "vampire") (cores := 1) (options := #[("avatar_congruence_closure", "on"),
     ("forward_demodulation", "off"), ("backward_demodulation", "off"),
     ("superposition", "off")]) [h1, h3, h4, h5]
 

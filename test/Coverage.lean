@@ -47,11 +47,12 @@ example {ι : Type} (f g : ι → ι) (a b : ι) (h1 : ∀ x, f (g x) = x) (h2 :
     : f b = a := by
   vampire [*]
 
--- AVATAR: a disjunction of ground facts is split into components.
+-- AVATAR: a disjunction of ground facts is split into components, with
+-- subsumption resolution off, which would close it first.
 #guard_msgs (drop info) in
 example (p q r s : Prop) (h1 : p ∨ q) (h2 : r ∨ s) (h3 : p → r → False) (h4 : p → s → False)
     (h5 : q → r → False) (h6 : q → s → False) : False := by
-  vampire [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("forward_subsumption_resolution", "off")]) [*]
 
 -- AVATAR's congruence closure: the solver's theory conflicts name ground
 -- literals nothing in the proof splits off, whose definitions have to be
@@ -91,9 +92,10 @@ example (f : ℤ → ℤ) (h : ∀ x, f x - x ≤ 3) (h2 : ¬ (f 0 ≤ 3)) : Fal
 -- Interpreted evaluation, the default.
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (h : f (2 + 3) = 1) : f 5 = 1 := by
-  vampire (options := #[("evaluation", "simple")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "simple")]) [*]
 
--- Interpreted evaluation with inequality normalization.
+-- Interpreted evaluation with inequality normalization. Left to the schedule:
+-- no single strategy with these options finds the proof.
 #guard_msgs (drop info) in
 example (x : ℤ) (h : x * 1 + 0 < 3 - 1) (h2 : 2 ≤ x) : False := by
   vampire (options := #[("evaluation", "simple"), ("normalize_inequalities", "on")]) [*]
@@ -101,31 +103,31 @@ example (x : ℤ) (h : x * 1 + 0 < 3 - 1) (h2 : 2 ≤ x) : False := by
 -- Polynomial evaluation: monomials merged.
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (x : ℤ) (h : f (x + x + 2 * 3) = 0) : f (2 * x + 6) = 0 := by
-  vampire (options := #[("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "force")]) [*]
 
 -- Polynomial evaluation: a floor's integer part taken out.
 #guard_msgs (drop info) in
 example (f : ℝ → ℝ) (x : ℝ) (h : f (⌊x + 1⌋) = 0) : f (⌊x⌋ + 1) = 0 := by
-  vampire (options := #[("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "force")]) [*]
 
 -- Polynomial evaluation: integer division and remainder of numerals.
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (h : f (7 / 2 + 7 % 2) = 0) : f 4 = 0 := by
-  vampire (options := #[("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "force")]) [*]
 
 -- Polynomial evaluation leaves a literal it changes nothing in as written, not
 -- in normal form, while it evaluates the clause's other literal.
 #guard_msgs (drop info) in
 example (x y u z w : ℝ) (h : 27 = 36 * x + 19 * y + 24 * u ∨ (-3) * z + 17 * z < w)
     (h1 : 27 ≠ 36 * x + 19 * y + 24 * u) (h2 : w ≤ 14 * z) : False := by
-  vampire (options := #[("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "force")]) [*]
 
 -- Polynomial evaluation refutes a literal of numerals written with `$lin_mul`:
 -- `9/10 < x - y` evaluated to `x + -1·y`, and `y` rewritten into `x`.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ℝ) (a : ι) (p : Prop) (x y : ℝ) (hp : ¬p)
     (h1 : 9/10 < 2 * x - y - x ∨ p) (h2 : f a = x) (h3 : f a = y) : False := by
-  vampire (options := #[("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "force")]) [*]
 
 -- Pushing unary minus.
 #guard_msgs (drop info) in
@@ -135,12 +137,12 @@ example (f : ℤ → ℤ) (x y : ℤ) (h : f (-(x + -y)) = 0) : f (-x + y) = 0 :
 -- Cancellation.
 #guard_msgs (drop info) in
 example (x y : ℤ) (h : x + y < y + 3) (h2 : 3 ≤ x) : False := by
-  vampire (options := #[("cancellation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("cancellation", "force")]) [*]
 
 -- Cancellation leaves a literal that compares no numbers as it is.
 #guard_msgs (drop info) in
 example (p : Prop) (x y : ℝ) (hp : ¬p) (h : p ∨ x + 3 < y + 3) (h2 : y ≤ x) : False := by
-  vampire (options := #[("cancellation", "force"), ("evaluation", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("cancellation", "force"), ("evaluation", "force")]) [*]
 
 -- ALASCA normalization: a comparison scaled by the gcd of its coefficients.
 #guard_msgs (drop info) in
@@ -191,41 +193,51 @@ example (x : ℝ) : x < ⌊x⌋ + 1 := by vampire
 #guard_msgs (drop info) in
 example {ι : Type} (p q : ι → Prop) (a : ι) (h : ∀ x y, p x ∨ q y) (hp : ∀ x, ¬ p x)
     (hq : ∀ y, ¬ q y) : False := by
-  vampire (mode := "vampire") (cores := 1) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("forward_subsumption_resolution", "off")]) [*]
+
+-- A component that is a negative ground literal, which AVATAR names by its
+-- complement.
+#guard_msgs (drop info) in
+example {ι : Type} (p q : ι → Prop) (a : ι) (h : ∀ y, ¬ p a ∨ q y) (hp : p a)
+    (hq : ∀ y, ¬ q y) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("forward_subsumption_resolution", "off")]) [*]
 
 -- Factoring, with AVATAR off so that the clause is not split instead.
 #guard_msgs (drop info) in
 example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x y, p x ∨ p y) (hp : ∀ x, ¬ p x) : False := by
-  vampire (mode := "vampire") (cores := 1) (options := #[("avatar", "off")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("avatar", "off"), ("forward_subsumption_resolution", "off")]) [*]
 
--- Equality as a proxy predicate, with its axioms.
+-- Equality as a proxy predicate, with each set of its axioms: reflexivity,
+-- symmetry, transitivity and congruence.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (a b : ι) (h1 : a = b) (h2 : f a ≠ f b) : False := by
-  vampire (options := #[("equality_proxy", "RSTC")]) [*]
-
--- General splitting names part of a clause.
+  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "R")]) [*]
 #guard_msgs (drop info) in
-example {ι : Type} (p q r : ι → ι → Prop) (a : ι)
-    (h : ∀ x y z, p x y ∨ q y z ∨ r z x) (hp : ∀ x y, ¬ p x y) (hq : ∀ x y, ¬ q x y)
-    (hr : ∀ x y, ¬ r x y) : False := by
-  vampire (mode := "vampire") (cores := 1) (options := #[("general_splitting", "on")]) [*]
+example {ι : Type} (a b : ι) (h1 : a = b) (h2 : b ≠ a) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "RS")]) [*]
+#guard_msgs (drop info) in
+example {ι : Type} (a b c : ι) (h1 : a = b) (h2 : b = c) (h3 : a ≠ c) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "RST")]) [*]
+#guard_msgs (drop info) in
+example {ι : Type} (f : ι → ι) (a b : ι) (h1 : a = b) (h2 : f a ≠ f b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("equality_proxy", "RSTC")]) [*]
 
 -- Inequality splitting names a ground side of a disequality.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (a b : ι) (h1 : ∀ x, f x ≠ a) (h2 : f b = a) : False := by
-  vampire (options := #[("inequality_splitting", "1")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("inequality_splitting", "1")]) [*]
 
 -- Condensation.
 #guard_msgs (drop info) in
 example {ι : Type} (p : ι → ι → Prop) (a : ι) (h : ∀ x y, p x a ∨ p y a) (hp : ∀ x, ¬ p x a) :
     False := by
-  vampire (options := #[("condensation", "on"), ("avatar", "off")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("condensation", "on"), ("avatar", "off")]) [*]
 
 -- Unit-resulting resolution.
 #guard_msgs (drop info) in
 example {ι : Type} (p q r : ι → Prop) (a : ι) (h : ∀ x, ¬ p x ∨ ¬ q x ∨ r x) (hp : p a)
     (hq : q a) (hr : ¬ r a) : False := by
-  vampire (options := #[("unit_resulting_resolution", "on")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("unit_resulting_resolution", "on")]) [*]
 
 -- Pure predicate removal: `r` occurs only positively, so it is replaced by
 -- `True`, which the formula follows to by monotonicity.
@@ -265,12 +277,7 @@ example
 -- Arithmetic subterm generalization: a variable standing only under `x - y`.
 #guard_msgs (drop info) in
 example (p : ℤ → Prop) (h : ∀ x y : ℤ, p (x - y)) (hn : ¬ p 5) : False := by
-  vampire (options := #[("arithmetic_subterm_generalizations", "force")]) [*]
-
--- Gaussian variable elimination.
-#guard_msgs (drop info) in
-example (p : ℤ → Prop) (h : ∀ x : ℤ, x ≠ 5 ∨ p x) (hn : ¬ p 5) : False := by
-  vampire (mode := "vampire") (cores := 1) (options := #[("gaussian_variable_elimination", "force")]) [*]
+  vampire (mode := "vampire") (cores := 1) (options := #[("arithmetic_subterm_generalizations", "force")]) [*]
 
 -- The order's theory axioms: transitivity and totality.
 #guard_msgs (drop info) in
@@ -309,7 +316,7 @@ example {A B C D : Type} (R : B → Prop) (m : C → B) (k : D → B → C) (g :
 example {ι : Type} (f : ℤ → ι) (p : ι → Prop) (b : ι) (q r : Prop) (a : ℤ) (h1 : f 1 = b ∨ q)
     (h2 : p (f (a + 2)) ∨ r) (h3 : ¬ p b) (h4 : ¬ q) (h5 : ¬ r) (ha : a + 2 ≤ 1)
     (hb : 1 ≤ a + 2) : False := by
-  vampire (options := #[("unification_with_abstraction", "all"),
+  vampire (mode := "vampire") (cores := 1) (options := #[("unification_with_abstraction", "all"),
     ("abstracting_linear_arithmetic_superposition_calculus", "off"),
     ("forward_demodulation", "off"), ("backward_demodulation", "off"),
     ("forward_subsumption_resolution", "off"), ("avatar", "off"),
@@ -525,6 +532,16 @@ example (a b : ℝ) (h1 : a ≥ b) (h2 : a < b) : False := by
 /-! Theory axioms, with evaluation off so that vampire has to use them: each
 goal denies what one axiom states, and each axiom is replayed as its
 `Vampire.Lemmas.tha_*` lemma at the clause's variables. -/
+
+-- Nothing lies strictly between an integer and the next.
+#guard_msgs (drop info) in
+example (x y : ℤ) (h1 : x < y) (h2 : y < x + 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+-- Distributivity.
+#guard_msgs (drop info) in
+example (x y z : ℤ) (h : x * (y + z) ≠ x * y + x * z) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
 
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (a : ℤ) (h : f (a + 0) ≠ f a) : False := by
