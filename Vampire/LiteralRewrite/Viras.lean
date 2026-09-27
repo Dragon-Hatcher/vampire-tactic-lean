@@ -1,4 +1,5 @@
 import Vampire.LiteralRewrite.Polynomial
+import Vampire.Lemmas
 
 /-!
 A port of ALASCA's VIRAS quantifier elimination (`Inferences/ALASCA/VIRAS.cpp`
@@ -271,7 +272,7 @@ private def pointFor (x τ : Expr) (complements : Array (Option Complement))
           let half ← mkAppM ``HMul.hMul #[← numeralOf τ (1/2),
             ← mkAppM ``HMul.hMul #[← mkAppM ``Inv.inv #[cE], st]]
           let hc ← byNumerals (← mkAppM ``LT.lt #[cE, zero])
-          let positive ← mkAppM `Vampire.Lemmas.viras_half_pos #[hc, denials[i]!]
+          let positive ← mkAppM ``Vampire.Lemmas.viras_half_pos #[hc, denials[i]!]
           pending := pending.push (i, bounds.size, fun δ hδ hle => pure (.falling δ st hδ hle))
           bounds := bounds.push half
           positives := positives.push positive
@@ -285,7 +286,7 @@ private def pointFor (x τ : Expr) (complements : Array (Option Complement))
         let positive ← byCasesOn cond (← mkAppM ``LT.lt #[zero, e])
           (fun hr => do
             let is ← mkAppOptM ``if_pos #[some cond, some inst, some hr, some τ, some half, some one]
-            mkAppM ``lt_of_lt_of_eq #[← mkAppM `Vampire.Lemmas.viras_half_of_pos #[hr],
+            mkAppM ``lt_of_lt_of_eq #[← mkAppM ``Vampire.Lemmas.viras_half_of_pos #[hr],
               ← mkEqSymm is])
           (fun hr => do
             let is ← mkAppOptM ``if_neg #[some cond, some inst, some hr, some τ, some half, some one]
@@ -375,27 +376,26 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr)
         -- The literal's term at the point, and how the literal states it.
         let (sp, kind, h) ← literalTerm literal h
         let cE ← numeralOf τ c.slope
-        let lemma_ (n : String) : Name := (`Vampire.Lemmas).str n
         match fact, vt with
         | .below p z hp, _ =>
           let hs ← ringEq! sp (← mkAppM ``Neg.neg #[← mkAppM ``HMul.hMul #[cE, ← mkAppM ``HSub.hSub #[p, z]]])
           match kind with
-          | .le => mkAppM (lemma_ "viras_below_le") #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
-          | .lt => mkAppM (lemma_ "viras_below_lt") #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
-          | .eq => mkAppM (lemma_ "viras_below_eq") #[← byNumerals (mkNot (← mkEq cE (← wholeOf τ 0))), hp, hs, h]
+          | .le => mkAppM ``Vampire.Lemmas.viras_below_le #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
+          | .lt => mkAppM ``Vampire.Lemmas.viras_below_lt #[← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0]), hp, hs, h]
+          | .eq => mkAppM ``Vampire.Lemmas.viras_below_eq #[← byNumerals (mkNot (← mkEq cE (← wholeOf τ 0))), hp, hs, h]
         | .rising δ st hδ, _ =>
           let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
           let hc ← byNumerals (← mkAppM ``LT.lt #[← wholeOf τ 0, cE])
           match kind with
-          | .le => mkAppM (lemma_ "viras_above_rising_le") #[hc, hδ, hs, denial, h]
-          | .lt => mkAppM (lemma_ "viras_above_rising_lt") #[hc, hδ, hs, denial, h]
+          | .le => mkAppM ``Vampire.Lemmas.viras_above_rising_le #[hc, hδ, hs, denial, h]
+          | .lt => mkAppM ``Vampire.Lemmas.viras_above_rising_lt #[hc, hδ, hs, denial, h]
           | .eq => throwError "VIRAS: an equation's complement rising just above its term"
         | .falling δ st hδ hle, _ =>
           let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
           let hc ← byNumerals (← mkAppM ``LT.lt #[cE, ← wholeOf τ 0])
           match kind with
-          | .le => mkAppM (lemma_ "viras_above_falling_le") #[hc, hδ, hle, hs, denial, h]
-          | .lt => mkAppM (lemma_ "viras_above_falling_lt") #[hc, hδ, hle, hs, denial, h]
+          | .le => mkAppM ``Vampire.Lemmas.viras_above_falling_le #[hc, hδ, hle, hs, denial, h]
+          | .lt => mkAppM ``Vampire.Lemmas.viras_above_falling_lt #[hc, hδ, hle, hs, denial, h]
           | .eq => throwError "VIRAS: an equation's complement falling just above its term"
         | .apart δ st hδ cond e half, _ =>
           let hs ← ringEq! sp (← mkAppM ``HSub.hSub #[st, ← mkAppM ``HMul.hMul #[cE, δ]])
@@ -407,8 +407,8 @@ def refute (clauseAt premise : Expr) (n : Nat) (images denials : Array Expr)
             (fun hr => do
               let is ← mkAppOptM ``if_pos #[some cond, some inst, some hr, some τ, some half, some one]
               let hle ← mkAppM ``le_of_le_of_eq #[e, is]
-              mkAppM (lemma_ "viras_above_eq_far") #[hc, hδ, hle, hr, hs, h])
-            (fun hr => mkAppM (lemma_ "viras_above_eq_near") #[hc, hδ, hr, hs, h])
+              mkAppM ``Vampire.Lemmas.viras_above_eq_far #[hc, hδ, hle, hr, hs, h])
+            (fun hr => mkAppM ``Vampire.Lemmas.viras_above_eq_near #[hc, hδ, hr, hs, h])
     let refuted ← withLocalDeclD `h clauseAtPoint fun h => do
       mkLambdaFVars #[h] (← elimOr clauseAtPoint n h refuteLiteral)
     return mkApp refuted premiseAtPoint

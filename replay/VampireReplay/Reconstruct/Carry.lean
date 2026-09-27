@@ -109,10 +109,9 @@ def carryRewritten (source target proof : Expr) (into : Into) (placement : Place
 where
   /-- An equality literal the other way round. -/
   turnedRound (e : Expr) : ReconstructM Expr := do
-    let some (τ, a, b, negated) := equalityLiteral? e
+    let some (_, a, b, negated) := equalityLiteral? e
       | throwError "the worker recorded{indentExpr e}\nas turned round, but it is no equation"
     let eq ← mkEq b a
-    let _ := τ
     return if negated then mkNot eq else eq
 
 /--

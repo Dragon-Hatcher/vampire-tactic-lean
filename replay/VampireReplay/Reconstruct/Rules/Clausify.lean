@@ -1,5 +1,4 @@
 import VampireReplay.Reconstruct.Basic
-import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Clausification.
@@ -499,7 +498,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
       | throwError "a quantifier replaced by nothing"
     if skolemises connective sign then
       -- Which symbols this occurrence of the quantifier introduced, read off
-      -- the clause it left its variables bound in, as `registerAlong` reads
+      -- the clause it left its variables bound in, as `skolemsOfStep` reads
       -- them: the step records every occurrence's under the one variable.
       let occurrence := Std.HashMap.ofList c.bindings.toList
       let skolems := bound.foldl (init := r.skolems) fun acc (v, _) =>
@@ -805,9 +804,8 @@ def clausify (step : Step) : ReconstructM Expr := do
       -- one the clause kept stands for the local the conclusion binds for it.
       for (v, image) in clause.bindings do
         vars := vars.insert v (← term vars image)
-      -- As `registerSkolemsOf` reads them: the unit's own records win.
-      let skolems := Std.HashMap.ofList
-        (step.unit.parents.flatMap (·.skolems) ++ step.unit.skolems).toList
+      -- As `bindIntroduced` read them: the unit's own records win.
+      let (_, skolems) := skolemContext step.unit
       let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs, skolems }
         (chainTo clause) 0 none #[]
       let generalised ← genParts sorts vars clause

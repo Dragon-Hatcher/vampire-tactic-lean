@@ -5,27 +5,13 @@ Rules that leave a clause's literals alone but for dropping, repeating or
 reorienting them.
 
 Each comes to the same thing: every literal of the premise is a literal of the
-conclusion, or is refutable on its own. `implies` settles that by looking each
-one up, so nothing is searched for and nothing is rederived.
-
-What other rules share of instantiating a clause, taking one apart and
-restating one lives here too.
+conclusion, or is refutable on its own, and the worker records where each went
+(`relateLiterals`), so nothing is searched for and nothing is rederived.
 -/
 
 namespace Vampire.Reconstruct.Clause
 
 open Lean Meta
-
-/--
-A step that restates a premise clause, perhaps with its literals rebuilt in
-another order: the premise itself where it already states the conclusion, and
-otherwise its literals related one by one.
--/
-def restatedLiterals (step : Step) (parent : Vampire.Unit) (proof stated : Expr) :
-    ReconstructM Expr := do
-  if ← sameFormula (← instantiateMVars stated) (← step.conclusion) then
-    return proof
-  relateLiterals step parent proof stated
 
 /-- A step whose conclusion restates its premise's literals. -/
 def literals (step : Step) : ReconstructM Expr := do

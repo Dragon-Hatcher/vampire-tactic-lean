@@ -10,9 +10,9 @@ are the steps whose conclusion replay has to prove for itself. Two kinds:
   normalization, cancellation -- rewrite each literal into one literal, or find
   it false. The worker records which literal each became, and each rewrite is
   proved by exactly the rewrites its rule makes (`Context.literalIff`).
-* The rest -- theory axioms, ALASCA's inferences adding inequalities together --
-  hold by the arithmetic of their literals, which the decision procedure
-  `Context.contradiction` settles.
+* The rest -- theory axioms and ALASCA's inferences -- are certified by lemmas
+  of `Vampire.Lemmas`, instantiated at the terms the worker recorded (see
+  *Steps certified by a lemma*).
 -/
 
 namespace Vampire.Reconstruct.Arithmetic
@@ -179,8 +179,8 @@ def literalwise (step : Step) : ReconstructM Expr := do
       (fun a => do (← read).literalRewritten .theoryNormalization a) stated
     return ← restate (← mkAppM ``Iff.mp #[h, proof]) rewritten (← step.conclusion)
   -- ALASCA's strong normalization of comparisons shares the rule and can make
-  -- two literals of one, so it records no images: its conclusion follows from
-  -- its premise by the arithmetic, a literal at a time.
+  -- two literals of one, which it records with the literal they were made of
+  -- (`strongNormalization`).
   if step.unit.literalProcedure? == some inequalityPredicateNormalization then
     return ← strongNormalization step
   let some procedure := step.unit.literalProcedure?.bind LiteralRewrite.ofRecorded?
@@ -273,15 +273,6 @@ def viras (step : Step) : ReconstructM Expr := do
         term use.virtualEpsilon use.virtualInfinity
       mkLambdaFVars #[h] falsity
     mkAppOptM ``Classical.byContradiction #[some target, some refuted]
-
-/-- `a * b`, whichever numbers those are. -/
-private def asProduct (e : Expr) : Option (Expr × Expr) :=
-  match e.getAppFnArgs with
-  | (``HMul.hMul, #[_, _, _, _, a, b]) => some (a, b)
-  | _ => none
-
-/-- Whether a term is the number zero. -/
-private def isZero (e : Expr) : Bool := e.nat? == some 0
 
 /-!
 ### Steps certified by a lemma
@@ -410,7 +401,7 @@ and `t₀`, `-k₁ s` and `t₁`, `u` and `j`. Each floor the lemmas state is th
 conclusion's own, found in it, so that the relation is one of terms over the
 same atoms.
 -/
-partial def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
+def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let covered ← coverVars vars step.unit.boundVarSorts
@@ -538,7 +529,7 @@ ALASCA's floor elimination: a literal `k ⌊s⌋ + r = 0` dropped where `-r / k`
 no integer, which makes it false. `Vampire.Lemmas.floor_elim`, at the integer
 below `-r / k`, with that `-r / k` lies between it and the next evaluated.
 -/
-partial def floorElimination (step : Step) : ReconstructM Expr := do
+def floorElimination (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     withInto target step.unit.clauseSize? fun into => do
@@ -598,7 +589,7 @@ ALASCA's coherence normalization:
 `t` is an integer, being a floor (`integerOf`), and so its own floor:
 `Vampire.Lemmas.coherence_normalization`.
 -/
-partial def coherenceNormalization (step : Step) : ReconstructM Expr := do
+def coherenceNormalization (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     withInto target step.unit.clauseSize? fun into => do
@@ -654,7 +645,7 @@ for an integer `i`. `Vampire.Lemmas.coherence` at the terms the worker
 recorded -- `j s + u` and `i` of the first premise, the floor rewritten of the
 second -- and the literal rewritten by it where it stands.
 -/
-partial def coherence (step : Step) : ReconstructM Expr := do
+def coherence (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let covered ← coverVars vars step.unit.boundVarSorts
@@ -813,7 +804,7 @@ recorded `j` and `k`, with `t₁` and `t₂` what is left of each premise's term
 once its atom is taken out, related to the premises and the literals the
 inference built by ring arithmetic alone.
 -/
-partial def fourierMotzkin (step : Step) : ReconstructM Expr := do
+def fourierMotzkin (step : Step) : ReconstructM Expr := do
   step.underVars fun vars target => do
     let premises ← premisesOf step vars
     let covered ← coverVars vars step.unit.boundVarSorts
@@ -996,7 +987,7 @@ def floorBounds (step : Step) : ReconstructM Expr := do
     let some factor := use.factor
       | throwError "step {step.unit.number}: floor bounds recorded no coefficient"
     let k ← termAt parent use vars factor
-    unless floor.isAppOfArity ``Int.cast 3 && floor.appArg!.isAppOfArity `Int.floor 5 do
+    unless isFloorCast floor do
       throwError "step {step.unit.number}: the atom{indentExpr floor}\nis no floor"
     let α ← inferType floor
     let zero ← wholeNumeral α 0

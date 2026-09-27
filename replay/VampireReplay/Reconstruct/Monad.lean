@@ -283,14 +283,14 @@ The locals `e` mentions, and those their types -- and, for a local definition,
 its value -- mention in turn, in the order the context has them: what a
 definition closed over `e` has to take.
 -/
-def closureOf (e : Expr) (except : Array Expr := #[]) : MetaM (Array Expr) := do
+def closureOf (e : Expr) : MetaM (Array Expr) := do
   let lctx ← getLCtx
   let mut found : Std.HashSet FVarId := {}
   let mut pending := (collectFVars {} e).fvarIds.toList
   while !pending.isEmpty do
     let id :: rest := pending | break
     pending := rest
-    if found.contains id || except.contains (mkFVar id) then continue
+    if found.contains id then continue
     found := found.insert id
     if let some decl := lctx.find? id then
       pending := (collectFVars {} (← instantiateMVars decl.type)).fvarIds.toList ++ pending
@@ -357,7 +357,7 @@ partial def unfoldDefinitions (e : Expr)
 where
   /--
   A definition closed over a local definition has it as a `let` of its own
-  (`closedOver`), which unfolding reads back as the local, whose value it is.
+  (`auxDefinition`), which unfolding reads back as the local, whose value it is.
   -/
   reopenLets (e : Expr) : MetaM Expr := do
     let .letE _ _ v b _ := e.getAppFn | return e
@@ -366,13 +366,6 @@ where
         if decl.isLet && decl.value == v then some decl.toExpr else none
       | return e
     reopenLets ((b.instantiate1 local_).beta e.getAppArgs)
-
-/-- `fact`, restated as what it says with `unfoldDefinitions` applied. -/
-def unfoldFact (fact : Expr) : MetaM Expr := do
-  let stated ← instantiateMVars (← inferType fact)
-  let unfolded ← unfoldDefinitions stated
-  if unfolded == stated then return fact
-  mkExpectedTypeHint fact unfolded
 
 /-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
 def symbolExpr (name : String) : ReconstructM Expr := do

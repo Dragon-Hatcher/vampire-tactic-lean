@@ -1,5 +1,4 @@
 import VampireReplay.Reconstruct.Basic
-import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Rewriting with an equation.

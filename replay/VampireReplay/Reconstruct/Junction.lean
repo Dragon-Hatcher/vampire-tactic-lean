@@ -5,57 +5,6 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
-The `i`th part of a conjunction, from a proof of the whole.
-
-Indices count parts left to right, whatever the nesting: flattening merges a
-nested junction into a wider one, leaving the parts in place but not the shape,
-so neither side can be taken to associate one way.
--/
-partial def projectPart (chain : Expr) (i : Nat) (h : Expr) : ReconstructM Expr := do
-  if !chain.isAppOfArity ``And 2 then
-    return h
-  let left := chain.appFn!.appArg!
-  let right := chain.appArg!
-  let n := (junctionParts ``And left).size
-  if i < n then
-    projectPart left i (mkApp3 (mkConst ``And.left) left right h)
-  else
-    projectPart right (i - n) (mkApp3 (mkConst ``And.right) left right h)
-
-/--
-A proof of a whole disjunction from a proof of its `i`th part, the parts read
-off its shape as `projectPart` reads them.
--/
-partial def injectPart (chain : Expr) (i : Nat) (h : Expr) : ReconstructM Expr := do
-  if !chain.isAppOfArity ``Or 2 then
-    return h
-  let left := chain.appFn!.appArg!
-  let right := chain.appArg!
-  let n := (junctionParts ``Or left).size
-  if i < n then
-    return mkApp3 (mkConst ``Or.inl) left right (← injectPart left i h)
-  else
-    return mkApp3 (mkConst ``Or.inr) left right (← injectPart right (i - n) h)
-
-/--
-Every part of a conjunction, read off its shape as `projectPart` reads them,
-from a proof `h` of the whole.
-
-Each part's proof is built on the proof of the conjunction it is a part of, so
-all of them share one tree the size of the conjunction. Projecting each part on
-its own takes a chain as long as its depth, which over a conjunction nested
-along one side is the square of its width -- the same chains, built again for
-every part.
--/
-partial def projectParts (chain h : Expr) (acc : Array Expr := #[]) : Array Expr :=
-  if chain.isAppOfArity ``And 2 then
-    let l := chain.appFn!.appArg!
-    let r := chain.appArg!
-    projectParts r (mkApp3 (mkConst ``And.right) l r h)
-      (projectParts l (mkApp3 (mkConst ``And.left) l r h) acc)
-  else acc.push h
-
-/--
 `¬pᵢ` for every part of a disjunction read off its shape, from `against`,
 which denies the whole and mentions no bound variable: `refutationsOf` for a
 disjunction nested any way. Each part's refutation is built on its enclosing
@@ -70,81 +19,9 @@ partial def refutationsOfShape (chain against : Expr) (acc : Array Expr := #[]) 
     refutationsOfShape r deniesR (refutationsOfShape l deniesL acc)
   else acc.push against
 
-/--
-The lifts of `withShapeDisjunction` below `node`: `up` proves the whole from a
-proof of `node`. A disjunction under `node` gets a lift of its own, let-bound;
-a part is lifted by `up` and one introduction.
--/
-private partial def bindShapeLifts (whole node : Expr) (up : Expr → Expr)
-    (parts : Array (Expr → Expr)) (lets : Array Expr)
-    (k : Array (Expr → Expr) → Array Expr → ReconstructM Expr) : ReconstructM Expr := do
-  unless node.isAppOfArity ``Or 2 do return ← k (parts.push up) lets
-  let l := node.appFn!.appArg!
-  let r := node.appArg!
-  let child (side : Name) (c : Expr) (parts : Array (Expr → Expr)) (lets : Array Expr)
-      (k : Array (Expr → Expr) → Array Expr → ReconstructM Expr) : ReconstructM Expr := do
-    let lifted (x : Expr) : Expr := up (mkApp3 (mkConst side) l r x)
-    unless c.isAppOfArity ``Or 2 do return ← k (parts.push lifted) lets
-    let value := Expr.lam `h c (lifted (.bvar 0)) .default
-    withLetDecl `lift (← mkArrow c whole) value fun f =>
-      bindShapeLifts whole c (mkApp f) parts (lets.push f) k
-  child ``Or.inl l parts lets fun parts lets => child ``Or.inr r parts lets k
-
-/--
-`k` given, for a disjunction read off its shape, a proof of the whole from a
-proof of its `i`th part at a cost that does not grow with the part's depth:
-each disjunction inside it has a lift to the whole, let-bound once around what
-`k` builds and defined by the one enclosing it. `injectPart` for every part of
-a disjunction, without the square of its depth.
--/
-def withShapeDisjunction (chain : Expr)
-    (k : (Nat → Expr → Expr) → ReconstructM Expr) : ReconstructM Expr :=
-  bindShapeLifts chain chain id #[] #[] fun parts lets => do
-    let inject (i : Nat) (h : Expr) : Expr := parts[i]! h
-    mkLetFVars lets (← instantiateMVars (← k inject))
-
-/--
-A closed `chain → motive` sending each part of `chain` to `handler`, along with
-the motive, which the leftmost part's proof settles.
-
-The bound variable is put in place as the elimination is built rather than
-abstracted into it afterwards: abstracting at every level of a right-nested
-chain walks the whole of what has been built so far each time.
--/
-private partial def elimFunction (chain : Expr) (offset : Nat)
-    (handler : Nat → Expr → ReconstructM Expr) (motive? : Option Expr) :
-    ReconstructM (Expr × Expr) := do
-  if !chain.isAppOfArity ``Or 2 then
-    return ← withLocalDeclD `a chain fun a => do
-      let body ← handler offset a
-      let motive ← match motive? with
-        | some motive => pure motive
-        | none => inferType body
-      return (← mkLambdaFVars #[a] body, motive)
-  let left := chain.appFn!.appArg!
-  let right := chain.appArg!
-  let n := (junctionParts ``Or left).size
-  let (onLeft, motive) ← elimFunction left offset handler motive?
-  let (onRight, _) ← elimFunction right (offset + n) handler (some motive)
-  return (.lam `x chain
-    (mkApp6 (mkConst ``Or.elim) left right motive (.bvar 0) onLeft onRight)
-    .default, motive)
-
-/-- Eliminates a disjunction, sending its `i`th part to `handler i`. -/
-def elimParts (chain : Expr) (handler : Nat → Expr → ReconstructM Expr) (h : Expr) :
-    ReconstructM Expr := do
-  if !chain.isAppOfArity ``Or 2 then
-    return ← handler 0 h
-  let left := chain.appFn!.appArg!
-  let right := chain.appArg!
-  let n := (junctionParts ``Or left).size
-  let (onLeft, motive) ← elimFunction left 0 handler none
-  let (onRight, _) ← elimFunction right n handler (some motive)
-  return mkApp6 (mkConst ``Or.elim) left right motive h onLeft onRight
-
 /-!
-The helpers above take a junction apart by its shape, which is right for a
-formula, whose shape is what it says. A generalised clause is different: its
+`refutationsOfShape` takes a disjunction apart by its shape, which is right for
+a formula, whose shape is what it says. A generalised clause is different: its
 parts are subformulas, and a part can be a junction in its own right, so its
 parts have to be given rather than found.
 -/
@@ -449,21 +326,6 @@ def introGiven (parts : Array Expr) (component : Nat → ReconstructM Expr) :
     let i := parts.size - 2 - k
     acc := mkApp4 (mkConst ``And.intro) parts[i]! suffix[i + 1]! proofs[i]! acc
   return acc
-
-/-- `introParts`, the parts counted from `offset`. -/
-private partial def introPartsFrom (chain : Expr) (offset : Nat)
-    (component : Nat → ReconstructM Expr) : ReconstructM Expr := do
-  if !chain.isAppOfArity ``And 2 then
-    return ← component offset
-  let left := chain.appFn!.appArg!
-  let right := chain.appArg!
-  let n := (junctionParts ``And left).size
-  return mkApp4 (mkConst ``And.intro) left right
-    (← introPartsFrom left offset component) (← introPartsFrom right (offset + n) component)
-
-/-- Builds a conjunction from a proof of each of its parts. -/
-def introParts (chain : Expr) (component : Nat → ReconstructM Expr) : ReconstructM Expr :=
-  introPartsFrom chain 0 component
 
 /-!
 Equivalences where `none` stands for "unchanged", as `Simp.Result` has it: a

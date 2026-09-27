@@ -503,9 +503,8 @@ example (a b : ℝ) (h1 : a ≥ b) (h2 : a < b) : False := by
       ("alasca_strong_normalziation", "on")]) [*]
 
 /-! Theory axioms, with evaluation off so that vampire has to use them: each
-goal denies what one axiom states. Integer division and remainder, absolute
-value and a field's division are some numbers to a decision procedure; what
-they are is the facts replay hands it, as for floors. -/
+goal denies what one axiom states, and each axiom is replayed as its
+`Vampire.Lemmas.tha_*` lemma at the clause's variables. -/
 
 #guard_msgs (drop info) in
 example (f : ℤ → ℤ) (a : ℤ) (h : f (a + 0) ≠ f a) : False := by

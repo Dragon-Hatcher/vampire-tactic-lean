@@ -68,20 +68,6 @@ structure Config where
   -/
   forced : Array (String × String) :=
     #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
-  /-
-  Options replay needs at vampire's defaults, which no strategy of the
-  schedules changes: an option given to change one is refused (`refused?`)
-  rather than forced back, since vampire warns of every ALASCA option set where
-  ALASCA is off.
-
-  ALASCA's quantifier elimination is VIRAS, which replay certifies; the
-  variable elimination vampire runs instead where VIRAS is off concludes a
-  projection of a variable's bounds, which follows from its premise by a case
-  analysis on where the variable lies that the step does not record. ALASCA's
-  integer conversion restates an integer problem over the reals with new
-  symbols of real sort in place of the integer ones, which the goal has no
-  counterparts for.
-  -/
   -- Vampire takes one `forced_options`, the last given, so options a user
   -- forces are merged into these rather than passed after them: passed after,
   -- they would replace these, and a proof could then use what replay cannot
@@ -94,7 +80,21 @@ deriving Inhabited
 
 namespace Config
 
-/-- The options replay needs at their defaults: their names, long and short, and the default. -/
+/--
+The options replay needs at vampire's defaults: their names, long and short,
+and the default. No strategy of the schedules changes them, and an option given
+to change one is refused (`refused?`)
+rather than forced back, since vampire warns of every ALASCA option set where
+ALASCA is off.
+
+ALASCA's quantifier elimination is VIRAS, which replay certifies; the
+variable elimination vampire runs instead where VIRAS is off concludes a
+projection of a variable's bounds, which follows from its premise by a case
+analysis on where the variable lies that the step does not record. ALASCA's
+integer conversion restates an integer problem over the reals with new
+symbols of real sort in place of the integer ones, which the goal has no
+counterparts for.
+-/
 private def required : Array (List String × String) :=
   #[(["virtual_integer_real_arithmetic_substitution", "viras"], "on"),
     (["alasca_integer_conversion", "alascai"], "off")]

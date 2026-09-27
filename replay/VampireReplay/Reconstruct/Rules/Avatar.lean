@@ -1,5 +1,4 @@
 import VampireReplay.Reconstruct.Basic
-import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Splitting.
@@ -51,7 +50,8 @@ def component (step : Step) : ReconstructM Expr := do
   -- builds by pushing the clause's literals onto a list, so the two disagree
   -- over the order of the literals and over which variable is bound where.
   -- Both speak of vampire's variables, though, so the binders can be paired by
-  -- the variable each stands for, and the literals found by what they say.
+  -- the variable each stands for, and each literal placed where the worker
+  -- recorded it went.
   let some definition := parent.formula?
     | throwError "an avatar component clause's definition states no formula"
   let some (_, bound) ← definedComponent definition
@@ -234,8 +234,10 @@ private partial def propagate (states : Stated)
   let refutation (j : Nat) : Expr := (refuted.find? names[j]!).getD (.bvar 0)
   if let #[u] := unassigned then
     -- `¬¬q` for the one literal `q` left, and so the flip of `q` is false.
-    let some says := parts[u]? | throwError "missing literal"
-    let some name := names[u]? | throwError "missing literal"
+    let some says := parts[u]?
+      | throwError "propositional clause {premise.index} has no literal {u}"
+    let some name := names[u]?
+      | throwError "propositional clause {premise.index} has no literal {u}"
     let notNot : Expr := .lam `x (mkApp (mkConst ``Not) says)
       (mkAppN proof ((List.range names.size).toArray.map refutation)) .default
     let (flipped, _) ← flipName name
@@ -359,18 +361,18 @@ def splitClause (step : Step) : ReconstructM Expr := do
   -- are the same component and share its name: the clause names it twice, and
   -- each occurrence has its own renaming recorded.
   let mut definitions : Std.HashMap String (Vampire.Unit × Array PremiseUse × Nat) := {}
-  for (parent, position) in (step.unit.parents.zipIdx).extract 1 do
-    let some definition := parent.formula?
+  for (premise, position) in step.unit.parents.zipIdx.extract 1 do
+    let some definition := premise.formula?
       | continue
     let some name := (← definition.subformulas.findSomeM? fun g => do
         return if (← connectiveOf g) matches .name then g.name? else none)
       | continue
-    let uses := step.unit.premiseUses.filter (·.premise == parent.number)
+    let uses := step.unit.premiseUses.filter (·.premise == premise.number)
     if uses.isEmpty then
       -- The definitions of the names the clause holds under are premises too,
       -- and it is the components that have a renaming recorded against them.
       continue
-    definitions := definitions.insert name (parent, uses, position)
+    definitions := definitions.insert name (premise, uses, position)
   -- One disjunct per name, whatever the formula each stands for is.
   let disjunctParts ← clauseLiterals target (some disjuncts.size)
   withLocalDeclD `h (mkApp (mkConst ``Not) target) fun h => do
@@ -477,10 +479,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
       -- recorded it went, turned round where it said so.
       let some (part, negation, flipped, negatedName) := negationAt[i]?
         | throwError "the worker placed no component's literal at literal {i} of the \
-            clause {parent}, whose components are {disjuncts}; it placed \
-            {definitions.toList.map fun (n, (_, uses, position)) =>
-              (n, position, uses.size, (List.range uses.size).map fun k =>
-                repr (step.unit.placement? position k))}"
+            clause {parent}, whose components are {disjuncts}"
       let some hl ← (if flipped then flipEquality hl else pure (some hl))
         | throwError "the worker recorded literal {i} of {parent} as turned round, but it \
             is no equation"

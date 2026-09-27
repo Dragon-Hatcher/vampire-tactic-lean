@@ -300,6 +300,17 @@ theorem tha_alasca_4 (x y z : α) : 0 ≤ x ∨ 0 ≤ y + -z ∨ 0 < x * y + -(x
 
 end Alasca
 
+/-- `tha_divisibility`: multiplication by anything but zero cancels. -/
+theorem tha_divisibility {α : Type*} [CommRing α] [NoZeroDivisors α] (x y z w : α) :
+    x = 0 ∨ ¬x * z = y ∨ ¬x * w = y ∨ z = w := by
+  by_cases hx : x = 0
+  · exact Or.inl hx
+  by_cases hz : x * z = y
+  · by_cases hw : x * w = y
+    · exact Or.inr (Or.inr (Or.inr (mul_left_cancel₀ hx (hz.trans hw.symm))))
+    · exact Or.inr (Or.inr (Or.inl hw))
+  · exact Or.inr (Or.inl hz)
+
 /-!
 ### ALASCA's Fourier-Motzkin
 
@@ -343,17 +354,6 @@ theorem fm_int {j k s a b : ℤ} (hj : 0 < j) (hk : 0 < k)
   have p : k ≤ k * (j * s + a) := le_mul_of_one_le_right hk.le h₁
   have q : j ≤ j * (-(k * s) + b) := le_mul_of_one_le_right hj.le h₂
   nlinarith
-
-/--
-ALASCA's arithmetic equation as a rewrite: `k s + t = 0`, which is
-`k (s - (-t/k))`, rewrites `s` to `-t/k` (`a` to `b`), for a numeral `k` other
-than zero.
--/
-theorem eq_of_scaled {α : Type*} [CommRing α] [NoZeroDivisors α] {e k a b : α}
-    (hk : k ≠ 0) (h : e = 0) (he : e = k * (a - b)) : a = b := by
-  rw [he] at h
-  exact sub_eq_zero.mp ((mul_eq_zero.mp h).resolve_left hk)
-
 
 /-!
 ### ALASCA's floor bounds
@@ -431,22 +431,6 @@ theorem fb_5 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (-((⌊s⌋ :
 
 end FloorBounds
 
-/-- `tha_divisibility`: multiplication by anything but zero cancels. -/
-theorem tha_divisibility {α : Type*} [CommRing α] [NoZeroDivisors α] (x y z w : α) :
-    x = 0 ∨ ¬x * z = y ∨ ¬x * w = y ∨ z = w := by
-  by_cases hx : x = 0
-  · exact Or.inl hx
-  by_cases hz : x * z = y
-  · by_cases hw : x * w = y
-    · exact Or.inr (Or.inr (Or.inr (mul_left_cancel₀ hx (hz.trans hw.symm))))
-    · exact Or.inr (Or.inr (Or.inl hw))
-  · exact Or.inr (Or.inl hz)
-
-/-- `k s + … = 0` from `s = t`, where the sum is `k (s - t)`: an equation as ALASCA states it. -/
-theorem eq_zero_of_scaled {α : Type*} [CommRing α] {e k a b : α} (he : e = k * (a - b))
-    (h : a = b) : e = 0 := by
-  rw [he, h, sub_self, mul_zero]
-
 /-!
 ### ALASCA's literal factoring
 
@@ -483,7 +467,6 @@ theorem lf_ge_ge {j k e₁ e₂ : α} (hj : 0 < j) (hk : 0 < k) (h₁ : 0 ≤ e�
   nlinarith
 
 end LiteralFactoring
-
 
 /-!
 ### VIRAS
@@ -563,6 +546,29 @@ theorem viras_above_eq_near {c δ st sp : α} (hc : c ≠ 0) (hδ : 0 < δ)
 theorem viras_half_of_pos {r : α} (hr : 0 < r) : 0 < 1 / 2 * r := by positivity
 
 end Viras
+
+/-!
+### ALASCA's equations
+
+What relates an equation as ALASCA states it, `k s + t = 0` for a numeral `k`,
+to the rewrite it makes of it, and a pair its abstracting unifier deferred to
+the terms it could not unify.
+-/
+
+/--
+ALASCA's arithmetic equation as a rewrite: `k s + t = 0`, which is
+`k (s - (-t/k))`, rewrites `s` to `-t/k` (`a` to `b`), for a numeral `k` other
+than zero.
+-/
+theorem eq_of_scaled {α : Type*} [CommRing α] [NoZeroDivisors α] {e k a b : α}
+    (hk : k ≠ 0) (h : e = 0) (he : e = k * (a - b)) : a = b := by
+  rw [he] at h
+  exact sub_eq_zero.mp ((mul_eq_zero.mp h).resolve_left hk)
+
+/-- `k s + … = 0` from `s = t`, where the sum is `k (s - t)`: an equation as ALASCA states it. -/
+theorem eq_zero_of_scaled {α : Type*} [CommRing α] {e k a b : α} (he : e = k * (a - b))
+    (h : a = b) : e = 0 := by
+  rw [he, h, sub_self, mul_zero]
 
 /--
 Two terms an abstracting unifier deferred as `x = y`, where their difference

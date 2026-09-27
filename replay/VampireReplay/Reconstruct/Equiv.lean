@@ -4,9 +4,6 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
-/-- Whether an expression is the type `Prop`. -/
-private def isPropType (e : Expr) : Bool := e matches .sort .zero
-
 /--
 What a step that restates a formula does to it, and so what relating the
 premise to the conclusion may undo -- nothing else: each is applied exactly

@@ -95,24 +95,25 @@
  *             evaluation is whichever of three evaluators the options chose,
  *             and they rewrite a literal differently. `NONE` otherwise.
  *             `firstIntroduced` and `numIntroduced` are the entries of
- *             `introducedSymbol` is the name of the first symbol vampire
- *             recorded the unit to introduce, `NONE` for none
  *             `introducedLits` for the literals the inference built rather
  *             than carried -- a theory axiom's -- in the order it built them,
  *             each the index of the conclusion's literal it is and of the
  *             literal of the first premise it was made of, or `NONE`, and
  *             `variant` which of the clauses of different shapes a rule
  *             builds this one is (`InferenceStore::recordIntroduced`).
+ *             `introducedSymbol` is the name of the first symbol vampire
+ *             recorded the unit to introduce, `NONE` for none.
  *             `site` is the string offset of where in vampire the inference
  *             was made, `file:line` relative to vampire's source directory,
  *             and `NONE` where it is not known: one rule is made in several
  *             places, which do not all do the same, and replay counts which
  *             of them the steps it certifies came from.
- *             `splittingName` is, for a general splitting component, which
- *             of its literals is the name the splitting introduced, and
- *             `NONE` for anything else: the name is a fresh predicate like
- *             any other vampire introduces, so nothing in the clause tells it
- *             apart from them.
+ *             `splittingName` is, for a general splitting component or what
+ *             is left of the clause split, which of its literals is the name
+ *             the splitting introduced (asserted in the one, denied in the
+ *             other), and `NONE` for anything else: the name is a fresh
+ *             predicate like any other vampire introduces, so nothing in the
+ *             clause tells it apart from them.
  *             `satPremise` is the propositional clause a step derived by SAT
  *             solving stands on, and `NONE` for anything else.
  *             `name` is the string offset of the name the input gave this
@@ -142,8 +143,9 @@
  *             asserts a component's name and works on with the clause under
  *             that assumption, so what such a clause says is that its literals
  *             follow from the names it is written against
- *   satClauses{firstLit, numLits, firstPremise, numPremises, origin, firstOrder}: a clause
- *             of the propositional problem splitting hands to a SAT solver.
+ *   satClauses{firstLit, numLits, firstPremise, numPremises, origin,
+ *              firstOrder}: a clause of the propositional problem splitting
+ *             hands to a SAT solver.
  *             `origin` is the unit this clause came from, for one that is a
  *             first-order clause's propositional shadow, and `NONE` for one
  *             the solver derived -- whose premises are then the clauses it was
@@ -152,11 +154,6 @@
  *   satLits   string offsets of a propositional clause's literals, each the
  *             name of a component or its negation
  *   satPremises indices into `satClauses`
- *   satOrder  for the shadow of a first-order clause, from `firstOrder` (`NONE`
- *             for any other), the index of the propositional literal each of
- *             the clause's literals became, one per literal of the clause:
- *             the shadow's literals are sorted, and the names say which is
- *             which only through their definitions
  *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
  *             clausification introduced to name a subformula, the variables it
  *             was applied to, and the formula it names. The clauses saying
@@ -181,21 +178,16 @@
  *             3 = one rewritten in place by a name
  *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
  *             clause and of what replaced a position in one
- *   created   when each function symbol and then each predicate symbol was
- *             created, counted over both: a symbol vampire introduced is made
- *             of symbols that exist already, so this is an order to bind them in
- *   genPlacements where each literal a step pushed went in the clause it
- *             made, in the order it pushed them, bit 31 set where the push
- *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
  *   choices   {formula, argument} pairs: which argument of each conjunction
  *             the clausification of a clause went into. The other clausifier
  *             walks a formula in negation normal form, taking every disjunct
  *             into the clause it is building and each conjunct into a clause of
  *             its own, so a clause is one path through the conjunctions and
  *             this is that path
- *   uses      {premise, literal, term, flags, firstBinding, numBindings, other, factor}: how a
- *             generated clause used one of its premises. `premise` is that
- *             premise's number, `literal` the index of the literal the
+ *   uses      {premise, literal, term, flags, firstBinding, numBindings,
+ *              other, factor}: how a generated clause used one of its
+ *             premises. `premise` is that premise's number, `literal` the
+ *             index of the literal the
  *             inference acted on or `NONE`, and `term` the index of the term it
  *             acted on within that literal or `NONE` -- a rewriting inference
  *             singles out a subterm rather than a whole literal. A generating
@@ -206,11 +198,15 @@
  *             than only in that literal, which is what simultaneous
  *             superposition does; 2, 4 and 8 = the virtual term VIRAS
  *             substituted for the variable it eliminated is plus an
- *             infinitesimal, plus infinity, minus infinity, its term `other`. `other` is a second term of the premise
- *             the inference acted on, or `NONE`: what an arithmetic equation
- *             `k s + t = 0` rewrote `s` to, `-t/k`, which is no side of it; or
- *             the atom a factoring unified `term` with. Like `term`, it is
- *             stated in the premise's variables
+ *             infinitesimal, plus infinity, minus infinity, and its term is
+ *             `other`. `other` is a second term of the premise the inference
+ *             acted on, or `NONE`: what an arithmetic equation `k s + t = 0`
+ *             rewrote `s` to, `-t/k`, which is no side of it; the atom a
+ *             factoring unified `term` with; or, for VIRAS, the virtual
+ *             term's term. Like `term`, it is stated in the premise's
+ *             variables. `factor` is the numeral the inference scaled the
+ *             use's term by, `k` of `k s + t = 0` (`PremiseUse::factor`), or
+ *             `NONE`
  *   bindings  {variable, term} pairs: what the unifier bound each of a
  *             premise's variables to
  *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
@@ -252,6 +248,19 @@
  *             times, see `InferenceStore::LiteralImage`
  *   constraintLits literal positions within their unit's clause, the entries
  *             of a unit's constraints
+ *   satOrder  for the shadow of a first-order clause, from `firstOrder` (`NONE`
+ *             for any other), the index of the propositional literal each of
+ *             the clause's literals became, one per literal of the clause:
+ *             the shadow's literals are sorted, and the names say which is
+ *             which only through their definitions
+ *   introducedLits {literal, source} pairs, the entries of a unit's
+ *             `firstIntroduced` and `numIntroduced`
+ *   genPlacements where each literal a step pushed went in the clause it
+ *             made, in the order it pushed them, bit 31 set where the push
+ *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
+ *   created   when each function symbol and then each predicate symbol was
+ *             created, counted over both: a symbol vampire introduced is made
+ *             of symbols that exist already, so this is an order to bind them in
  *   strings   NUL-terminated names, padded to a 4-byte boundary
  *   proofText vampire's own rendering of the proof, padded likewise
  */
@@ -313,6 +322,9 @@ const uint32_t VERSION = 37;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 39;
 const uint32_t NONE = 0xFFFFFFFFu;
+/** A placement entry's flags: the literal was turned round, or rewritten into it. */
+const uint32_t PLACED_TURNED = 0x80000000u;
+const uint32_t PLACED_REWRITTEN = 0x40000000u;
 
 /**
  * How many inference rules vampire declares, as the Lean side counts them.
@@ -1420,8 +1432,8 @@ struct Encoder {
               " recorded a rewritten literal its conclusion does not have");
           // Marked rewritten, so that replay applies the rewrite to exactly the
           // literals the inference rewrote.
-          entry |= 0x40000000u;
-          placementEntries.push_back(became->turned ? entry | 0x80000000u : entry);
+          entry |= PLACED_REWRITTEN;
+          placementEntries.push_back(became->turned ? entry | PLACED_TURNED : entry);
           continue;
         }
         Literal* image = SubstHelper::apply(lit, bound);
@@ -1441,7 +1453,7 @@ struct Encoder {
           Literal* there = (*into)[entry];
           TermList lhs = SubstHelper::apply(*lit->nthArgument(0), bound);
           if (lhs != *there->nthArgument(0))
-            entry |= 0x80000000u;
+            entry |= PLACED_TURNED;
         }
         placementEntries.push_back(entry);
       }
@@ -1516,9 +1528,12 @@ struct Encoder {
           Clause* split = premisesInOrder[0]->asClause();
           if (lits.size() == 1 && lits[0]->ground()) {
             Literal* complement = Literal::complementaryLiteral(lits[0]);
-            for (unsigned j = 0; j < split->length(); j++)
-              if ((*split)[j] == complement && complement->isNegative())
-                lits[0] = complement;
+            if (complement->isNegative())
+              for (unsigned j = 0; j < split->length(); j++)
+                if ((*split)[j] == complement) {
+                  lits[0] = complement;
+                  break;
+                }
           }
           for (uint32_t k = 0; k < premiseUses.size(); k++)
             place(pos, k, lits, split, &premiseUses[k]->bindings, nullptr);
@@ -1550,7 +1565,7 @@ struct Encoder {
               if (entry != NONE && made->isEquality()
                   && SubstHelper::apply(*f->literal()->nthArgument(0), subst)
                        != *(*into)[entry]->nthArgument(0))
-                entry |= 0x80000000u;
+                entry |= PLACED_TURNED;
             }
             placementEntries.push_back(entry);
           }

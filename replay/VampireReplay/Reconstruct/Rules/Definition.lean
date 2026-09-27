@@ -1,5 +1,4 @@
 import VampireReplay.Reconstruct.Basic
-import VampireReplay.Reconstruct.Rules.Clause
 
 /-!
 Rules that introduce a name and say what it means. Nothing further constrains

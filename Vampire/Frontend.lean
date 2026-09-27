@@ -368,13 +368,7 @@ private def recordCoverage (proof : Proof) (outcome : Reconstruct.Outcome) :
   let handle ← IO.FS.Handle.mk path .append
   handle.putStr lines
 
-/--
-Replays the refutation, and what that took in milliseconds.
-
-Anything vampire introduced itself -- a skolem function, an AVATAR predicate, a
-subformula it named while clausifying -- has no counterpart in the goal, so a
-step speaking of one cannot even be stated until it is bound.
--/
+/-- Replays the refutation, and what that took in milliseconds. -/
 private def replayQuery (cfg : TacticConfig) (query : Query) :
     TacticM (Reconstruct.Outcome × Nat) := do
   let before ← IO.monoMsNow

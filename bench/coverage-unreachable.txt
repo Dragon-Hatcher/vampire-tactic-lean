@@ -37,7 +37,7 @@ Inferences/TheoryInstAndSimp.cpp:679	*	compiled only with Z3, and the bundled va
 Inferences/TheoryInstAndSimp.cpp:683	*	compiled only with Z3, and the bundled vampire is built without it
 Shell/Rectify.cpp:75	*	closes a formula over its free variables, and the translation writes closed formulas only
 Saturation/Splitter.cpp:271	*	a well-colored proof, for interpolation only, which the tactic never asks for
-Shell/EqualityProxy.cpp:446	*	the equality proxy of a polymorphic problem, and the translation writes monomorphic ones only
+Shell/EqualityProxy.cpp:453	*	the equality proxy of a polymorphic problem, and the translation writes monomorphic ones only
 Inferences/DistinctEqualitySimplifier.cpp:64	*	constants declared distinct, and the translation writes no $distinct and no distinct objects
 Shell/PredicateDefinition.cpp:378	*	the tactic forces updr=off: replacing a pure predicate preserves satisfiability but is no entailment (Vampire/Worker.lean)
 Shell/PredicateDefinition.cpp:687	*	the tactic forces updr=off: the pass that removes unused definitions also replaces pure predicates (Vampire/Worker.lean)

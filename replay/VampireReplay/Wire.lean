@@ -461,8 +461,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, constraintLits, satOrder, introducedLits, genPlacements, created, strings, stringsLen, proofText, numFunctions,
-      numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
+      literalFactors, constraintLits, satOrder, introducedLits, genPlacements,
+      created, strings, stringsLen, proofText, numFunctions, numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
   }
@@ -1229,7 +1229,6 @@ def rewritten? (u : Unit) (position : Nat) (use : Nat := 0) : Option (Array Bool
   (u.placementEntries? position use).map (·.map fun entry =>
     entry != none32 && entry &&& 0x40000000 != 0)
 
-
 /--
 For a literal-wise simplification that scaled a literal, one number per
 literal of its premise: the number the difference of the literal's sides is
@@ -1265,9 +1264,9 @@ def genClause? (u : Unit) : Option GenClause :=
   if idx == none32 then none else some ⟨u.proof, idx⟩
 
 /--
-Which of a general splitting component's literals is the name the splitting
-introduced, and which of what is left of the clause it split denies it; `none`
-for anything else.
+Which literal of a general splitting step's clause is the name the splitting
+introduced: asserted in a component, denied in what is left of the clause
+split; `none` for any other step.
 -/
 def splittingName? (u : Unit) : Option Nat :=
   let i := u.field 30

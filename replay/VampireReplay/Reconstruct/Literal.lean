@@ -218,7 +218,7 @@ def ofNotNot (a : Expr) (h : Expr) : Expr :=
 What a fact says, with any double negation taken off it.
 
 A clause's literal can be a negative one, so what says it fails says a double
-negation, and a decision procedure does not see through that.
+negation, where the lemma a fact is handed to states the literal itself.
 -/
 partial def plainly (h : Expr) : ReconstructM Expr := do
   let stated ← instantiateMVars (← inferType h)
@@ -226,8 +226,7 @@ partial def plainly (h : Expr) : ReconstructM Expr := do
     if let some innermost := inner.not? then
       return ← plainly (ofNotNot innermost h)
   -- `a → False` is `¬a` too, and is what a refutation built here states; a
-  -- decision procedure reads the one and not the other, so it is said again
-  -- the way it reads it.
+  -- lemma states `¬a`, so it is said again that way.
   if let some inner := asNegation stated then
     if let some innermost := inner.not? then
       return ← plainly (ofNotNot innermost h)

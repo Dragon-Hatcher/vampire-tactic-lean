@@ -241,7 +241,8 @@ private def bindIntroduced : ReconstructM PUnit := do
         { created := latest (formulaSymbols named #[name]), introduces := true, unit := u
           bind := bindNaming u name arguments named }
     -- Clausification records the steps it took, which say where each of its
-    -- skolemisations happened; anything else is looked for in the formula.
+    -- skolemisations happened; anything else is read off the unit's recorded
+    -- skolems and the formula they came from.
     if let some clause := u.genClause? then
       let (sorts, skolems) := Clausify.skolemContext u
       if skolems.isEmpty then continue
@@ -274,13 +275,11 @@ private def bindIntroduced : ReconstructM PUnit := do
       || (a.created == b.created && (a.introduces && !b.introduces
         || (a.introduces == b.introduces && i < j)))
   for (introduction, _) in ordered do
-    trace[vampire] "binding {introduction.created} {introduction.introduces} step \
-      {introduction.unit.number} ({(introduction.unit.rule?.map (·.name)).getD "?"})"
     try
       introduction.bind
     catch e =>
       let u := introduction.unit
-      throwError "binding what step {u.number} ({(u.rule?.map (·.name)).getD "unknown"}) \
+      throwError "binding what step {u.number} ({(u.rule?.map (·.name)).getD "?"}) \
         introduces: {e.toMessageData}"
 
 /--

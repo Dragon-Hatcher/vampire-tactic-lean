@@ -12,10 +12,11 @@ theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
 Vampire finds the refutation; the tactic then **replays that refutation as a
 Lean proof term**, inference by inference. By default nothing is admitted: if
 a rule cannot be replayed, the tactic fails and names it. `+admit` closes the
-goal anyway, with those steps as `sorry` and a warning. The one place a
-decision procedure stands in is arithmetic, where vampire's own rules record
-nothing of why a step holds, so `linarith` or `omega` proves that step from the
-literals it acted on.
+goal anyway, with those steps as `sorry` and a warning. Every step is replayed
+from what vampire recorded of it; no decision procedure runs. An arithmetic
+step is certified by a fixed lemma (`Vampire.Lemmas`) instantiated at the terms
+vampire recorded, related to the step by ring normalization, with closed facts
+about numerals evaluated by `norm_num`.
 
 ## Theories
 
@@ -133,6 +134,7 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 | `heartbeats` | 500 | beats per millisecond of `timeout`; 0 uses the clock |
 | `wallLimit` | 60 | real-time limit in seconds, whatever the beats say; 0 for none |
 | `cores` | 4 | strategies of the schedule run at once |
+| `mode` | `portfolio` | vampire's mode; `portfolio` works through `schedule`, `vampire` runs one strategy as `options` give it |
 | `schedule` | `casc` | the strategy schedule to work through |
 | `strategy` | — | run only this strategy, as the tactic suggests it |
 | `options` | — | extra vampire options, as `#[("name", "value")]` |
@@ -141,6 +143,11 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 | `stats` | false | report what each phase cost and how many steps the proof had (`+stats`) |
 | `checkSteps` | false | check each replayed step as it is built, naming the rule that fails |
 | `admit` | false | close the goal even where the proof uses a rule with no replay yet, admitting those steps as `sorry` (`+admit`) |
+| `skipUntranslatable` | false | leave out, rather than fail on, a hypothesis that cannot be stated in TPTP (`vampire?` sets it) |
+| `premises` | 128 | how many premises `vampire?` asks the library suggestions engine for |
+
+`vampire?` looks for premises itself, as `exact?` and `simp?` do, and suggests
+the `vampire [...]` call that uses the ones the proof needed.
 
 `+stats` says where the time went:
 
@@ -194,16 +201,16 @@ built worker is made of and what each piece is under.
 
 ## Repository
 
-- `Vampire/` — the tactic: the goal it is given, the decision procedures it
-  hands to replay, and the syntax.
+- `Vampire/` — the tactic: the goal it is given, what it hands to replay (the
+  literal rewrites, ring normalization, the lemmas arithmetic steps are
+  certified by, and `norm_num`'s numeral evaluation), and the syntax.
 - `replay/` — a package of its own holding the replay, and `spawn.c`, which
   starts the worker without copying the address space: `Translate.lean` goes to
   TPTP, `Wire.lean` decodes what the prover wrote, and `Reconstruct/` replays
   it, one module per family of inference rules. Separate so that it can be
   precompiled and so run as native code rather than in the interpreter, which
   is worth about three times the replay; that is possible only because none of
-  it imports Mathlib, the decision procedures being handed in rather than
-  called.
+  it imports Mathlib, what needs Mathlib being handed in rather than called.
 - `worker/` — the C++ program that runs one proof attempt and writes the
   derivation out in a flat encoding.
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
