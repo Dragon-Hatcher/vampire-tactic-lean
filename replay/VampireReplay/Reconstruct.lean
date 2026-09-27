@@ -241,7 +241,9 @@ def run (proof : Proof) (symbols : Symbols)
     (virasRefute : Expr → Expr → Nat → Array Expr → Array Expr → MetaM Expr)
     (cancelling : Expr → Expr → Expr → MetaM (Option Expr))
     (ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)))
-    (checkSteps : Bool := false) :
+    (checkSteps : Bool := false)
+    (numerically : Expr → MetaM Expr := fun _ =>
+      throwError "replay was not given a way to evaluate facts about numerals") :
     MetaM (Option Outcome) := do
   let some refutation := proof.refutation? | return none
   let go : ReconstructM Outcome := do
@@ -263,7 +265,7 @@ def run (proof : Proof) (symbols : Symbols)
   let (outcome, _) ←
     (go.run { symbols, proof, givens, contradiction, literalIff, literalFalse,
               literalRewritten, virasRefute, cancelling, ringNormalForms,
-              checkSteps
+              checkSteps, numerically
               flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>
                 match sym.numeral? with

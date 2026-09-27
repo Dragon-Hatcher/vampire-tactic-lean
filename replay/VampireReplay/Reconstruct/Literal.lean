@@ -153,6 +153,18 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
   return some (← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2)))
 
 /--
+`a = b` where the two are one up to the identities of a commutative ring, at
+any depth; `none` where they are not. Nothing is decided about numbers: a
+certificate that relates its terms to a step's by ring arithmetic alone asks
+this, and a term that is not the one it looks for is not an error.
+-/
+def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
+  if a == b then return some (← mkEqRefl a)
+  let normal ← (← read).ringNormalForms #[a, b]
+  unless normal[0]!.1 == normal[1]!.1 do return none
+  return some (← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2))
+
+/--
 `target` from two complementary literals.
 
 Either can be the negation of the other -- both can be negations, `¬¬a` and
@@ -325,6 +337,35 @@ partial def byArithmetic (facts : Array Expr) (goal : Expr)
           if ← isDefEq denied (← instantiateMVars (← inferType other)) then
             return ← mkAppOptM ``absurd
               #[some denied, some (mkConst ``False), some other, some fact]
+    -- A step's variable can stand for a term -- flattening names a subterm by
+    -- one, Gaussian elimination solves for one -- and a fact about the variable
+    -- and one about the term are then one fact only once the equation between
+    -- them is substituted, which no procedure over the facts as given does.
+    if fuel > 0 then
+      let types ← facts.mapM fun f => do instantiateMVars (← inferType f)
+      let namesVariable (t : Expr) : Bool := match t.eq? with
+        | some (_, l, r) =>
+          (l.isFVar && !r.containsFVar l.fvarId!) || (r.isFVar && !l.containsFVar r.fvarId!)
+        | none => false
+      if types.any namesVariable then
+        try
+          return ← rollingBack do
+            let decls := types.mapIdx fun i t => (Name.mkSimple s!"fact{i}", fun _ => pure t)
+            withLocalDeclsD decls fun hs => do
+              let before := (← getLCtx)
+              let goal ← mkFreshExprSyntheticOpaqueMVar (mkConst ``False)
+              let substituted ← Lean.Meta.substVars goal.mvarId!
+              let proof ← substituted.withContext do
+                let mut remaining := #[]
+                for decl in ← getLCtx do
+                  if decl.isImplementationDetail then continue
+                  -- What was in scope before, and still is, is no fact of these.
+                  if (before.find? decl.fvarId).isSome && !hs.contains decl.toExpr then continue
+                  if ← isProp decl.type then remaining := remaining.push decl.toExpr
+                byArithmetic remaining (mkConst ``False) (fuel - 1)
+              substituted.assign proof
+              return mkAppN (← mkLambdaFVars hs (← instantiateMVars goal)) facts
+        catch _ => pure ()
     -- A fact that denies an equality is used by making the equality: `linarith`
     -- reads `¬(a < b)` as `b ≤ a` but takes nothing from `a ≠ b`, so what it
     -- denies is proved from the rest instead. A denied comparison needs none

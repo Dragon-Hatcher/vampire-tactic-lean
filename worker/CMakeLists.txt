@@ -27,6 +27,9 @@ set_target_properties(vampire-worker PROPERTIES
 target_include_directories(vampire-worker PRIVATE ${VAMPIRE_INCLUDES})
 target_compile_definitions(vampire-worker PRIVATE ${VAMPIRE_DEFINITIONS})
 target_compile_options(vampire-worker PRIVATE ${VAMPIRE_OPTIONS})
+# Where vampire's sources are, which the site an inference records starts with.
+target_compile_definitions(vampire-worker PRIVATE
+  VAMPIRE_SOURCE_ROOT="${VAMPIRE_SOURCE_DIR}")
 
 # What the Lean side checks its generated `InferenceRule` against. The rules
 # are numbered by where they are declared, so a count alone would not notice

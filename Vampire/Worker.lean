@@ -68,6 +68,20 @@ structure Config where
   -/
   forced : Array (String × String) :=
     #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
+  /-
+  Options replay needs at vampire's defaults, which no strategy of the
+  schedules changes: an option given to change one is refused (`refused?`)
+  rather than forced back, since vampire warns of every ALASCA option set where
+  ALASCA is off.
+
+  ALASCA's quantifier elimination is VIRAS, which replay certifies; the
+  variable elimination vampire runs instead where VIRAS is off concludes a
+  projection of a variable's bounds, which follows from its premise by a case
+  analysis on where the variable lies that the step does not record. ALASCA's
+  integer conversion restates an integer problem over the reals with new
+  symbols of real sort in place of the integer ones, which the goal has no
+  counterparts for.
+  -/
   -- Vampire takes one `forced_options`, the last given, so options a user
   -- forces are merged into these rather than passed after them: passed after,
   -- they would replace these, and a proof could then use what replay cannot
@@ -79,6 +93,38 @@ structure Config where
 deriving Inhabited
 
 namespace Config
+
+/-- The options replay needs at their defaults: their names, long and short, and the default. -/
+private def required : Array (List String × String) :=
+  #[(["virtual_integer_real_arithmetic_substitution", "viras"], "on"),
+    (["alasca_integer_conversion", "alascai"], "off")]
+
+/-- Why vampire cannot be run as configured, if it cannot: see `required`. -/
+def refused? (cfg : Config) : Option String := Id.run do
+  let given := cfg.options.flatMap fun (n, v) =>
+    if n == "forced_options" || n == "fo" then pairs v
+    else if n == "strategy" then encoded v
+    else #[(n, v)]
+  for (n, v) in given ++ encoded cfg.strategy do
+    for (names, default) in required do
+      if names.contains n && v != default then
+        return some s!"`{n}={v}` makes vampire take steps replay cannot follow; \
+          replay needs `{names.head!}={default}`"
+  return none
+where
+  /-- `name=value` pairs, `:`-separated, as forced options are given. -/
+  pairs (s : String) : Array (String × String) :=
+    (s.splitOn ":").toArray.filterMap fun p =>
+      match p.splitOn "=" with
+      | [n, v] => some (n, v)
+      | _ => none
+  /--
+  The options of a strategy as vampire encodes one, `sa+awr_name=value:…_time`:
+  short names, the pairs `:`-separated between the first and last `_`.
+  -/
+  encoded (s : String) : Array (String × String) :=
+    (pairs s).map fun (n, v) =>
+      ((n.splitOn "_").getLast!, (v.splitOn "_").head!)
 
 def toArgs (cfg : Config) : Array String :=
   #[s!"time_limit={cfg.timeout * max 1 cfg.cores}", s!"mode={cfg.mode}",
@@ -164,6 +210,7 @@ def prove (problem : String) (cfg : Config := {})
   let worker ← match cfg.worker? with
     | some path => pure path
     | none => findWorker searchFrom
+  if let some why := cfg.refused? then throw (IO.userError why)
   IO.FS.withTempDir fun dir => do
     let problemFile := dir / "problem.p"
     let outFile := dir / "proof.bin"

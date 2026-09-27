@@ -15,7 +15,7 @@ def none32 : UInt32 := 0xFFFFFFFF
 private def headerWords : Nat := 45
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 34
+private def unitWidth : Nat := 35
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -148,7 +148,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 29
+private def version : UInt32 := 30
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -1009,6 +1009,14 @@ def skolems (u : Unit) : Array (UInt32 × Term) :=
   Array.ofFn (n := count.toNat) fun i =>
     let base := p.layout.skolems + (first.toNat + i.val) * 2 * 4
     (readU32 p.data base, ⟨p, readU32 p.data (base + 4)⟩)
+
+/--
+Where in vampire the inference was made, `file:line` in its source directory:
+one rule is made in several places, which do not all do the same.
+-/
+def site? (u : Unit) : Option String :=
+  let off := u.field 34
+  if off == none32 then none else some (u.proof.string off)
 
 /--
 The name the input gave this formula, and `none` for anything vampire derived.

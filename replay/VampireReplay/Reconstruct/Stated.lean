@@ -187,6 +187,11 @@ def interpreted (name : String) (args : Array Expr) :
   | "$greatereq" =>
     let #[a, b] := args | return none
     return some (mkApp2 (← headAt ``LE.le (← inferType a) 2) b a)
+  -- Vampire's absolute value, which only its theory axioms for the integer
+  -- remainder mention (`tha_modulo_small`, `tha_abs_*`): Mathlib's `|x|`.
+  | "$abs" =>
+    let #[a] := args | return none
+    return some (← mkAppM `abs #[a])
   | "$uminus" =>
     let #[a] := args | return none
     return some (mkApp (← headAt ``Neg.neg (← inferType a) 1) a)

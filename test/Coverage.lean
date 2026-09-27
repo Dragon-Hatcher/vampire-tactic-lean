@@ -431,3 +431,178 @@ example (p : Prop) (a : ℝ) (h : ∀ x : ℝ, x > a ∨ p) (hp : ¬ p) : False 
 #guard_msgs (drop info) in
 example (p : Prop) (a b : ℝ) (h : ∀ x : ℝ, 3 * x ≤ a ∨ 2 * x = b ∨ p) (hp : ¬ p) : False := by
   vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+/-! ### Sites of vampire's the coverage metric found untested
+
+Each reaches one place in vampire where an inference is made that nothing else
+in the suite did (`bench/coverage.py`); the options pin what makes vampire take
+that path.
+-/
+
+-- An input formula that is `$false`, clausified by the old CNF and by the new.
+#guard_msgs (drop info) in
+example (p : Prop) (h : False) : p := by vampire (mode := "vampire") (cores := 1) [*]
+
+#guard_msgs (drop info) in
+example (p : Prop) (h : False) : p := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [*]
+
+-- Fast condensation: `P(X) ∨ P(a)` is `P(a)`, at the matcher it found.
+#guard_msgs (drop info) in
+example {ι : Type} (P : ι → Prop) (a : ι) (h : ∀ x, P x ∨ P a) (hn : ¬ P a) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("condensation", "fast")]) [*]
+
+-- Theory flattening names `a + 1` by a variable: the step is replayed once the
+-- equation between them is substituted.
+#guard_msgs (drop info) in
+example (P : ℤ → Prop) (a : ℤ) (h : P (a + 1)) (hn : ∀ x, ¬ P (x + 1)) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("theory_flattening", "on")]) [*]
+
+-- Equality factoring, outside ALASCA.
+#guard_msgs (drop info) in
+example {ι : Type} (a b c : ι) (h : ∀ x y : ι, x = y ∨ x = a) (hb : b ≠ a) (hc : c ≠ a)
+    (hbc : b ≠ c) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("avatar", "off")]) [*]
+
+-- Gaussian variable elimination, with equality resolution with deletion off,
+-- which would otherwise have eliminated the variable first: its conclusion is
+-- the premise at `x := a + 1`, which it records.
+#guard_msgs (drop info) in
+example (P : ℤ → Prop) (a : ℤ) (h : ∀ x : ℤ, x = a + 1 → P x) (hn : ¬ P (a + 1)) : False := by
+  vampire (mode := "vampire") (cores := 1)
+    (options := #[("gaussian_variable_elimination", "force"),
+      ("equality_resolution_with_deletion", "off")]) [*]
+
+-- Forward subsumption demodulation, and the subsumption resolution it does when
+-- the rewrite would leave a disequality trivial. Under DISCOUNT, whose
+-- simplifying clauses are the active ones, so the main premise has to be one
+-- derived after the side premise is active; plain subsumption resolution, off
+-- in the second, would otherwise get there first.
+#guard_msgs (drop info) in
+example {ι : Type} (p s t : ι → Prop) (f : ι → ι → ι) (g : ι → ι) (a b : ι)
+    (h1 : ∀ x y, g x = a → f x y = x) (h2 : ∀ x, s x → g x = a → ¬ p (f x b))
+    (h7 : s a) (h3 : p a) (h5 : t a) (h6 : ∀ x, t x → g x = a) : False := by
+  vampire (mode := "vampire") (cores := 1)
+    (options := #[("forward_subsumption_demodulation", "on"), ("avatar", "off"),
+      ("saturation_algorithm", "discount")]) [*]
+
+#guard_msgs (drop info) in
+example {ι : Type} (q s t : ι → Prop) (f : ι → ι → ι) (g : ι → ι) (a b : ι)
+    (h1 : ∀ x y, g x = a → f x y = x) (h2 : ∀ x, s x → g x = a → f x b ≠ x ∨ q x)
+    (h7 : s a) (h3 : ¬ q a) (h5 : t a) (h6 : ∀ x, t x → g x = a) : False := by
+  vampire (mode := "vampire") (cores := 1)
+    (options := #[("forward_subsumption_demodulation", "on"), ("avatar", "off"),
+      ("saturation_algorithm", "discount"), ("forward_subsumption_resolution", "off")]) [*]
+
+-- ALASCA's strong normalization of comparisons: `a ≥ b` is `a > b ∨ a = b`, two
+-- literals of one, which follow from it by the arithmetic.
+#guard_msgs (drop info) in
+example (a b : ℝ) (h1 : a ≥ b) (h2 : a < b) : False := by
+  vampire (mode := "vampire") (cores := 1)
+    (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+      ("alasca_strong_normalziation", "on")]) [*]
+
+/-! Theory axioms, with evaluation off so that vampire has to use them: each
+goal denies what one axiom states. Integer division and remainder, absolute
+value and a field's division are some numbers to a decision procedure; what
+they are is the facts replay hands it, as for floors. -/
+
+#guard_msgs (drop info) in
+example (f : ℤ → ℤ) (a : ℤ) (h : f (a + 0) ≠ f a) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (f : ℤ → ℤ) (a b : ℤ) (h : f (-(a + b)) ≠ f (-b + -a)) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (a b : ℤ) (hb : b ≠ 0) (h : a ≠ b * (a / b) + a % b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (a b : ℤ) (hb : b ≠ 0) (h : a % b < 0) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+-- The remainder's upper bound is `|b| - 1`, and `|b|` is `b` or `-b` by its sign.
+#guard_msgs (drop info) in
+example (a b : ℤ) (hb : 0 < b) (h : b ≤ a % b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (a b : ℤ) (hb : b < 0) (h : -b ≤ a % b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x : ℝ) (hx : x ≠ 0) (h : 1 / x = 0) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x y : ℝ) (hx : x ≠ 0) (h : (y * x) / x ≠ y) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x : ℝ) (h : (⌊x⌋ : ℝ) ≤ x - 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x : ℝ) (h : x + 1 ≤ (⌈x⌉ : ℝ)) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("evaluation", "off"), ("theory_axioms", "on")]) [*]
+
+-- Integer Fourier-Motzkin, whose third premise says a term is an integer, and
+-- floor Fourier-Motzkin, where the atom itself is a floor: certified by
+-- `Vampire.Lemmas`, instantiated at the terms vampire recorded.
+#guard_msgs (drop info) in
+example (x : ℝ) (h1 : 0 < (⌊x⌋ : ℝ)) (h2 : (⌊x⌋ : ℝ) < 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x y : ℝ) (h1 : 2 * (⌊x⌋ : ℝ) < (⌊y⌋ : ℝ)) (h2 : (⌊y⌋ : ℝ) < 2 * (⌊x⌋ : ℝ) + 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x y : ℝ) (h : (⌊y⌋ : ℝ) = 2 * x + 1) (h1 : 0 < x) (h2 : 2 * x < 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- The integral term's atom has a negative coefficient in it.
+#guard_msgs (drop info) in
+example (x y z : ℝ) (h : (⌊z⌋ : ℝ) = x - 3 * y) (h1 : 3 * y < x) (h2 : x < 3 * y + 1) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- One bound not strict.
+#guard_msgs (drop info) in
+example (x y : ℝ) (h : (⌊y⌋ : ℝ) = x) (h1 : 0 ≤ x) (h2 : x < 1) (h3 : x ≠ 0) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- Floor elimination: `2 ⌊x⌋ = 1` has no integer solution.
+#guard_msgs (drop info) in
+example (x : ℝ) (P : Prop) (h : 2 * (⌊x⌋ : ℝ) = 1 ∨ P) (hp : ¬P) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x y : ℝ) (h : ∀ z : ℝ, 3 * (⌊z⌋ : ℝ) = 2 ∨ z = y) (h2 : x ≠ y) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- Coherence: an integer taken out of a floor.
+#guard_msgs (drop info) in
+example (x y : ℝ) (h : (⌊y⌋ : ℝ) = x) (h2 : (⌊x + 1/2⌋ : ℝ) ≠ x) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+#guard_msgs (drop info) in
+example (x y a : ℝ) (h : (⌊y⌋ : ℝ) = 2 * x) (h2 : (⌊2 * x + a⌋ : ℝ) ≠ 2 * x + ⌊a⌋) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- Coherence normalization: what a floor equals is its own floor.
+#guard_msgs (drop info) in
+example (a b : ℝ) (h : (⌊a⌋ : ℝ) = 2 * b) (h2 : (⌊2 * b⌋ : ℝ) ≠ 2 * b) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on")]) [*]
+
+-- ALASCA's axioms of nonlinear monotonicity.
+#guard_msgs (drop info) in
+example (x y z : ℝ) (hx : 0 < x) (h : y < z) (h2 : x * z ≤ x * y) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"), ("theory_axioms", "on")]) [*]
+
+-- Function definition introduction, whose definitions vampire states reoriented.
+#guard_msgs (drop info) in
+example (α : Type) (f : α → α → α) (g : α → α) (a : α)
+    (h1 : ∀ x y, f (f x y) y = f x y) (h2 : ∀ x, g (f x x) = x) : g (f (f (f a a) a) a) = a := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("function_definition_introduction", "1")]) [*]

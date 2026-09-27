@@ -154,6 +154,13 @@ structure Context where
   ringNormalForms : Array Expr → MetaM (Array (Expr × Expr)) := fun _ =>
     throwError "replay was not given a way to normalise terms over a ring"
   /--
+  A proof of a true closed fact about numerals -- `0 < 3 / 2`, `(2 : ℤ) = 2`:
+  evaluated, not searched for. Handed in for the same reason as
+  `contradiction`.
+  -/
+  numerically : Expr → MetaM Expr := fun _ =>
+    throwError "replay was not given a way to evaluate facts about numerals"
+  /--
   The number each numeral symbol stands for, by its name and arity: ALASCA's
   multiplication by a number is printed as the number is.
   -/

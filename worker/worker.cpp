@@ -69,7 +69,7 @@
  *              genState, firstChoice, numChoices, firstCongruence,
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
- *              splittingName, firstFactor, numFactors, procedure}
+ *              splittingName, firstFactor, numFactors, procedure, site}
  *             `firstConstraint` and `numConstraints` are the entries of
  *             `constraintLits` that say which of a clause's literals are the
  *             disequalities an abstracting unifier left behind: what it could
@@ -90,6 +90,11 @@
  *             procedure rewrote it (`InferenceStore::LiteralProcedure`):
  *             evaluation is whichever of three evaluators the options chose,
  *             and they rewrite a literal differently. `NONE` otherwise.
+ *             `site` is the string offset of where in vampire the inference
+ *             was made, `file:line` relative to vampire's source directory,
+ *             and `NONE` where it is not known: one rule is made in several
+ *             places, which do not all do the same, and replay counts which
+ *             of them the steps it certifies came from.
  *             `splittingName` is, for a general splitting component, which
  *             of its literals is the name the splitting introduced, and
  *             `NONE` for anything else: the name is a fresh predicate like
@@ -270,9 +275,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 29;
+const uint32_t VERSION = 30;
 /** Words per unit record. */
-const uint32_t UNIT_WIDTH = 34;
+const uint32_t UNIT_WIDTH = 35;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /**
@@ -574,6 +579,11 @@ std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause
     InferenceStore::instance()->literalImages(u);
   if (!rewriting)
     return out;
+  // ALASCA's strong normalization of comparisons can make two literals of one,
+  // so it records its procedure and no images: replay reads it by arithmetic.
+  if (rewriting->procedure ==
+      InferenceStore::LiteralProcedure::INEQUALITY_PREDICATE_NORMALIZATION)
+    return out;
   if (rewriting->images.size() != premise->length())
     throw UserErrorException("unit " + std::to_string(u->number()) + " recorded " +
       std::to_string(rewriting->images.size()) + " literal images for a premise of " +
@@ -632,6 +642,17 @@ struct Encoder {
   std::unordered_map<const void*, uint32_t> literalSeen, formulaSeen, unitSeen,
       satSeen;
   std::unordered_map<uint32_t, uint32_t> genSeen;
+
+  /** Where the inference was made, as a string of the table, or `NONE`. */
+  uint32_t siteOf(const Inference& inference)
+  {
+    const char* file = inference.siteFile();
+    if (!file) return NONE;
+    std::string path = file;
+    const std::string root = VAMPIRE_SOURCE_ROOT "/";
+    if (path.rfind(root, 0) == 0) path = path.substr(root.size());
+    return addString(path + ":" + std::to_string(inference.siteLine()));
+  }
 
   uint32_t addString(const std::string& s)
   {
@@ -1050,6 +1071,7 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 10] = numSkolems == 0 ? NONE : firstSkolem;
     units[UNIT_WIDTH * idx + 11] = numSkolems;
     units[UNIT_WIDTH * idx + 12] = nameOff;
+    units[UNIT_WIDTH * idx + 34] = siteOf(inference);
 
     // Subsumption resolution has several implementations and none of them keeps
     // the substitution it found, so it is worked out here instead.
@@ -1371,9 +1393,12 @@ struct Encoder {
       if (first && first->isClause())
         images = literalImagesOf(u, first->asClause());
     }
-    if (!images.empty())
-      units[UNIT_WIDTH * idx + 33] = static_cast<uint32_t>(
-        InferenceStore::instance()->literalImages(u)->procedure);
+    // The procedure goes with its images, or on its own for the one that
+    // records none (strong normalization, `literalImagesOf`).
+    if (const auto* rewriting = InferenceStore::instance()->literalImages(u);
+        rewriting && (!images.empty() || rewriting->procedure ==
+          InferenceStore::LiteralProcedure::INEQUALITY_PREDICATE_NORMALIZATION))
+      units[UNIT_WIDTH * idx + 33] = static_cast<uint32_t>(rewriting->procedure);
     {
       bool scaled = false;
       for (const auto* image : images)

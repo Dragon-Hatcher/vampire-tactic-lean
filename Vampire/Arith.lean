@@ -1,6 +1,8 @@
 import Lean
 import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.Ring
+import Mathlib.Tactic.NormNum.Core
+import Vampire.Lemmas
 import VampireReplay.Abstract
 import VampireReplay.Reconstruct.Monad
 
@@ -137,6 +139,16 @@ private def askAbout (facts : Array Expr) (claim : Option Expr) : MetaM Expr := 
     throwError "a decision procedure was asked for{indentExpr
       (claim.getD (mkConst ``False))}\nand gave something proving{indentExpr stated}"
   return answer
+
+/--
+A proof of `claim`, a true closed fact about numerals: evaluated by
+`norm_num`'s extensions, which compute with numerals rather than search for a
+proof.
+-/
+def numerically (claim : Expr) : MetaM Expr := do
+  let ⟨true, proof⟩ ← Mathlib.Meta.NormNum.deriveBool claim
+    | throwError "{claim} is false"
+  return proof
 
 /--
 `x ≠ 0 → x * z = x * w → z = w`, where the numbers cancel.

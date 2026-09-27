@@ -1,0 +1,55 @@
+# Sites of implemented rules that cannot make a step in a proof the tactic
+# asks for: site<TAB>rule (* for any)<TAB>reason  (bench/coverage.py)
+Shell/Interpolants.cpp:127	*	interpolation only, which the tactic never asks for
+Shell/Interpolants.cpp:481	*	interpolation only, which the tactic never asks for
+Shell/TheoryAxioms.cpp:74	tha_trunc1	the translation writes no $truncate, which alone adds the truncation axioms
+Shell/TheoryAxioms.cpp:74	tha_trunc2	the translation writes no $truncate, which alone adds the truncation axioms
+Shell/TheoryAxioms.cpp:74	tha_trunc3	the translation writes no $truncate, which alone adds the truncation axioms
+Shell/TheoryAxioms.cpp:74	tha_trunc4	the translation writes no $truncate, which alone adds the truncation axioms
+Shell/TheoryAxioms.cpp:74	tha_divides_multiply	the translation writes no $divides, which alone adds the divides axioms
+Shell/TheoryAxioms.cpp:74	tha_nondivides_skolem	the translation writes no $divides, which alone adds the divides axioms
+Shell/TheoryAxioms.cpp:74	tha_array_extensionality	the translation writes no arrays
+Shell/TheoryAxioms.cpp:74	tha_array_write1	the translation writes no arrays
+Shell/TheoryAxioms.cpp:74	tha_array_write2	the translation writes no arrays
+Saturation/AWPassiveClauseContainers.cpp:428	*	a placeholder clause the passive container makes to estimate a clause's priority, never a proof step
+Saturation/AWPassiveClauseContainers.hpp:122	*	a placeholder clause the passive container makes to estimate a clause's priority, never a proof step
+Parse/TPTP.cpp:4010	*	a cnf clause of the input, and the translation writes tff formulas only
+Parse/TPTP.cpp:4016	*	a cnf clause of the input, and the translation writes tff formulas only
+Parse/TPTP.cpp:4012	*	a cnf clause of the input, and the translation writes tff formulas only
+Parse/SMTLIB2.cpp:830	*	the SMT-LIB parser, and the tactic sends TPTP
+Parse/SMTLIB2.cpp:924	*	the SMT-LIB parser, and the tactic sends TPTP
+Parse/SMTLIB2.cpp:2800	*	the SMT-LIB parser, and the tactic sends TPTP
+Parse/SMTLIB2.cpp:2815	*	the SMT-LIB parser, and the tactic sends TPTP
+Parse/SMTLIB2.cpp:2828	*	the SMT-LIB parser, and the tactic sends TPTP
+Parse/SMTLIB2.cpp:2868	*	the SMT-LIB parser, and the tactic sends TPTP
+vampire.cpp:406	*	the command-line vampire, which the worker does not link
+Shell/Interpolants.cpp:424	*	interpolation only, which the tactic never asks for
+Inferences/AnswerLiteralProcessors.cpp:84	*	question answering only, which the tactic never asks for
+Shell/AnswerLiteralManager.cpp:391	*	question answering only, which the tactic never asks for
+Shell/AnswerLiteralManager.cpp:532	*	question answering only, which the tactic never asks for
+FMB/ClauseFlattening.cpp:109	*	finite model building, whose refutation ends in model_not_found, which replay does not implement
+FMB/Monotonicity.cpp:238	*	finite model building, whose refutation ends in model_not_found, which replay does not implement
+FMB/Monotonicity.cpp:248	*	finite model building, whose refutation ends in model_not_found, which replay does not implement
+FMB/FunctionRelationshipInference.cpp:267	*	finite model building, whose refutation ends in model_not_found, which replay does not implement
+Indexing/AcyclicityIndex.cpp:237	*	term algebra acyclicity, and the translation declares no term algebras
+Shell/FunctionDefinitionHandler.cpp:121	*	recursive function definitions, and the translation sends none
+Inferences/TheoryInstAndSimp.cpp:679	*	compiled only with Z3, and the bundled vampire is built without it
+Inferences/TheoryInstAndSimp.cpp:683	*	compiled only with Z3, and the bundled vampire is built without it
+Shell/Rectify.cpp:75	*	closes a formula over its free variables, and the translation writes closed formulas only
+Saturation/Splitter.cpp:271	*	a well-colored proof, for interpolation only, which the tactic never asks for
+Shell/EqualityProxy.cpp:446	*	the equality proxy of a polymorphic problem, and the translation writes monomorphic ones only
+Inferences/DistinctEqualitySimplifier.cpp:64	*	constants declared distinct, and the translation writes no $distinct and no distinct objects
+Shell/PredicateDefinition.cpp:378	*	the tactic forces updr=off: replacing a pure predicate preserves satisfiability but is no entailment (Vampire/Worker.lean)
+Shell/PredicateDefinition.cpp:687	*	the tactic forces updr=off: the pass that removes unused definitions also replaces pure predicates (Vampire/Worker.lean)
+Inferences/SubsumptionDemodulationHelper.cpp:128	backward_subsumption_resolution	made so only by backward subsumption demodulation, which the tactic forces off with bsd=off
+Shell/PredicateElimination.cpp:754	*	made only by predicate elimination, whose own steps replay does not implement
+Shell/InterpretedNormalizer.cpp:498	*	normalizes a clause of the input before clausification, and the translation writes tff formulas only
+Shell/TheoryAxioms.cpp:74	tha_left_identity	addLeftIdentity, which alone adds it, is never called
+Shell/TheoryAxioms.cpp:74	tha_inverse_assoc	addRightInverse, which alone adds it, is never called
+Shell/TheoryAxioms.cpp:74	tha_plus_one_greater	addPlusOneGreater, which alone adds it, is never called
+Inferences/ALASCA/VariableElimination.cpp:353	*	vampire adds the rule only with VIRAS off, which the tactic refuses (Config.refused?)
+Kernel/ALASCA/Preprocessor.hpp:214	*	integer conversion, which the tactic refuses (Config.refused?)
+Kernel/ALASCA/Preprocessor.hpp:247	*	integer conversion, which the tactic refuses (Config.refused?)
+Kernel/ALASCA/Preprocessor.hpp:338	*	integer conversion's quotient elimination, which the tactic refuses (Config.refused?)
+Kernel/ALASCA/Preprocessor.hpp:354	*	integer conversion's quotient elimination, which the tactic refuses (Config.refused?)
+Saturation/Splitter.cpp:1288	*	a temporary clause the definition's formula is made from; the proof has the formula, never the clause
