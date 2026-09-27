@@ -77,7 +77,6 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .reduceFalseTrue => Simplify.reduceFalseTrue step
   | .closure => Congruence.restated step
   | .theoryNormalization => Arithmetic.literalwise step
-  | .alascaIntegerTransformation => Arithmetic.theoryStep step
   -- A disequality whose sides unify dropped, the unifier only renaming what
   -- is left; the worker records it as equality resolution at that unifier.
   | .subsumptionEqualityResolution =>
@@ -93,11 +92,8 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaAbstraction => Arithmetic.theoryStep step
   | .alascaFloorElimination => Arithmetic.floorElimination step
   | .cancellation => Arithmetic.literalwise step
-  | .interpretedSimplification => Arithmetic.theoryStep step
   | .theoryFlattening => Arithmetic.theoryStep step
-  -- A literal equating two numbers that are not equal, dropped.
-  | .distinctEqualityRemoval => Arithmetic.theoryStep step
-  | .gaussianVariableEliminiation => Arithmetic.theoryStep step
+  | .gaussianVariableEliminiation => Arithmetic.gaussianElimination step
   | .arithmeticSubtermGeneralization => Arithmetic.literalwise step
   | .alascaVirasQe => Arithmetic.viras step
   | .constrainedResolution => Resolution.resolution step
@@ -109,17 +105,15 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaFourierMotzkin => Arithmetic.fourierMotzkin step
   | .alascaIntegerFourierMotzkin => Arithmetic.integerFourierMotzkin step
   | .alascaTermFactoring => Arithmetic.termFactoring step
-  | .alascaFloorBounds => Arithmetic.theoryStep step
+  | .alascaFloorBounds => Arithmetic.floorBounds step
   | .alascaEqFactoring => Arithmetic.theoryStep step
   | .alascaLiteralFactoring => Arithmetic.theoryStep step
   | .alascaSuperposition => Rewrite.alascaSuperposition step
   | .alascaCoherence => Arithmetic.coherence step
   | .alascaCoherenceNormalization => Arithmetic.coherenceNormalization step
-  | .alascaVariableElimination => Arithmetic.theoryStep step
   | .equalityProxyReplacement => Definition.equalityProxyReplacement step
   | .equalityProxyDefinition => Definition.definitionStep step
   | .equalityProxyAxiom => Definition.equalityProxyAxiom step
-  | .alascaIntegralityAxiom => Arithmetic.theoryStep step
   | .inequalitySplitting => Definition.inequalitySplitting step
   | .inequalitySplittingNameIntroduction => Definition.inequalitySplittingName step
   | .theoryTautologySatConflict => Closure.conflict step
@@ -152,6 +146,11 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .thaCeilingSmall => Arithmetic.theoryAxiom step
 
   -- Ruled out: these cannot reach a proof the tactic asked for, and say why.
+  | .alascaIntegerTransformation => unreachable step "only integer conversion makes it, which the tactic refuses (`Config.refused?`)"
+  | .alascaIntegralityAxiom => unreachable step "only integer conversion makes it, which the tactic refuses (`Config.refused?`)"
+  | .alascaVariableElimination => unreachable step "vampire adds the rule only with VIRAS off, which the tactic refuses (`Config.refused?`)"
+  | .interpretedSimplification => unreachable step "only the theory instantiation vampire compiles with Z3 makes it, and the bundled vampire is built without Z3"
+  | .distinctEqualityRemoval => unreachable step "it removes equalities between constants declared distinct, and the translation declares none"
   | .thaLeftIdentity => unreachable step "its adding function, `addLeftIdentity`, is never called"
   | .thaInverseAssoc => unreachable step "its adding function, `addRightInverse`, is never called"
   | .thaPlusOneGreater => unreachable step "its adding function, `addPlusOneGreater`, is never called"

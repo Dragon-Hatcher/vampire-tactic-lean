@@ -188,7 +188,10 @@ sees `linMul k t` as an atom.
 -/
 def ringNormal (state : IO.Ref AtomM.State) (e : Expr) : MetaM Simp.Result := do
   let e' ← Vampire.Reconstruct.unfoldDefinitions e (only := (· == ``Vampire.Reconstruct.linMul))
-  let r ← AtomM.recurse state {} true RingNF.evalExpr (RingNF.cleanup {}) e'
+  -- Atoms one up to instances are one atom: a term a lemma states over a
+  -- class and one replay reads over the type's own instances differ in
+  -- nothing but the instance path.
+  let r ← AtomM.recurse state { red := .instances } true RingNF.evalExpr (RingNF.cleanup {}) e'
   -- `e' = nf` is `e = nf`: `linMul` unfolds to the product.
   return { expr := r.expr, proof? := some (← mkExpectedTypeHint (← r.getProof) (← mkEq e r.expr)) }
 

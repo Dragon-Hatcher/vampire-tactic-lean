@@ -134,14 +134,20 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
     unless a.getAppFn == b.getAppFn && as.size == bs.size do return none
     let mut proof ← mkEqRefl a.getAppFn
     for (x, y) in as.zip bs do
-      if x == y then
+      -- An argument one up to instances -- the instance itself, where a lemma
+      -- states over a class what replay reads over the type's own -- is one.
+      if x == y || (← sameUpToInstances x y) then
         proof ← mkCongrFun proof x
       else
         let some p ← go x y | return none
         proof ← mkCongr proof p
     return some proof
   let some same ← go normal[0]!.1 normal[1]!.1 | return none
-  return some (← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2)))
+  let same ← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2))
+  return some (← mkExpectedTypeHint same (← mkEq a b))
+where
+  sameUpToInstances (x y : Expr) : ReconstructM Bool :=
+    withNewMCtxDepth <| withTransparency .instances <| isDefEq x y
 
 /--
 `a = b` where the two are one up to the identities of a commutative ring, at
@@ -152,8 +158,11 @@ this, and a term that is not the one it looks for is not an error.
 def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
   if a == b then return some (← mkEqRefl a)
   let normal ← (← read).ringNormalForms #[a, b]
-  unless normal[0]!.1 == normal[1]!.1 do return none
-  return some (← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2))
+  unless normal[0]!.1 == normal[1]!.1 ||
+      (← withNewMCtxDepth <| withTransparency .instances <| isDefEq normal[0]!.1 normal[1]!.1) do
+    return none
+  let same ← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2)
+  return some (← mkExpectedTypeHint same (← mkEq a b))
 
 /--
 `target` from two complementary literals: `negative`, which the step's

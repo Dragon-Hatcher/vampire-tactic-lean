@@ -354,4 +354,81 @@ theorem eq_of_scaled {α : Type*} [CommRing α] [NoZeroDivisors α] {e k a b : �
   rw [he] at h
   exact sub_eq_zero.mp ((mul_eq_zero.mp h).resolve_left hk)
 
+
+/-!
+### ALASCA's floor bounds
+
+Each of its six shapes (`FloorBounds.hpp`), the premise stated as the rule
+reads it: `⌊s⌋ = t`, or `k (±⌊s⌋ + t) ⋈ 0` for a positive `k`.
+-/
+
+section FloorBounds
+variable {α : Type*} [Field α] [LinearOrder α] [IsStrictOrderedRing α] [FloorRing α]
+
+theorem fb_0 {s t : α} (h : ((⌊s⌋ : ℤ) : α) = t) : 0 < t + -s + 1 := by
+  have := Int.lt_floor_add_one s
+  linarith
+theorem fb_1 {s t : α} (h : ((⌊s⌋ : ℤ) : α) = t) : 0 ≤ s + -t := by
+  have := Int.floor_le s
+  linarith
+
+private theorem pos_of_scaled {k e x : α} (hk : 0 < k) (he : e = k * x) (h : 0 < e) : 0 < x :=
+  pos_of_mul_pos_right (he ▸ h) hk.le
+private theorem nonneg_of_scaled {k e x : α} (hk : 0 < k) (he : e = k * x) (h : 0 ≤ e) : 0 ≤ x :=
+  nonneg_of_mul_nonneg_right (he ▸ h) hk
+
+theorem fb_2 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (((⌊s⌋ : ℤ) : α) + t)) :
+    0 < s + ((⌊t⌋ : ℤ) : α) ∨ ((⌊s⌋ : ℤ) : α) + ((⌊t⌋ : ℤ) : α) = 0 := by
+  have h₀ := nonneg_of_scaled hk he h
+  have : -⌊s⌋ ≤ ⌊t⌋ := Int.le_floor.mpr (by push_cast; linarith)
+  rcases (show (0 : ℤ) ≤ ⌊s⌋ + ⌊t⌋ by omega).lt_or_eq with hlt | heq
+  · left
+    have h1 : ((1 : ℤ) : α) ≤ ((⌊s⌋ + ⌊t⌋ : ℤ) : α) := by exact_mod_cast hlt
+    push_cast at h1
+    linarith [Int.floor_le s]
+  · right; exact_mod_cast heq.symm
+theorem fb_3 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (((⌊s⌋ : ℤ) : α) + t)) :
+    0 < s + -((⌊-t⌋ : ℤ) : α) + -1 ∨ ((⌊s⌋ : ℤ) : α) + -((⌊-t⌋ : ℤ) : α) + -1 = 0 := by
+  have h₀ := pos_of_scaled hk he h
+  -- `-t < ⌊s⌋`, so `⌊-t⌋ < ⌊s⌋`.
+  have : ⌊-t⌋ < ⌊s⌋ := Int.floor_lt.mpr (by linarith)
+  rcases (show (0 : ℤ) ≤ ⌊s⌋ - ⌊-t⌋ - 1 by omega).lt_or_eq with hlt | heq
+  · left
+    have h1 : ((1 : ℤ) : α) ≤ ((⌊s⌋ - ⌊-t⌋ - 1 : ℤ) : α) := by exact_mod_cast hlt
+    push_cast at h1
+    linarith [Int.floor_le s]
+  · right
+    have : ((⌊s⌋ - ⌊-t⌋ - 1 : ℤ) : α) = 0 := by exact_mod_cast heq.symm
+    push_cast at this
+    linarith
+theorem fb_4 {k e s t : α} (hk : 0 < k) (h : 0 ≤ e) (he : e = k * (-((⌊s⌋ : ℤ) : α) + t)) :
+    0 < -s + ((⌊t⌋ : ℤ) : α) ∨ -((⌊s⌋ : ℤ) : α) + ((⌊t⌋ : ℤ) : α) = 0 := by
+  have h₀ := nonneg_of_scaled hk he h
+  have : ⌊s⌋ ≤ ⌊t⌋ := Int.le_floor.mpr (by linarith)
+  rcases (show (0 : ℤ) ≤ ⌊t⌋ - ⌊s⌋ by omega).lt_or_eq with hlt | heq
+  · left
+    have h1 : ((1 : ℤ) : α) ≤ ((⌊t⌋ - ⌊s⌋ : ℤ) : α) := by exact_mod_cast hlt
+    push_cast at h1
+    linarith [Int.lt_floor_add_one s]
+  · right
+    have : ((⌊t⌋ - ⌊s⌋ : ℤ) : α) = 0 := by exact_mod_cast heq.symm
+    push_cast at this
+    linarith
+theorem fb_5 {k e s t : α} (hk : 0 < k) (h : 0 < e) (he : e = k * (-((⌊s⌋ : ℤ) : α) + t)) :
+    0 < -s + -((⌊-t⌋ : ℤ) : α) + -1 ∨ -((⌊s⌋ : ℤ) : α) + -((⌊-t⌋ : ℤ) : α) + -1 = 0 := by
+  have h₀ := pos_of_scaled hk he h
+  -- `⌊s⌋ < t`, so `⌊-t⌋ < -⌊s⌋`.
+  have : ⌊-t⌋ < -⌊s⌋ := Int.floor_lt.mpr (by push_cast; linarith)
+  rcases (show (0 : ℤ) ≤ -⌊s⌋ - ⌊-t⌋ - 1 by omega).lt_or_eq with hlt | heq
+  · left
+    have h1 : ((1 : ℤ) : α) ≤ ((-⌊s⌋ - ⌊-t⌋ - 1 : ℤ) : α) := by exact_mod_cast hlt
+    push_cast at h1
+    linarith [Int.lt_floor_add_one s]
+  · right
+    have : ((-⌊s⌋ - ⌊-t⌋ - 1 : ℤ) : α) = 0 := by exact_mod_cast heq.symm
+    push_cast at this
+    linarith
+
+end FloorBounds
+
 end Vampire.Lemmas

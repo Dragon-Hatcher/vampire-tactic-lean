@@ -1126,4 +1126,121 @@ def termFactoring (step : Step) : ReconstructM Expr := do
         carryRewritten premiseType target premiseAt into placement rewritten
           parent.clauseSize? (byRing equal)
 
+/--
+Gaussian variable elimination: a clause with a disequality `l ≠ r` that can be
+solved for a variable `x`, as `x = t` with `t` free of `x`, is the clause at
+`x := t` without it. At that instance `l` and `r` are one up to the identities
+of a ring -- `t` is `l = r` solved, dividing by nothing but numerals -- so the
+disequality is false, and every other literal is carried.
+-/
+def gaussianElimination (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let use ← step.useAt 0
+  let some solved := use.literal
+    | throwError "step {step.unit.number}: Gaussian elimination recorded no literal it solved"
+  step.underVars fun kept target => do
+    let vars ← coverVars kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ← instantiateAt parent use vars proof stated
+    step.withInto target fun into =>
+      carryPast premiseType target premiseAt into (· == solved.toNat)
+        (placed := step.placedAt 0) (sourceCount := parent.clauseSize?)
+        (fun _ h => do
+          let denied ← instantiateMVars (← inferType h)
+          let some equation := denied.not?
+            | throwError "step {step.unit.number}: the literal it solved,{indentExpr denied}\n\
+                is no disequality"
+          let some (_, l, r) := equation.eq?
+            | throwError "step {step.unit.number}: the literal it solved,{indentExpr denied}\n\
+                is no disequality"
+          let some same ← equalModuloRing #[] l r
+            | throwError "step {step.unit.number}: at the instance it made,{indentExpr l}\n\
+                and{indentExpr r}\nare not one up to the identities of a ring"
+          mkAppOptM ``absurd #[some equation, some target, some same, some h])
+
+/--
+`h`, one of the literals a lemma concludes, at the literal `k` of `into` the
+worker recorded the inference built it as: the two one up to congruence and
+the identities of a ring, an equation's sides either way round, which the two
+say.
+-/
+private def placeByRing (step : Step) (into : Into) (k : Nat) (h : Expr) : ReconstructM Expr := do
+  let some part := into.parts[k]?
+    | throwError "step {step.unit.number}'s clause has no literal {k}"
+  let said ← instantiateMVars (← inferType h)
+  if let some same ← equalModuloRing #[] said part then
+    return into.inject k (← mkEqMP same h)
+  if let some turned ← flipEquality h then
+    if let some same ← equalModuloRing #[] (← instantiateMVars (← inferType turned)) part then
+      return into.inject k (← mkEqMP same turned)
+  throwError "step {step.unit.number}:{indentExpr said}\nis not literal {k},{indentExpr part}\n\
+    up to the identities of a ring"
+
+/--
+ALASCA's floor bounds: from a literal whose selected atom is a floor, the
+bounds a floor has, in one of six shapes (`FloorBounds.hpp`), which the worker
+recorded with the floor `⌊s⌋`, the premise's other term `t`, the floor's
+coefficient `k`, and the literals built. Each shape is `Vampire.Lemmas.fb_*`,
+its premise related to the premise's literal by ring arithmetic.
+-/
+def floorBounds (step : Step) : ReconstructM Expr := do
+  let ⟨parent, proof, stated⟩ ← step.onlyPremise
+  let use ← step.useAt 0
+  let some acted := use.literal
+    | throwError "step {step.unit.number}: floor bounds recorded no literal it acted on"
+  let variant := step.unit.variant
+  let introduced := step.unit.introduced
+  step.underVars fun kept target => do
+    let vars ← coverVars kept step.unit.boundVarSorts
+    let (premiseAt, premiseType) ← instantiateAt parent use vars proof stated
+    let (some floor, some t) ← recordedTerms step vars 0
+      | throwError "step {step.unit.number}: floor bounds recorded no floor and term"
+    let some factor := use.factor
+      | throwError "step {step.unit.number}: floor bounds recorded no coefficient"
+    let k ← termAt parent use vars factor
+    unless floor.isAppOfArity ``Int.cast 3 && floor.appArg!.isAppOfArity `Int.floor 5 do
+      throwError "step {step.unit.number}: the atom{indentExpr floor}\nis no floor"
+    let α ← inferType floor
+    let zero ← wholeNumeral α 0
+    let ring (a b : Expr) : ReconstructM Expr := do
+      let some h ← ringEqual a b
+        | throwError "step {step.unit.number}:{indentExpr a}\nand{indentExpr b}\n\
+            are not one up to the identities of a ring"
+      return h
+    let l (n : String) : Name := (`Vampire.Lemmas).str n
+    let neg (e : Expr) : ReconstructM Expr := mkAppM ``Neg.neg #[e]
+    step.withInto target fun into =>
+      carryPast premiseType target premiseAt into (· == acted.toNat)
+        (placed := step.placedAt 0) (sourceCount := parent.clauseSize?)
+        (fun _ h => do
+          let said ← instantiateMVars (← inferType h)
+          let concluded ← match variant with
+            | 0 | 1 =>
+              -- `⌊s⌋ = t` from `k (⌊s⌋ - t) = 0`, as the clause states it.
+              let some (_, a, b) := said.eq?
+                | throwError "step {step.unit.number}: its premise{indentExpr said}\nis no equation"
+              let (e, h) ← if a == zero then pure (b, ← mkEqSymm h) else pure (a, h)
+              let he ← ring e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HSub.hSub #[floor, t]])
+              let hk ← (← read).numerically (← mkAppM ``Ne #[k, zero])
+              let equal ← mkAppM `Vampire.Lemmas.eq_of_scaled #[hk, h, he]
+              mkAppM (l (if variant == 0 then "fb_0" else "fb_1")) #[equal]
+            | 2 | 3 | 4 | 5 =>
+              let e := said.appArg!
+              let atom ← if variant ≤ 3 then pure floor else neg floor
+              let he ← ring e (← mkAppM ``HMul.hMul #[k, ← mkAppM ``HAdd.hAdd #[atom, t]])
+              let hk ← positive k
+              mkAppM (l s!"fb_{variant}") #[hk, h, he]
+            | v => throwError "floor bounds has no shape {v}"
+          let concludedType ← whnfR (← instantiateMVars (← inferType concluded))
+          let some first := introduced[0]?
+            | throwError "step {step.unit.number}: floor bounds recorded no literal it built"
+          if introduced.size == 1 then
+            return ← placeByRing step into first concluded
+          let some second := introduced[1]?
+            | throwError "step {step.unit.number}: floor bounds recorded one literal of two"
+          let onLeft ← withLocalDeclD `h concludedType.appFn!.appArg! fun h => do
+            mkLambdaFVars #[h] (← placeByRing step into first h)
+          let onRight ← withLocalDeclD `h concludedType.appArg! fun h => do
+            mkLambdaFVars #[h] (← placeByRing step into second h)
+          mkAppOptM ``Or.elim #[none, none, some target, some concluded, some onLeft, some onRight])
+
 end Vampire.Reconstruct.Arithmetic
