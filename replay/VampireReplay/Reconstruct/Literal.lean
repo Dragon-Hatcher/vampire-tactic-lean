@@ -28,8 +28,14 @@ Written out rather than found: this is asked of every literal of every clause
 an inference carries, and what it is asked of says it already.
 -/
 def symmLiteral (τ lhs rhs : Expr) (negated : Bool) (h : Expr) : ReconstructM Expr := do
-  let symm := if negated then ``Ne.symm else ``Eq.symm
-  return mkApp4 (mkConst symm [← getLevel τ]) τ lhs rhs h
+  let level ← getLevel τ
+  unless negated do return mkApp4 (mkConst ``Eq.symm [level]) τ lhs rhs h
+  -- Stated `¬rhs = lhs`, as a clause states a denied equation, not `rhs ≠ lhs`.
+  let turned := mkNot (mkApp3 (mkConst ``Eq [level]) τ rhs lhs)
+  return mkExpectedTypeHint' (mkApp4 (mkConst ``Ne.symm [level]) τ lhs rhs h) turned
+where
+  mkExpectedTypeHint' (e type : Expr) : Expr :=
+    mkApp2 (mkConst ``id [Level.zero]) type e
 
 /--
 A proof of the same literal with an equality's arguments the other way round,
@@ -136,6 +142,9 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
       if x == a && y == b then return some p
       if x == b && y == a then return some (← mkEqSymm p)
     if arithmetic a || arithmetic b then
+      -- Their normal forms differ, so without deferred pairs to say they are
+      -- equal they are not the same number.
+      if pairs.isEmpty then return none
       return some (← (← read).contradiction (pairs.map (·.2.2)) (some (← mkEq a b)))
     unless a.isApp && b.isApp do return none
     let as := a.getAppArgs
@@ -165,38 +174,45 @@ def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
   return some (← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2))
 
 /--
-`target` from two complementary literals.
-
-Either can be the negation of the other -- both can be negations, `¬¬a` and
-`¬a` -- so each is tried as the negative one. An equality can be stated either
-way round, so the other may have to be turned about first.
-
-@b equal are the pairs an abstracting unifier deferred, with what says each is
-equal, for a step that resolved two literals it did not make one: they are then
-complementary up to those pairs -- and up to arithmetic, for ALASCA's
-(`equalModuloRing`).
+`target` from two complementary literals: `negative`, which the step's
+literal says is the negative one, and `positive`, its complement at the same
+substitution. The two are one atom, but that vampire's equality literals are
+unordered, so the positive one can state its equation the other way round,
+which the two themselves say.
 -/
-def closeComplementary (target h₁ h₂ : Expr)
-    (equal : Array (Expr × Expr × Expr) := #[]) : ReconstructM Expr := do
-  -- A proof of `refuted` from `positive`, turned about or through the deferred
-  -- pairs where it has to be.
-  let asRefuted (positive refuted : Expr) : ReconstructM (Option Expr) := do
-    let mut candidates := #[positive]
-    if let some flipped ← flipEquality positive then candidates := candidates.push flipped
-    for candidate in candidates do
-      if ← isDefEq refuted (← instantiateMVars (← inferType candidate)) then
-        return some candidate
-    for candidate in candidates do
-      if let some same ←
-          equalModuloRing equal (← instantiateMVars (← inferType candidate)) refuted then
-        return some (← mkEqMP same candidate)
-    return none
-  for (negative, positive) in #[(h₁, h₂), (h₂, h₁)] do
-    let some refuted := asNegation (← instantiateMVars (← inferType negative)) | continue
-    if let some positive ← asRefuted positive refuted then
-      return ← mkAppOptM ``absurd #[some refuted, some target, some positive, some negative]
-  throwError "the literals{indentExpr (← instantiateMVars (← inferType h₁))}\nand\
-    {indentExpr (← instantiateMVars (← inferType h₂))}\nare not complementary"
+def closeComplementary (target negative positive : Expr) : ReconstructM Expr := do
+  let deny ← instantiateMVars (← inferType negative)
+  let some refuted := asNegation deny
+    | throwError "the literal{indentExpr deny}\nthe step resolved as negative is no negation"
+  let stated ← instantiateMVars (← inferType positive)
+  -- One atom, as terms or -- where ALASCA's unifier solved an equation, which
+  -- makes them equal as numbers -- as numbers, a ring's normal forms deciding
+  -- at each arithmetic subterm; an equation's sides either way round, which
+  -- the normal forms say.
+  if let some same ← equalModuloRing #[] stated refuted then
+    return ← mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive),
+      some negative]
+  if let some flipped ← flipEquality positive then
+    if let some same ← equalModuloRing #[] (← instantiateMVars (← inferType flipped)) refuted then
+      return ← mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same flipped),
+        some negative]
+  throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary"
+
+/--
+`target` from two literals complementary up to the pairs an abstracting
+unifier deferred, `equal`, with what says each is equal: a step that resolved
+two literals it did not make one.
+-/
+def closeComplementaryModulo (target negative positive : Expr)
+    (equal : Array (Expr × Expr × Expr)) : ReconstructM Expr := do
+  let deny ← instantiateMVars (← inferType negative)
+  let some refuted := asNegation deny
+    | throwError "the literal{indentExpr deny}\nthe step resolved as negative is no negation"
+  let stated ← instantiateMVars (← inferType positive)
+  let some same ← equalModuloRing equal stated refuted
+    | throwError "the literals{indentExpr stated}\nand{indentExpr deny}\nare not complementary \
+        up to what the unifier deferred"
+  mkAppOptM ``absurd #[some refuted, some target, some (← mkEqMP same positive), some negative]
 
 /--
 Which of `parts` a literal stating `stated` is.

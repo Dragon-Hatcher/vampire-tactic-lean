@@ -326,7 +326,8 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
     let premiseType ← instantiateForall (← conclusionOf parent) args
     step.withInto target fun into =>
     carryWith premiseType target
-      (mkAppN clauseProof args) into (sourceCount := parent.clauseSize?)
+      (mkAppN clauseProof args) into (placed := step.placedAt 0)
+      (sourceCount := parent.clauseSize?)
       (fun i h => do
         let some l := clause.literals[i]?
           | throwError "the premise has no literal {i}"
@@ -470,6 +471,20 @@ def inequalitySplittingName (step : Step) : ReconstructM Expr := do
     mkLambdaFVars #[h] (mkApp h refl)
 
 /--
+`target` from a clause premise whose literals the step carried, except those
+the worker recorded as rewritten into an application of a name it introduced
+-- `p(s)` for `s ≠ t`, `Q(s, t)` for `s = t` -- which is what the name unfolds
+to: each such literal is the premise's, read through the name.
+-/
+def carryThroughNames (step : Step) (i : Nat) (parent : Vampire.Unit)
+    (source target proof : Expr) : ReconstructM Expr := do
+  let (some placement, some rewritten) := (step.placedAt i, step.rewrittenAt i)
+    | throwError "step {step.unit.number} recorded no placement of its clause"
+  step.withInto target fun into =>
+    carryRewritten source target proof into placement rewritten parent.clauseSize?
+      throughNames
+
+/--
 `inequality_splitting`: the clause with a ground side of an inequality named.
 
 Each split literal `s ≠ t` became `p(s)` for the `p` that names `t`, and `p`
@@ -491,8 +506,8 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
     -- Splitting substitutes nothing, so the conclusion keeps the premise's
     -- variables; it records no unifier because there is none to record.
     let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
-    carryAll (← instantiateForall stated args) target (mkAppN proof args)
-      (sourceCount := parent.clauseSize?) (targetCount := step.unit.clauseSize?)
+    carryThroughNames step i parent (← instantiateForall stated args) target
+      (mkAppN proof args)
 
 /-- Whether a rule introduces a name by defining it. -/
 def introducesName : InferenceRule → Bool
@@ -535,10 +550,12 @@ def equalityProxyReplacement (step : Step) : ReconstructM Expr := do
     | throwError "no premise in position {i}"
   let some parent := step.unit.parents[i]?
     | throwError "no premise in position {i}"
-  -- The replacement rebuilds the clause, so its literals can come back in
-  -- another order, and a literal over the proxy is an application of what it
-  -- is bound to rather than an equation: each is placed where it went.
-  Clause.restatedLiterals step parent proof stated
+  -- The replacement substitutes nothing, so the conclusion keeps the premise's
+  -- variables.
+  step.underVars fun kept target => do
+    let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
+    carryThroughNames step i parent (← instantiateForall stated args) target
+      (mkAppN proof args)
 
 /--
 `equality_proxy_axiom`: an axiom about the proxy, which is equality.

@@ -17,6 +17,9 @@ referring to them.
 
 namespace Vampire.Lemmas
 
+-- The lemmas share one set of instance assumptions, and not every lemma uses all of them.
+set_option linter.unusedSectionVars false
+
 variable {α : Type*} [Field α] [LinearOrder α] [IsStrictOrderedRing α] [FloorRing α]
 
 /-!

@@ -20,9 +20,13 @@ The conclusion from the two literals a resolution resolved on: complementary,
 or -- where an abstracting unifier could not make them so -- complementary up
 to the pairs it deferred into constraint literals of the conclusion.
 -/
-def closeResolved (step : Step) (into : Into) (h₁ h₂ : Expr) :
-    ReconstructM Expr :=
-  underConstraints step into fun equal => closeComplementary into.whole h₁ h₂ equal
+def closeResolved (step : Step) (into : Into) (negativeFirst : Bool) (h₁ h₂ : Expr) :
+    ReconstructM Expr := do
+  let (negative, positive) := if negativeFirst then (h₁, h₂) else (h₂, h₁)
+  if step.unit.constraints.isEmpty then
+    return ← closeComplementary into.whole negative positive
+  underConstraints step into fun equal =>
+    closeComplementaryModulo into.whole negative positive equal
 
 /--
 `resolution`: both premises but for the complementary pair resolved on.
@@ -50,10 +54,14 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- Every literal but the resolved one carries over, to where the worker
     -- recorded it went; the resolved pair is complementary, which closes
     -- that case.
+    -- Which of the two is the negative literal is the first's polarity.
+    let some literal₁ := (parent₁.clause?.map (·.literals)).bind (·[resolved₁.toNat]?)
+      | throwError "step {parent₁.number} has no literal {resolved₁}"
+    let negativeFirst := !(← literalPolarity literal₁)
     step.withInto target fun into =>
       carryPast t₁ target p₁ into (· == resolved₁.toNat)
         (fun _ h₁ => carryPast t₂ target p₂ into (· == resolved₂.toNat)
-          (fun _ h₂ => closeResolved step into h₁ h₂)
+          (fun _ h₂ => closeResolved step into negativeFirst h₁ h₂)
           (placed := step.placedAt 1) (sourceCount := parent₂.clauseSize?))
         (placed := step.placedAt 0) (sourceCount := parent₁.clauseSize?)
 
@@ -89,12 +97,17 @@ def unitResulting (step : Step) : ReconstructM Expr := do
         | throwError "nothing says which literal the unit in step \
           {parent.number} resolved away"
       units := units.insert literal.toNat (← instantiateAt parent use vars proof stated)
+    let some mainClause := main.clause?
+      | throwError "unit resulting resolution should be given a clause"
     step.withInto target fun into =>
       carryPast mainType target mainAt into (units.contains ·)
         (fun i h => do
           let some (unitAt, _) := units[i]?
             | throwError "no unit resolved literal {i} away"
-          closeComplementary target h unitAt)
+          let some literal := mainClause.literals[i]?
+            | throwError "the clause has no literal {i}"
+          if ← literalPolarity literal then closeComplementary target unitAt h
+          else closeComplementary target h unitAt)
         (placed := step.placedAt 0) (sourceCount := main.clauseSize?)
 
 /--
@@ -232,17 +245,30 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
             {indentExpr stated}"
         let sRHS := if selectedLeft then sb else sa
         let h ← if selectedLeft then pure h else mkEqSymm h
-        -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`:
-        -- the one where it is not stated as a clause states a disequality,
-        -- `¬a = b`, so that it is found among the conclusion's literals
-        -- either way round.
+        -- `h : sLHS = sRHS`, and the two cases of whether `sRHS` is `fRHS`.
+        -- Where it is not, that is the disequality the rule puts first,
+        -- `sRHSσ ≠ fRHSσ` (`EqualityFactoring.cpp`), as vampire shares it:
+        -- either way round, which the literal itself says.
         let equal ← mkAppOptM ``Eq #[some α, some sRHS, some fRHS]
+        let some first := into.parts[0]?
+          | throwError "equality factoring concluded no literals"
         let differ ← withLocalDeclD `h (mkApp (mkConst ``Not) equal) fun hne => do
-          mkLambdaFVars #[hne] (← into.place hne)
+          let turned ← mkAppOptM ``Eq #[some α, some fRHS, some sRHS]
+          let stated ← if first == mkApp (mkConst ``Not) equal then pure hne
+            else if first == mkApp (mkConst ``Not) turned then
+              mkExpectedTypeHint (← mkAppM ``Ne.symm #[hne]) first
+            else throwError "equality factoring's first literal{indentExpr first}\n\
+              is not{indentExpr (mkApp (mkConst ``Not) equal)}"
+          mkLambdaFVars #[hne] (into.inject 0 stated)
+        -- Where it is, `uσ ≈ sσ ≈ tσ ≈ vσ` is the side equality, carried where
+        -- the worker recorded, as the premise states it.
         let agree ← withLocalDeclD `h equal fun he => do
             let chain ← mkAppM ``Eq.trans #[h, he]
             let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
-            mkLambdaFVars #[he] (← into.place (← mkExpectedTypeHint chain stated))
+            let chain ← mkExpectedTypeHint chain stated
+            let chain ← if sideLeft then pure chain else mkEqSymm chain
+            mkLambdaFVars #[he]
+              (← into.placeAt (step.placedAt 0) sideIdx.toNat chain)
         mkAppM ``Classical.byCases #[agree, differ])
 
 end Vampire.Reconstruct.Resolution

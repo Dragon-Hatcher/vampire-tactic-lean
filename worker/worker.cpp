@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    45 words, see `write`:
+ *   header    46 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -129,7 +129,7 @@
  *             asserts a component's name and works on with the clause under
  *             that assumption, so what such a clause says is that its literals
  *             follow from the names it is written against
- *   satClauses{firstLit, numLits, firstPremise, numPremises, origin}: a clause
+ *   satClauses{firstLit, numLits, firstPremise, numPremises, origin, firstOrder}: a clause
  *             of the propositional problem splitting hands to a SAT solver.
  *             `origin` is the unit this clause came from, for one that is a
  *             first-order clause's propositional shadow, and `NONE` for one
@@ -139,6 +139,11 @@
  *   satLits   string offsets of a propositional clause's literals, each the
  *             name of a component or its negation
  *   satPremises indices into `satClauses`
+ *   satOrder  for the shadow of a first-order clause, from `firstOrder` (`NONE`
+ *             for any other), the index of the propositional literal each of
+ *             the clause's literals became, one per literal of the clause:
+ *             the shadow's literals are sorted, and the names say which is
+ *             which only through their definitions
  *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
  *             clausification introduced to name a subformula, the variables it
  *             was applied to, and the formula it names. The clauses saying
@@ -201,7 +206,9 @@
  *             counting from zero, or zero where none was. Each entry is the
  *             index of the conclusion's literal a premise literal became under
  *             the use's substitution, the top bit set where it became that
- *             literal with its equation turned round, and `NONE` where it
+ *             literal with its equation turned round, the next where the
+ *             inference rewrote it into that literal (`recordRewritten`) rather
+ *             than carried it, and `NONE` where it
  *             became none of them -- resolved away, say. Vampire shares its
  *             literals, so this is pointer equality after substituting, and
  *             replay places each literal rather than looking for it. For an
@@ -251,6 +258,7 @@
 #include "Kernel/Signature.hpp"
 #include "Kernel/SortHelper.hpp"
 #include "Kernel/SubstHelper.hpp"
+#include "Kernel/Substitution.hpp"
 #include "Kernel/Term.hpp"
 #include "Kernel/Unit.hpp"
 #include "Lib/Environment.hpp"
@@ -275,7 +283,7 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 30;
+const uint32_t VERSION = 32;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 35;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -608,7 +616,7 @@ std::vector<const InferenceStore::LiteralImage*> literalImagesOf(Unit* u, Clause
 struct Encoder {
   std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
-      bindings, splits, satClauses, satLits, satPremises, namings, namingArgs,
+      bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
       placementEntries, literalFactors, constraintLits;
   std::string strings;
@@ -932,8 +940,8 @@ struct Encoder {
     if (seen != satSeen.end())
       return seen->second;
 
-    uint32_t idx = static_cast<uint32_t>(satClauses.size() / 5);
-    satClauses.resize(satClauses.size() + 5, 0);
+    uint32_t idx = static_cast<uint32_t>(satClauses.size() / 6);
+    satClauses.resize(satClauses.size() + 6, 0);
     satSeen.emplace(cl, idx);
 
     uint32_t firstLit = static_cast<uint32_t>(satLits.size());
@@ -953,6 +961,7 @@ struct Encoder {
     uint32_t numLits = static_cast<uint32_t>(cl->length());
 
     uint32_t origin = NONE;
+    uint32_t firstOrder = NONE;
     std::vector<uint32_t> premiseIdxs;
     if (SATInference* inf = cl->inference()) {
       if (inf->getType() == SATInference::InfType::PROP_INF) {
@@ -962,18 +971,54 @@ struct Encoder {
         // reverses them; the order the solver used them in is what matters.
         std::reverse(premiseIdxs.begin(), premiseIdxs.end());
       } else {
-        origin = encodeUnit(inf->foConversion()->getOrigin());
+        Unit* originUnit = inf->foConversion()->getOrigin();
+        origin = encodeUnit(originUnit);
+        // A first-order clause's shadow (`SAT2FO::toSAT`) sorts its literals,
+        // so which one each of the clause's became is written out: the one
+        // whose name is defined as that literal, or as its complement for a
+        // negated name.
+        if (originUnit->isClause()) {
+          Clause* ocl = originUnit->asClause();
+          firstOrder = static_cast<uint32_t>(satOrder.size());
+          for (unsigned i = 0; i < ocl->length(); i++) {
+            Literal* lit = (*ocl)[i];
+            uint32_t found = NONE;
+            for (uint32_t j = 0; j < lits.size() && found == NONE; j++) {
+              SATLiteral named = lits[j].positive() ? lits[j] : lits[j].opposite();
+              Unit* definition = InferenceStore::instance()->splitDefinition(
+                Splitter::getFormulaStringFromLiteral(named));
+              if (!definition || definition->isClause())
+                continue;
+              Formula* f = definition->getFormula();
+              if (f->connective() != IFF)
+                continue;
+              Formula* component = f->left()->connective() == NAME ? f->right() : f->left();
+              if (component->connective() != LITERAL)
+                continue;
+              Literal* meant = component->literal();
+              if (lits[j].positive() ? meant == lit
+                                     : meant == Literal::complementaryLiteral(lit))
+                found = j;
+            }
+            if (found == NONE)
+              throw UserErrorException("a propositional clause of unit " +
+                std::to_string(originUnit->number()) + " has no literal for its literal " +
+                std::to_string(i));
+            satOrder.push_back(found);
+          }
+        }
       }
     }
     uint32_t firstPremise = static_cast<uint32_t>(satPremises.size());
     for (uint32_t p : premiseIdxs)
       satPremises.push_back(p);
 
-    satClauses[5 * idx + 0] = numLits == 0 ? NONE : firstLit;
-    satClauses[5 * idx + 1] = numLits;
-    satClauses[5 * idx + 2] = premiseIdxs.empty() ? NONE : firstPremise;
-    satClauses[5 * idx + 3] = static_cast<uint32_t>(premiseIdxs.size());
-    satClauses[5 * idx + 4] = origin;
+    satClauses[6 * idx + 0] = numLits == 0 ? NONE : firstLit;
+    satClauses[6 * idx + 1] = numLits;
+    satClauses[6 * idx + 2] = premiseIdxs.empty() ? NONE : firstPremise;
+    satClauses[6 * idx + 3] = static_cast<uint32_t>(premiseIdxs.size());
+    satClauses[6 * idx + 4] = origin;
+    satClauses[6 * idx + 5] = firstOrder;
     return idx;
   }
 
@@ -1292,10 +1337,18 @@ struct Encoder {
           if (entry == NONE)
             throw UserErrorException("unit " + std::to_string(u->number()) +
               " recorded a rewritten literal its conclusion does not have");
+          // Marked rewritten, so that replay applies the rewrite to exactly the
+          // literals the inference rewrote.
+          entry |= 0x40000000u;
           placementEntries.push_back(became->turned ? entry | 0x80000000u : entry);
           continue;
         }
         Literal* image = SubstHelper::apply(lit, bound);
+        // Polarity flipping made every literal of a flipped predicate its
+        // complement (`Shuffling::polarityFlip`), which is where it went.
+        if (inference.rule() == InferenceRule::POLARITY_FLIPPING && !lit->isEquality()
+            && env.signature->getPredicate(lit->functor())->wasFlipped())
+          image = Literal::complementaryLiteral(image);
         uint32_t entry = NONE;
         for (unsigned j = 0; j < into->length() && entry == NONE; j++)
           if ((*into)[j] == image)
@@ -1377,6 +1430,73 @@ struct Encoder {
           for (uint32_t k = 0; k < premiseUses.size(); k++)
             place(pos, k, lits, premisesInOrder[0]->asClause(),
                   &premiseUses[k]->bindings, nullptr);
+        } else if (inference.rule() == InferenceRule::CLAUSIFY && pos == 0
+                   && !premise->isClause()
+                   && InferenceStore::instance()->genClauseOfClause(u)
+                        != InferenceStore::stateNone) {
+          // A clause of the new clausifier is its last generalised clause
+          // (`NewCNF::toClause`): each signed literal under the bindings,
+          // complemented where negative, in order. Where each went, and whether
+          // an equation's sides came out the other way round from the literal
+          // it was made of, substituted.
+          const auto* state = InferenceStore::instance()->genClauseState(
+            InferenceStore::instance()->genClauseOfClause(u));
+          Substitution subst;
+          for (const auto& [var, term] : state->bindings)
+            subst.bindUnbound(var, term);
+          Clause* into = u->asClause();
+          uint32_t first = static_cast<uint32_t>(placementEntries.size());
+          for (const auto& [f, positive] : state->literals) {
+            uint32_t entry = NONE;
+            if (f->connective() == LITERAL) {
+              Literal* made = f->literal()->apply(subst);
+              if (!positive)
+                made = Literal::complementaryLiteral(made);
+              for (unsigned j = 0; j < into->length() && entry == NONE; j++)
+                if ((*into)[j] == made)
+                  entry = j;
+              if (entry != NONE && made->isEquality()
+                  && SubstHelper::apply(*f->literal()->nthArgument(0), subst)
+                       != *(*into)[entry]->nthArgument(0))
+                entry |= 0x80000000u;
+            }
+            placementEntries.push_back(entry);
+          }
+          placements.push_back(pos);
+          placements.push_back(0);
+          placements.push_back(first);
+          placements.push_back(static_cast<uint32_t>(state->literals.size()));
+          numPlacements++;
+        } else if (inference.rule() == InferenceRule::AVATAR_COMPONENT && pos == 0
+                   && !premise->isClause()) {
+          // A component clause under its definition, `name <=> component`:
+          // the component's literals are the clause's own (`Formula::fromClause`
+          // of them), which is where each goes. A negative ground singleton is
+          // defined by its complement, and goes nowhere: replay says why.
+          Formula* definition = premise->getFormula();
+          if (definition->connective() != IFF)
+            continue;
+          Formula* component = definition->left()->connective() == NAME
+            ? definition->right() : definition->left();
+          if (component->connective() == FORALL)
+            component = component->qarg();
+          std::vector<Literal*> lits;
+          if (component->connective() == OR) {
+            for (const FormulaList* it = component->args(); it; it = it->tail())
+              if (it->head()->connective() == LITERAL)
+                lits.push_back(it->head()->literal());
+          } else if (component->connective() == LITERAL) {
+            lits.push_back(component->literal());
+          }
+          // A negative ground singleton is defined by its complement
+          // (`Splitter::buildAndInsertComponentClause`) and named negatively,
+          // so what its name asserts is the clause's literal itself.
+          Clause* cl = u->asClause();
+          if (lits.size() == 1 && cl->length() == 1 && (*cl)[0]->ground()
+              && (*cl)[0]->isNegative()
+              && lits[0] == Literal::complementaryLiteral((*cl)[0]))
+            lits[0] = (*cl)[0];
+          place(pos, 0, lits, cl, nullptr, nullptr);
         }
       }
     }
@@ -1513,7 +1633,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.skolems.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.splits.size()));
-  putWord(buf, static_cast<uint32_t>(enc.satClauses.size() / 5));
+  putWord(buf, static_cast<uint32_t>(enc.satClauses.size() / 6));
   putWord(buf, static_cast<uint32_t>(enc.satLits.size()));
   putWord(buf, static_cast<uint32_t>(enc.satPremises.size()));
   putWord(buf, static_cast<uint32_t>(enc.namings.size() / 4));
@@ -1541,6 +1661,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
   putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
   putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
+  putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1573,6 +1694,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.placementEntries);
   putWords(buf, enc.literalFactors);
   putWords(buf, enc.constraintLits);
+  putWords(buf, enc.satOrder);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

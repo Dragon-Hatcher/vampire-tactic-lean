@@ -53,12 +53,16 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     let some placements := sidePlaced
       | throwError "subsumption resolution recorded nothing of where the side \
           premise's literals went"
+    let some literal := (mainParent.clause?.map (·.literals)).bind (·[resolved.toNat]?)
+      | throwError "step {mainParent.number} has no literal {resolved}"
+    let removedPositive ← literalPolarity literal
     step.withInto target fun into =>
     carryPast mainType target mainAt into (· == resolved.toNat)
       (placed := step.placedAt 0) (sourceCount := mainParent.clauseSize?)
       (fun _ h =>
         carryPast sideType target sideAt into (fun k => (placements[k]?.join).isNone)
           (placed := sidePlaced) (sourceCount := sideParent.clauseSize?)
-          (fun _ hSide => closeComplementary target h hSide))
+          (fun _ hSide => if removedPositive then closeComplementary target hSide h
+            else closeComplementary target h hSide))
 
 end Vampire.Reconstruct.Subsumption

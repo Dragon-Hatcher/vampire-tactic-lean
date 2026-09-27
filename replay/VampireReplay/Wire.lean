@@ -12,7 +12,7 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 45
+private def headerWords : Nat := 46
 
 /-- A unit's record's length, in words. -/
 private def unitWidth : Nat := 35
@@ -62,6 +62,7 @@ private structure Layout where
   placementEntries : Nat
   literalFactors : Nat
   constraintLits : Nat
+  satOrder : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -148,7 +149,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 30
+private def version : UInt32 := 32
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -208,6 +209,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numPlacementEntries := word 42
   let numLiteralFactors := word 43
   let numConstraintLits := word 44
+  let numSatOrder := word 45
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -224,7 +226,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let skolems := varSorts + numVarSorts * 2 * 4
   let splits := skolems + numSkolems * 2 * 4
   let satClauses := splits + numSplits * 4
-  let satLits := satClauses + numSatClauses * 5 * 4
+  let satLits := satClauses + numSatClauses * 6 * 4
   let satPremises := satLits + numSatLits * 4
   let namings := satPremises + numSatPremises * 4
   let namingArgs := namings + numNamings * 4 * 4
@@ -239,7 +241,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let placementEntries := placements + numPlacements * 4 * 4
   let literalFactors := placementEntries + numPlacementEntries * 4
   let constraintLits := literalFactors + numLiteralFactors * 4
-  let strings := constraintLits + numConstraintLits * 4
+  let satOrder := constraintLits + numConstraintLits * 4
+  let strings := satOrder + numSatOrder * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -363,9 +366,18 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numSkolems] do index "skolem term" (at_ skolems 2 i 1) numTerms
   for i in [0:numSplits] do string "split name" (at_ splits 1 i 0)
   for i in [0:numSatClauses] do
-    range "SAT literals" (at_ satClauses 5 i 0) (at_ satClauses 5 i 1) numSatLits
-    range "SAT premises" (at_ satClauses 5 i 2) (at_ satClauses 5 i 3) numSatPremises
-    optional "SAT origin" (at_ satClauses 5 i 4) numUnits
+    range "SAT literals" (at_ satClauses 6 i 0) (at_ satClauses 6 i 1) numSatLits
+    range "SAT premises" (at_ satClauses 6 i 2) (at_ satClauses 6 i 3) numSatPremises
+    optional "SAT origin" (at_ satClauses 6 i 4) numUnits
+    let origin := at_ satClauses 6 i 4
+    let firstOrder := at_ satClauses 6 i 5
+    if firstOrder != none then
+      if origin == none then malformed s!"SAT clause {i} orders the literals of no clause"
+      else
+        let count := clauseSize origin
+        range "SAT literal order" firstOrder count numSatOrder
+        for k in [0:count] do
+          index "SAT literal" (at_ satOrder 1 (firstOrder + k) 0) (at_ satClauses 6 i 1)
   for i in [0:numSatLits] do string "SAT literal" (at_ satLits 1 i 0)
   for i in [0:numSatPremises] do index "SAT premise" (at_ satPremises 1 i 0) numSatClauses
   for i in [0:numNamings] do
@@ -414,7 +426,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
         let first := at_ placements 4 (u 28 + k) 2
         for j in [0:at_ placements 4 (u 28 + k) 3] do
           let entry := at_ placementEntries 1 (first + j) 0
-          if entry != none then index "placed literal" (entry &&& 0x7FFFFFFF) into
+          if entry != none then index "placed literal" (entry &&& 0x3FFFFFFF) into
     -- A literal's factor, as a string.
     if u 32 != 0 then
       index "literal factors" (u 31 + u 32 - 1) numLiteralFactors
@@ -434,7 +446,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, constraintLits, strings, stringsLen, proofText, numFunctions,
+      literalFactors, constraintLits, satOrder, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -1107,18 +1119,9 @@ def congruences (u : Unit) : Except Error (Array Congruence) := do
       | kind => Error.fail (s!"unknown congruence step kind {kind}"))
   return out
 
-/--
-Where the literals of the premise in `position` went in this step's clause,
-under the `use`th substitution recorded against it: for each of its literals,
-the conclusion's literal it became and whether with its equation turned round,
-or `none` for one it became none of. `none` altogether where nothing was
-recorded -- for a formula, say.
-
-The worker works it out by substituting and comparing literals, which vampire
-shares, so a literal is placed rather than looked for.
--/
-def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
-    Option (Array (Option (Nat × Bool))) := do
+/-- The raw entries of `placement?`. -/
+def placementEntries? (u : Unit) (position : Nat) (use : Nat := 0) :
+    Option (Array UInt32) := do
   let p := u.proof
   let first := u.field 28
   let count := u.field 29
@@ -1130,9 +1133,32 @@ def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
   let firstEntry := readU32 p.data (base + 8)
   let numEntries := readU32 p.data (base + 12)
   return Array.ofFn (n := numEntries.toNat) fun j =>
-    let entry := readU32 p.data (p.layout.placementEntries + (firstEntry.toNat + j.val) * 4)
+    readU32 p.data (p.layout.placementEntries + (firstEntry.toNat + j.val) * 4)
+
+/--
+Where the literals of the premise in `position` went in this step's clause,
+under the `use`th substitution recorded against it: for each of its literals,
+the conclusion's literal it became and whether with its equation turned round,
+or `none` for one it became none of. `none` altogether where nothing was
+recorded -- for a formula, say.
+
+The worker works it out by substituting and comparing literals, which vampire
+shares, so a literal is placed rather than looked for.
+-/
+def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
+    Option (Array (Option (Nat × Bool))) :=
+  (u.placementEntries? position use).map (·.map fun entry =>
     if entry == none32 then none
-    else some ((entry &&& 0x7FFFFFFF).toNat, entry &&& 0x80000000 != 0)
+    else some ((entry &&& 0x3FFFFFFF).toNat, entry &&& 0x80000000 != 0))
+
+/--
+Which of the literals of the premise in `position` the inference rewrote into
+the literal it was placed at (`recordRewritten`), rather than carried there.
+-/
+def rewritten? (u : Unit) (position : Nat) (use : Nat := 0) : Option (Array Bool) :=
+  (u.placementEntries? position use).map (·.map fun entry =>
+    entry != none32 && entry &&& 0x40000000 != 0)
+
 
 /--
 For a literal-wise simplification that scaled a literal, one number per
@@ -1268,7 +1294,7 @@ end GenClause
 namespace SatClause
 
 @[inline] private def field (c : SatClause) (off : Nat) : UInt32 :=
-  c.proof.field c.proof.layout.satClauses 5 c.idx.toNat off
+  c.proof.field c.proof.layout.satClauses 6 c.idx.toNat off
 
 /--
 The clause's literals, each the name of a component or its negation, written as
@@ -1302,6 +1328,21 @@ def index (c : SatClause) : UInt32 := c.idx
 def origin? (c : SatClause) : Option Unit :=
   let idx := c.field 4
   if idx == none32 then none else some ⟨c.proof, idx⟩
+
+/--
+For the shadow of a first-order clause, which of this clause's literals each of
+the clause's literals became, in the clause's order: the shadow's literals are
+sorted. `none` for the shadow of a formula, whose disjuncts are its names.
+-/
+def originOrder? (c : SatClause) : Option (Array Nat) :=
+  let first := c.field 5
+  if first == none32 then none else
+  let p := c.proof
+  let count := match c.origin? with
+    | some u => (u.clause?.map (·.literals.size)).getD 0
+    | none => 0
+  some <| Array.ofFn (n := count) fun k =>
+    (readU32 p.data (p.layout.satOrder + (first.toNat + k.val) * 4)).toNat
 
 end SatClause
 

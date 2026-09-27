@@ -610,9 +610,8 @@ private def integerUpToSign (fact w : Expr) : ReconstructM (Option Expr) := do
 
 /--
 `leaf` in each case of the step's premises: each premise holds, so one of its
-literals does. A literal the conclusion has is placed there -- where the worker
-recorded it went, or where it is found -- and `leaf` is given the others, one
-of each premise, in their order.
+literals does. A literal the worker recorded as carried is placed where it
+went, and `leaf` is given the others, one of each premise, in their order.
 -/
 private partial def premiseCases (step : Step) (premises : Array (Expr × Expr)) (target : Expr)
     (into : Into) (leaf : Array Expr → ReconstructM Expr) : ReconstructM Expr := do
@@ -625,7 +624,6 @@ private partial def premiseCases (step : Step) (premises : Array (Expr × Expr))
       (fun k h => do
         if let some (some _) := placed.bind (·[k]?) then
           return ← into.placeAt placed k h
-        if let some p ← into.place? h (hint := k) then return p
         go (facts.push (← plainly h)) (i + 1)) proof
   go #[] 0
 

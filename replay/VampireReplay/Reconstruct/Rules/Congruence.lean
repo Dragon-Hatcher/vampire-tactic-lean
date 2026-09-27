@@ -1,5 +1,6 @@
 import VampireReplay.Reconstruct.Basic
 import VampireReplay.Reconstruct.Rules.Clause
+import VampireReplay.Reconstruct.Rules.Definition
 
 /-!
 Rules that restate a formula without changing what it says.
@@ -33,8 +34,13 @@ def unfolded (step : Step) : ReconstructM Expr := do
     | throwError "{step.rule.name} should have at least one premise, got none"
   let some parent := step.unit.parents[0]?
     | throwError "{step.rule.name} should have at least one premise, got none"
-  -- Folding rebuilds the clause, so its literals can come back in another
-  -- order; they are related one by one rather than by the clause's shape.
+  -- Folding a clause rewrites each literal where it stands, and the worker
+  -- records which: a folded literal is the premise's through the names.
+  if parent.clause?.isSome then
+    return ← step.underVars fun kept target => do
+      let (_, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
+      Definition.carryThroughNames step 0 parent (← instantiateForall stated args) target
+        (mkAppN proof args)
   Clause.restatedLiterals step parent proof stated
 
 end Vampire.Reconstruct.Congruence

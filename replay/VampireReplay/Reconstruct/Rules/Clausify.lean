@@ -637,8 +637,21 @@ descent has it to hand already, in the shape the formula the clausification
 began at was stated in.
 -/
 private partial def descend (sorts : Array (UInt32 × String))
-    (choices : Std.HashMap UInt32 UInt32) (vars : Vars) (f : Formula)
+    (choices : Std.HashMap UInt32 UInt32) (clause : Array Literal) (vars : Vars) (f : Formula)
     (stated : Expr) (target : Expr) (into : Into) : ReconstructM Expr := do
+  -- A literal of the formula is one of the clause's: `CNF::clausify` builds
+  -- the clause of the formula's literals themselves, which vampire shares, so
+  -- which one it is is which of the clause's it is.
+  let place (g : Formula) (h : Expr) : ReconstructM Expr := do
+    let some lit := g.literal?
+      | throwError "a disjunct of a clause's disjunction that is no literal"
+    let some k := clause.findIdx? (· == lit)
+      | throwError "the clause has no literal{indentExpr (← instantiateMVars (← inferType h))}"
+    let some part := into.parts[k]? | throwError "the clause has no literal {k}"
+    let stated ← instantiateMVars (← inferType h)
+    unless stated == part do
+      throwError "literal {k} of the clause is{indentExpr part}\nnot{indentExpr stated}"
+    return into.inject k h
   match ← connectiveOf f with
   | .«forall» =>
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
@@ -655,7 +668,7 @@ private partial def descend (sorts : Array (UInt32 × String))
           someElement (← sortType sortName)
       vars := vars.insert v arg
       args := args.push arg
-    let rest ← descend sorts choices vars body
+    let rest ← descend sorts choices clause vars body
       (← instantiateForall stated args) target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (mkAppN h args))
@@ -669,7 +682,7 @@ private partial def descend (sorts : Array (UInt32 × String))
       | throwError "a clause came from conjunct {argument}, which is not there"
     let some part := parts[argument.toNat]?
       | throwError "a clause came from conjunct {argument}, which is not there"
-    let rest ← descend sorts choices vars conjunct part target into
+    let rest ← descend sorts choices clause vars conjunct part target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h] (mkApp rest (← projectGiven parts argument.toNat h))
   | .or =>
@@ -681,10 +694,12 @@ private partial def descend (sorts : Array (UInt32 × String))
       return !((← connectiveOf g) matches .«forall» | .and | .or | .«false»)
     if literals then
       return ← withLocalDeclD `h stated fun h => do
-        mkLambdaFVars #[h] (← carryAll stated target h (into := into))
+        mkLambdaFVars #[h] (← elimGiven parts (motive? := some target) (fun i hi => do
+          let some g := f.subformulas[i]? | throwError "a missing disjunct"
+          place g hi) h)
     let branches ← f.subformulas.zipIdx.mapM fun (g, i) => do
       let some part := parts[i]? | throwError "a missing disjunct"
-      descend sorts choices vars g part target into
+      descend sorts choices clause vars g part target into
     withLocalDeclD `h stated fun h => do
       mkLambdaFVars #[h]
         (← elimGiven parts (fun i hi => do
@@ -696,7 +711,7 @@ private partial def descend (sorts : Array (UInt32 × String))
   | _ =>
     -- A literal, which the clause has to contain.
     withLocalDeclD `h stated fun h => do
-      mkLambdaFVars #[h] (← into.place h)
+      mkLambdaFVars #[h] (← place f h)
 
 /-- `clausify`: one clause of a formula's conjunctive normal form. -/
 def clausify (step : Step) : ReconstructM Expr := do
@@ -722,13 +737,15 @@ def clausify (step : Step) : ReconstructM Expr := do
       let generalised ← genParts sorts vars clause
       mkLambdaFVars xs
         (← carryAll (junction ``Or ``False generalised) target proof
-          (sourceCount := some generalised.size)
+          (placed := step.placedAt 0) (sourceCount := some generalised.size)
           (targetCount := step.unit.clauseSize?))
     | none =>
       let proof ← step.withInto target fun into => do
+        let some conclusion := step.unit.clause?
+          | throwError "clausify concluded no clause"
         let implication ← descend sorts
           (Std.HashMap.ofList (step.unit.conjunctChoices.toList.map fun (f, i) => (f.index, i)))
-          vars premise (← instantiateMVars premiseStated) target into
+          conclusion.literals vars premise (← instantiateMVars premiseStated) target into
         return mkApp implication premiseProof
       mkLambdaFVars xs proof
 end Vampire.Reconstruct.Clausify

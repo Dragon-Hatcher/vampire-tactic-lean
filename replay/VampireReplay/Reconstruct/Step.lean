@@ -206,6 +206,11 @@ def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
   let (_, earlier) ← step.occurrence? i
   step.unit.placement? i earlier
 
+/-- Which literals of the premise in position `i` the step rewrote, as the worker recorded. -/
+def Step.rewrittenAt (step : Step) (i : Nat) : Option (Array Bool) := do
+  let (_, earlier) ← step.occurrence? i
+  step.unit.rewritten? i earlier
+
 /-- One of a step's premises: the step it is, a proof of it, and what it says. -/
 structure Premise where
   parent : Vampire.Unit
@@ -282,22 +287,22 @@ def relateLiterals (step : Step) (parent : Vampire.Unit)
     -- The premise's literals are read as the premise means them: polarity
     -- flipping divides the proof, and this step can be the line itself.
     let sourceParts ← reading parent (source.literals.mapM (literal vars))
-    -- Where the worker recorded each literal went, which is where it goes;
-    -- one it did not is looked for.
+    -- Where the worker recorded each literal went, which is where it goes.
     let position? := step.unit.parents.findIdx? (·.number == parent.number)
-    let placed := position?.bind step.placedAt
+    let some placed := position?.bind step.placedAt
+      | throwError "step {step.unit.number}: the worker recorded no placement of \
+          step {parent.number}'s literals"
     -- The conclusion's literals, by the count of them: a literal can itself be
     -- a disjunction, which taking the clause apart by its shape would split.
     step.withInto target fun into => do
       elimGiven sourceParts (motive? := some target) (fun i h => do
-        if let some (some _) := placed.bind (·[i]?) then
+        if let some (some _) := placed[i]? then
           return ← into.placeAt placed i h
-        if let some done ← into.place? h (hint := i) then return done
-        -- Every literal the step kept is one of the conclusion's; one it
-        -- dropped has to be refutable on its own, as `t ≠ t` is.
+        -- A literal the step dropped has to be refutable on its own, as
+        -- `t ≠ t` is.
         if let some refuted ← refuteDropped? target h then return refuted
         throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\n\
-          is neither among{indentExpr target}\nnor refutable on its own")
+          the worker recorded as dropped is not refutable on its own")
         (mkAppN premiseProof args)
 
 /--

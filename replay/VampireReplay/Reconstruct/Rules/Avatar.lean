@@ -64,7 +64,21 @@ def component (step : Step) : ReconstructM Expr := do
       return x
     let instance_ := mkAppN assumption args
     let stated ← instantiateForall (← inferType assumption) args
-    carryAll stated target instance_ (targetCount := step.unit.clauseSize?)
+    -- A negated name asserts `¬⟦n⟧`, and the name of a negative ground
+    -- singleton is defined by the complement (`Splitter`), so the one literal
+    -- it asserts is the clause's under a double negation where the definition
+    -- reads the complement as a negation -- as it does of a predicate polarity
+    -- flipping flipped.
+    let (negated, _) := splitName name
+    if negated then
+      if let some inner := stated.not? then
+        if let some literal := inner.not? then
+          let body ← withLocalDeclD `h literal fun h => do
+            mkLambdaFVars #[h] (← carryAll literal target h (placed := step.placedAt 0)
+              (sourceCount := some 1) (targetCount := step.unit.clauseSize?))
+          return mkApp body (ofNotNot literal instance_)
+    carryAll stated target instance_ (placed := step.placedAt 0)
+      (targetCount := step.unit.clauseSize?)
 
 /--
 `avatar_contradiction_clause`: the names a refuted clause held under cannot all
@@ -266,10 +280,43 @@ private def satClause (states : Stated)
         | throwError "the propositional clause for step {origin.number} is not \
           among the refutation's premises"
       -- The first-order clause's literals in the order of the names, and then
-      -- all of them false.
+      -- all of them false. The clause is a disjunction of named formulas
+      -- (`Splitter`), each named as one of the propositional clause's literals
+      -- is: which one it is is which name it has.
       let disjunction := junction ``Or ``False parts
-      let carried ← carryAll stated disjunction proof (sourceCount := origin.clauseSize?)
-        (targetCount := some parts.size)
+      -- Which of the propositional clause's literals each of the first-order
+      -- one's became: a formula's disjuncts are named formulas (`Splitter`),
+      -- each named as one of the literals is; a clause's are sorted by the
+      -- conversion, and the worker wrote down which is which.
+      let order ← match origin.formula?, c.originOrder? with
+        | some f, _ => do
+          let connective ← connectiveOf f
+          let disjuncts := match connective with
+            | .or => f.subformulas
+            | .«false» => #[]
+            | _ => #[f]
+          disjuncts.mapM fun g => do
+            let some n := g.name?
+              | throwError "step {origin.number} has a disjunct that is no name"
+            let some j := c.literals.findIdx? (· == n)
+              | throwError "the propositional clause for step {origin.number} has \
+                  no literal `{n}`"
+            return j
+        | none, some order => pure order
+        | none, none =>
+          throwError "the propositional clause for step {origin.number} records no \
+            order of its literals"
+      let carried ← if order.isEmpty then
+          mkAppOptM ``False.elim #[some disjunction, some proof]
+        else withInto disjunction (some parts.size) fun into => do
+          elimGiven (← countedParts ``Or stated order.size) (motive? := some disjunction)
+            (fun i h => do
+              let j := order[i]!
+              let stated ← instantiateMVars (← inferType h)
+              unless stated == parts[j]! do
+                throwError "`{c.literals[j]!}` stands for{indentExpr parts[j]!}\nnot\
+                  {indentExpr stated}"
+              return into.inject j h) proof
       if parts.isEmpty then return carried
       let suffix := suffixJunctions ``Or ``False parts
       return ← mkLambdaFVars refutations

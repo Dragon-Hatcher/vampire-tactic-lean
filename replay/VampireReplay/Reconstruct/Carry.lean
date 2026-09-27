@@ -42,43 +42,18 @@ def withInto (target : Expr) (count : Option Nat) (k : Into → ReconstructM Exp
   withDisjunction (← clauseLiterals target count) k
 
 /--
-A proof of the conclusion from one of its literals, found among them, or
-`none` where it is not among them in any of the ways it can be stated.
-
-@b hint is where the literal is likely to be, looked at first: a literal
-carried in order sits where it sat, and comparing it with every literal before
-it would make placing a clause cost its square.
--/
-def Into.place? (into : Into) (h : Expr) (hint : Option Nat := none) :
-    ReconstructM (Option Expr) := do
-  let place (candidate : Expr) : ReconstructM (Option Expr) := do
-    let stated ← instantiateMVars (← inferType candidate)
-    if let some i := hint then
-      if into.parts[i]? == some stated then return some (into.inject i candidate)
-    let some k ← findPart? into.parts stated | return none
-    return some (into.inject k candidate)
-  if let some placed ← place h then return placed
-  if let some flipped ← flipEquality h then
-    if let some placed ← place flipped then return placed
-  for candidate in ← doubleNegations h do
-    if let some placed ← place candidate then return placed
-  return none
-
-/-- `Into.place?`, for a caller that cannot go on without the literal placed. -/
-def Into.place (into : Into) (h : Expr) (hint : Option Nat := none) :
-    ReconstructM Expr := do
-  let some placed ← into.place? h hint
-    | throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\
-        \nis not among{indentExpr into.whole}"
-  return placed
-
-/--
 A premise's `i`th literal placed where the worker recorded it went, turned
-round if it was; looked for, where nothing is recorded for it.
+round if it was. The worker records where every literal of a clause premise
+went; one it recorded as going nowhere the step acted on or dropped, which is
+for the rule to prove, not for this to look for.
 -/
 def Into.placeAt (into : Into) (placed : Option Placement) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
-  let some (some (k, flipped)) := placed.bind (·[i]?) | into.place h (hint := i)
+  let some placement := placed
+    | throwError "the worker recorded no placement of the premise's literals"
+  let some (some (k, flipped)) := placement[i]?
+    | throwError "the worker recorded literal {i} as none of the conclusion's: the step \
+        acted on it, which the rule has to say what of"
   let some h ← (if flipped then flipEquality h else pure (some h))
     | throwError "the worker recorded literal {i} as turned round, but\
         {indentExpr (← instantiateMVars (← inferType h))}\nis no equality"
@@ -86,7 +61,7 @@ def Into.placeAt (into : Into) (placed : Option Placement) (i : Nat) (h : Expr) 
     | throwError "the worker placed literal {i} at literal {k} of a conclusion of \
         {into.parts.size}"
   let stated ← instantiateMVars (← inferType h)
-  unless stated == part || (← isDefEq stated part) do
+  unless stated == part do
     throwError "the worker placed{indentExpr stated}\nat literal {k} of the \
       conclusion, which is{indentExpr part}"
   return into.inject k h
@@ -104,7 +79,7 @@ def elimLiterals (source : Expr) (count : Option Nat)
 /--
 `target` from a proof of `source`, whose literals the step carried into it:
 `carried i h` says what the `i`th gives, which is put where the worker
-recorded it went (`placed`), and looked for where nothing is recorded.
+recorded it went (`placed`).
 -/
 def carryWith (source target proof : Expr) (into : Into)
     (carried : Nat → Expr → ReconstructM Expr)
@@ -112,6 +87,50 @@ def carryWith (source target proof : Expr) (into : Into)
     ReconstructM Expr :=
   elimLiterals source sourceCount (motive? := some target) (fun i h => do
     into.placeAt placed i (← carried i h)) proof
+
+/--
+`target` from a proof of `source`, a clause whose literals the step carried,
+but for those the worker recorded as rewritten (`recordRewritten`): `rewrite h
+wanted` proves `wanted`, the conclusion's literal stated the way round the
+premise's is, from `h`, the premise's.
+-/
+def carryRewritten (source target proof : Expr) (into : Into) (placement : Placement)
+    (rewritten : Array Bool) (sourceCount : Option Nat)
+    (rewrite : Expr → Expr → ReconstructM Expr) : ReconstructM Expr :=
+  carryWith source target proof into (placed := some placement) (sourceCount := sourceCount)
+    fun k h => do
+      unless rewritten[k]?.getD false do return h
+      let some (some (j, flipped)) := placement[k]? | return h
+      let some part := into.parts[j]?
+        | throwError "the worker placed literal {k} at literal {j} of a conclusion of \
+            {into.parts.size}"
+      let wanted ← if flipped then turnedRound part else pure part
+      rewrite h wanted
+where
+  /-- An equality literal the other way round. -/
+  turnedRound (e : Expr) : ReconstructM Expr := do
+    let some (τ, a, b, negated) := equalityLiteral? e
+      | throwError "the worker recorded{indentExpr e}\nas turned round, but it is no equation"
+    let eq ← mkEq b a
+    let _ := τ
+    return if negated then mkNot eq else eq
+
+/--
+`wanted` from `h`, where `wanted` is what `h` says with names this step
+introduced in place of what they name: those it has and `h` does not.
+-/
+def throughNames (h wanted : Expr) : ReconstructM Expr := do
+  let stated ← instantiateMVars (← inferType h)
+  let wanted ← instantiateMVars wanted
+  -- Through every name the premise's literal does not have: what one names
+  -- can mention another.
+  let before := stated.getUsedConstants
+  let folded (n : Name) : Bool := isIntroducedDefinition n && !before.contains n
+  let unfolded ← unfoldDefinitions wanted (only := folded)
+  unless unfolded == stated do
+    throwError "{indentExpr wanted}\nis not{indentExpr stated}\nwith what it names folded: \
+      it unfolds to{indentExpr unfolded}"
+  mkExpectedTypeHint h wanted
 
 /--
 `target` from a proof of `source`, a step having acted on the literals
