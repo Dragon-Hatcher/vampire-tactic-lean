@@ -9,6 +9,7 @@ import VampireReplay.Reconstruct.Rules.Clausify
 import VampireReplay.Reconstruct.Rules.Definition
 import VampireReplay.Reconstruct.Rules.Input
 import VampireReplay.Reconstruct.Rules.Normalize
+import VampireReplay.Reconstruct.Rules.PurePredicate
 import VampireReplay.Reconstruct.Rules.Resolution
 import VampireReplay.Reconstruct.Rules.Rewrite
 import VampireReplay.Reconstruct.Rules.Simplify
@@ -73,7 +74,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .flatten => Congruence.restated step
   | .rectify => Congruence.restated step
   | .definitionFolding => Congruence.unfolded step
-  | .purePredicateRemoval => Definition.purePredicateRemoval step
+  | .purePredicateRemoval => PurePredicate.purePredicateRemoval step
   | .reduceFalseTrue => Simplify.reduceFalseTrue step
   | .closure => Congruence.restated step
   | .theoryNormalization => Arithmetic.literalwise step

@@ -51,7 +51,10 @@
  *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
  *             flags: 1 = polarity flipping flipped this predicate, so that
  *             every clause after it means the opposite by the predicate than
- *             the ones before it do
+ *             the ones before it do; 2 = pure predicate removal replaced it by
+ *             a truth value, 4 set where that value is true, and its number
+ *             among the predicates found pure, in the order they were found,
+ *             from bit 8
  *   sorts     {nameOff}                 -- vampire's type constructors
  *   terms     {tag, value, firstArg, arity}   tag: 0 = variable, 1 = functor
  *   args      term indices, shared by terms and literals
@@ -728,7 +731,11 @@ struct Encoder {
       Signature::Symbol* sym = env.signature->getPredicate(i);
       predicates.push_back(addString(sym->name()));
       predicates.push_back(sym->arity());
-      predicates.push_back(sym->wasFlipped() ? 1 : 0);
+      bool pureValue = false;
+      unsigned pureOrder = 0;
+      bool pure = InferenceStore::instance()->purePredicate(i, pureValue, pureOrder);
+      predicates.push_back((sym->wasFlipped() ? 1 : 0) | (pure ? 2 : 0)
+        | (pure && pureValue ? 4 : 0) | (pure ? pureOrder << 8 : 0));
     }
     for (unsigned i = 0; i < env.signature->predicates(); i++)
       created.push_back(env.signature->getPredicate(i)->created());
@@ -1184,6 +1191,10 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 37] = 0;
     units[UNIT_WIDTH * idx + 39] = NONE;
     units[UNIT_WIDTH * idx + 40] = 0;
+    // A pure predicate removal's variant is how many predicates had been
+    // found pure when it was made: it replaces those numbered below it.
+    if (unsigned stage; InferenceStore::instance()->pureStage(u, stage))
+      units[UNIT_WIDTH * idx + 37] = stage;
     if (const auto* introduced = InferenceStore::instance()->introduced(u);
         introduced && u->isClause()) {
       Clause* cl = u->asClause();

@@ -227,6 +227,26 @@ example {ι : Type} (p q r : ι → Prop) (a : ι) (h : ∀ x, ¬ p x ∨ ¬ q x
     (hq : q a) (hr : ¬ r a) : False := by
   vampire (options := #[("unit_resulting_resolution", "on")]) [*]
 
+-- Pure predicate removal: `r` occurs only positively, so it is replaced by
+-- `True`, which the formula follows to by monotonicity.
+#guard_msgs (drop info) in
+example (p q r : Prop) (h : (r ∨ p) ∧ q) (h2 : ¬q) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, h2]
+
+-- The same under a quantifier.
+#guard_msgs (drop info) in
+example {ι : Type} (p q r : ι → Prop) (a : ι) (h : ∀ x, (r x ∨ p x) ∧ q x)
+    (h2 : ¬q a) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, h2]
+
+-- Unused predicate definition removal: `d` is used only positively, so its
+-- definition is kept one way round, and then `q`, pure in what is left, is
+-- removed from it.
+#guard_msgs (drop info) in
+example {ι : Type} (d p q : ι → Prop) (a : ι) (h1 : ∀ x, d x ↔ p x ∧ q x) (h2 : d a)
+    (h3 : ¬p a) : False := by
+  vampire (mode := "vampire") (cores := 1) [h1, h2, h3]
+
 /-! ### More arithmetic -/
 
 -- Arithmetic subterm generalization of an ALASCA normal form, `X0 + t ≠ 0`

@@ -332,25 +332,6 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
         mkAppM ``Eq.mp #[atom, h])
 
 /--
-`pure_predicate_removal`: a step that does not follow from its premise.
-
-`PredicateDefinition::replacePurePredicates` replaces a predicate occurring
-with a single polarity by the truth value that satisfies its occurrences. That
-preserves satisfiability, which is all a refutation needs, but it is not an
-entailment: `¬(A ∧ ¬P)` becomes `¬A`, which does not follow from it. What makes
-it sound is reinterpreting `P`, and a proof of the goal as it stands cannot do
-that.
-
-So there is nothing here to build, now or later, and the tactic forces the pass
-off (`updr=off`) rather than meeting the step. Reaching it means the forcing was
-undone.
--/
-def purePredicateRemoval (step : Step) : ReconstructM Expr := do
-  throwError "step {step.unit.number}: pure predicate removal preserves \
-    satisfiability but is not an entailment, so it cannot be replayed; the \
-    tactic forces `updr=off` to prevent it"
-
-/--
 `unused_predicate_definition_removal`: one direction of a definition, the only
 one still needed.
 

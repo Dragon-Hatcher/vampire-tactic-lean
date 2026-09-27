@@ -570,6 +570,13 @@ structure Symbol where
   -/
   flipped : Bool := false
   /--
+  The truth value pure predicate removal replaced this predicate by, if it did
+  -- the one that satisfies each of its occurrences, which all have one
+  -- polarity -- and its number among the predicates found pure, in the order
+  they were found: a step replaces those numbered below its `variant`.
+  -/
+  pure? : Option (Bool × Nat) := none
+  /--
   When vampire created the symbol, counted over functions and predicates alike:
   a symbol it introduced is made of symbols that exist already.
   -/
@@ -753,7 +760,10 @@ def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
   else some {
     name := p.string (p.field p.layout.predicates 3 predicate.toNat 0)
     arity := p.field p.layout.predicates 3 predicate.toNat 1
-    flipped := p.field p.layout.predicates 3 predicate.toNat 2 != 0
+    flipped := p.field p.layout.predicates 3 predicate.toNat 2 &&& 1 != 0
+    pure? :=
+      let flags := p.field p.layout.predicates 3 predicate.toNat 2
+      if flags &&& 2 == 0 then none else some (flags &&& 4 != 0, (flags >>> 8).toNat)
     created := (readU32 p.data
       (p.layout.created + (p.layout.numFunctions + predicate.toNat) * 4)).toNat
   }

@@ -39,8 +39,6 @@ Shell/Rectify.cpp:75	*	closes a formula over its free variables, and the transla
 Saturation/Splitter.cpp:271	*	a well-colored proof, for interpolation only, which the tactic never asks for
 Shell/EqualityProxy.cpp:453	*	the equality proxy of a polymorphic problem, and the translation writes monomorphic ones only
 Inferences/DistinctEqualitySimplifier.cpp:64	*	constants declared distinct, and the translation writes no $distinct and no distinct objects
-Shell/PredicateDefinition.cpp:378	*	the tactic forces updr=off: replacing a pure predicate preserves satisfiability but is no entailment (Vampire/Worker.lean)
-Shell/PredicateDefinition.cpp:687	*	the tactic forces updr=off: the pass that removes unused definitions also replaces pure predicates (Vampire/Worker.lean)
 Inferences/SubsumptionDemodulationHelper.cpp:128	backward_subsumption_resolution	made so only by backward subsumption demodulation, which the tactic forces off with bsd=off
 Shell/PredicateElimination.cpp:754	*	made only by predicate elimination, whose own steps replay does not implement
 Shell/InterpretedNormalizer.cpp:498	*	normalizes a clause of the input before clausification, and the translation writes tff formulas only

@@ -52,14 +52,6 @@ structure Config where
   strategy a different run of luck; the proof then speaks of a formula that is
   the goal's under a permutation nothing records, which is no use to replay.
 
-  Unused predicate definition removal is off, because the same pass replaces a
-  pure predicate -- one occurring with a single polarity -- by the truth value
-  that satisfies its occurrences. That preserves satisfiability, which is all a
-  refutation needs, but it is not an entailment: `¬(A ∧ ¬P)` becomes `¬A`,
-  which does not follow from it. What makes the step sound is reinterpreting
-  `P`, and a proof of the goal as it stands cannot do that, so a proof using
-  the step cannot be replayed at all rather than merely not yet.
-
   Global subsumption and backward subsumption demodulation are off because the
   vampire this is built from keeps nothing of how they used their premises:
   one stands on a propositional proof it discards, and the other, unlike its
@@ -67,7 +59,7 @@ structure Config where
   admitted.
   -/
   forced : Array (String × String) :=
-    #[("si", "off"), ("updr", "off"), ("gs", "off"), ("bsd", "off")]
+    #[("si", "off"), ("gs", "off"), ("bsd", "off")]
   -- Vampire takes one `forced_options`, the last given, so options a user
   -- forces are merged into these rather than passed after them: passed after,
   -- they would replace these, and a proof could then use what replay cannot
