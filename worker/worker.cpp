@@ -12,7 +12,7 @@
  * become indices, so the encoding is position-independent and preserves
  * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
  *
- *   header    48 words, see `write`:
+ *   header    49 words, see `write`:
  *               0  `MAGIC`, then 1 `VERSION`
  *               2  vampire's termination reason
  *               3  1 if there is a refutation, 0 if not
@@ -38,7 +38,8 @@
  *              43  how many words `literalFactors` holds, and 44
  *                  `constraintLits`
  *              45  how many words `satOrder` holds, 46 how many pairs
- *                  `introducedLits` and 47 how many words `genPlacements`
+ *                  `introducedLits`, 47 how many words `genPlacements` and 48
+ *                  how many `created`
  *             The sections follow in the order below.
  *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
  *                                       -- indexed by a term's functor
@@ -72,7 +73,7 @@
  *              numCongruences, numBoundSorts, firstConstraint,
  *              numConstraints, firstPlacement, numPlacements,
  *              splittingName, firstFactor, numFactors, procedure, site,
- *              firstIntroduced, numIntroduced, variant}
+ *              firstIntroduced, numIntroduced, variant, introducedSymbol}
  *             `firstConstraint` and `numConstraints` are the entries of
  *             `constraintLits` that say which of a clause's literals are the
  *             disequalities an abstracting unifier left behind: what it could
@@ -94,6 +95,8 @@
  *             evaluation is whichever of three evaluators the options chose,
  *             and they rewrite a literal differently. `NONE` otherwise.
  *             `firstIntroduced` and `numIntroduced` are the entries of
+ *             `introducedSymbol` is the name of the first symbol vampire
+ *             recorded the unit to introduce, `NONE` for none
  *             `introducedLits` for the literals the inference built rather
  *             than carried -- a theory axiom's -- in the order it built them,
  *             each the index of the conclusion's literal it is and of the
@@ -178,6 +181,9 @@
  *             3 = one rewritten in place by a name
  *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
  *             clause and of what replaced a position in one
+ *   created   when each function symbol and then each predicate symbol was
+ *             created, counted over both: a symbol vampire introduced is made
+ *             of symbols that exist already, so this is an order to bind them in
  *   genPlacements where each literal a step pushed went in the clause it
  *             made, in the order it pushed them, bit 31 set where the push
  *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
@@ -303,9 +309,9 @@ using namespace Saturation;
 namespace {
 
 const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 36;
+const uint32_t VERSION = 37;
 /** Words per unit record. */
-const uint32_t UNIT_WIDTH = 38;
+const uint32_t UNIT_WIDTH = 39;
 const uint32_t NONE = 0xFFFFFFFFu;
 
 /**
@@ -639,7 +645,7 @@ struct Encoder {
       bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
       placementEntries, literalFactors, constraintLits, introducedLits,
-      genPlacements;
+      genPlacements, created;
   std::string strings;
   std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
@@ -698,6 +704,7 @@ struct Encoder {
       functions.push_back(addString(sym->name()));
       functions.push_back(sym->arity());
       encodeNumeral(i, sym);
+      created.push_back(sym->created());
     }
     for (unsigned i = 0; i < env.signature->predicates(); i++) {
       Signature::Symbol* sym = env.signature->getPredicate(i);
@@ -705,6 +712,8 @@ struct Encoder {
       predicates.push_back(sym->arity());
       predicates.push_back(sym->wasFlipped() ? 1 : 0);
     }
+    for (unsigned i = 0; i < env.signature->predicates(); i++)
+      created.push_back(env.signature->getPredicate(i)->created());
   }
 
   /** A number, as `numeral`, `numeratorOff` and `denominatorOff` say it. */
@@ -1145,6 +1154,12 @@ struct Encoder {
     units[UNIT_WIDTH * idx + 11] = numSkolems;
     units[UNIT_WIDTH * idx + 12] = nameOff;
     units[UNIT_WIDTH * idx + 34] = siteOf(inference);
+    // The symbol the unit introduced, where vampire recorded one: which side
+    // of a definition is the one being defined is otherwise a guess.
+    {
+      Signature::Symbol* sym = InferenceStore::instance()->firstIntroducedSymbol(u);
+      units[UNIT_WIDTH * idx + 38] = sym ? addString(sym->name()) : NONE;
+    }
     // The literals the inference built, as the conclusion's indices.
     units[UNIT_WIDTH * idx + 35] = NONE;
     units[UNIT_WIDTH * idx + 36] = 0;
@@ -1611,14 +1626,17 @@ struct Encoder {
         }
       }
     }
-    if (u->isClause() && inference.rule() == InferenceRule::GENERAL_SPLITTING_COMPONENT) {
+    // Where a general splitting's name is: asserted in the component, denied
+    // in what is left of the clause split.
+    if (u->isClause() && (inference.rule() == InferenceRule::GENERAL_SPLITTING_COMPONENT
+        || inference.rule() == InferenceRule::GENERAL_SPLITTING)) {
       Clause* cl = u->asClause();
       Literal* name = InferenceStore::instance()->splittingNameLiteral(u);
       for (unsigned j = 0; name && j < cl->length(); j++)
         if ((*cl)[j] == name)
           units[UNIT_WIDTH * idx + 30] = j;
       if (units[UNIT_WIDTH * idx + 30] == NONE)
-        throw UserErrorException("general splitting component " +
+        throw UserErrorException("general splitting step " +
           std::to_string(u->number()) + " has no recorded name literal");
     }
 
@@ -1741,6 +1759,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
   putWord(buf, static_cast<uint32_t>(enc.introducedLits.size() / 2));
   putWord(buf, static_cast<uint32_t>(enc.genPlacements.size()));
+  putWord(buf, static_cast<uint32_t>(enc.created.size()));
 
   putWords(buf, enc.functions);
   putWords(buf, enc.predicates);
@@ -1776,6 +1795,7 @@ void write(const std::string& path, const Encoder& enc, uint32_t reason,
   putWords(buf, enc.satOrder);
   putWords(buf, enc.introducedLits);
   putWords(buf, enc.genPlacements);
+  putWords(buf, enc.created);
   putBlob(buf, enc.strings);
   putBlob(buf, enc.proofText);
 

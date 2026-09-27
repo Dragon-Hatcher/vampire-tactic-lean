@@ -12,10 +12,10 @@ def none32 : UInt32 := 0xFFFFFFFF
     ||| (data[byteOff + 3]!.toUInt32 <<< 24)
 
 /-- The header's length, in words. -/
-private def headerWords : Nat := 48
+private def headerWords : Nat := 49
 
 /-- A unit's record's length, in words. -/
-private def unitWidth : Nat := 38
+private def unitWidth : Nat := 39
 
 /-- The header word that is nonzero when there is a refutation. -/
 private def hasRefutationWord : Nat := 3
@@ -65,6 +65,7 @@ private structure Layout where
   satOrder : Nat
   introducedLits : Nat
   genPlacements : Nat
+  created : Nat
   strings : Nat
   stringsLen : Nat
   proofText : Nat
@@ -151,7 +152,7 @@ namespace Proof
 
 private def magic : UInt32 := 0x504D4156
 
-private def version : UInt32 := 36
+private def version : UInt32 := 37
 
 /-- Decodes a buffer written by `vampire-worker`. -/
 def ofByteArray (data : ByteArray) : Except Error Proof := do
@@ -214,6 +215,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let numSatOrder := word 45
   let numIntroducedLits := word 46
   let numGenPlacements := word 47
+  let numCreated := word 48
   let functions := headerWords * 4
   let predicates := functions + numFunctions * 5 * 4
   let sorts := predicates + numPredicates * 3 * 4
@@ -248,7 +250,8 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   let satOrder := constraintLits + numConstraintLits * 4
   let introducedLits := satOrder + numSatOrder * 4
   let genPlacements := introducedLits + numIntroducedLits * 2 * 4
-  let strings := genPlacements + numGenPlacements * 4
+  let created := genPlacements + numGenPlacements * 4
+  let strings := created + numCreated * 4
   let pad (n : Nat) : Nat := (n + 3) / 4 * 4
   let proofText := strings + pad stringsLen
   let expected := proofText + pad proofTextLen
@@ -303,6 +306,9 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       string "denominator" (at_ functions 5 i 4)
     | kind => malformed s!"function {i} has unknown numeral kind {kind}"
   for i in [0:numPredicates] do string "predicate name" (at_ predicates 3 i 0)
+  if numCreated != numFunctions + numPredicates then
+    malformed s!"it says when {numCreated} symbols were created, of \
+      {numFunctions + numPredicates}"
   for i in [0:numSorts] do string "sort name" (at_ sorts 1 i 0)
   for i in [0:numTerms] do
     if at_ terms 4 i 0 != 0 then
@@ -321,6 +327,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
   for i in [0:numSubs] do index "subformula" (at_ subs 1 i 0) numFormulas
   for i in [0:numUnits] do
     let u (off : Nat) := at_ units unitWidth i off
+    optionalString "introduced symbol" (u 38)
     if u 3 &&& 1 != 0 then range "clause literals" (u 4) (u 5) numUnitLits
     else index "unit formula" (u 4) numFormulas
     range "premises" (u 6) (u 7) numParents
@@ -454,7 +461,7 @@ def ofByteArray (data : ByteArray) : Except Error Proof := do
       units, unitLits, parents, varSorts, skolems, splits, satClauses, satLits,
       satPremises, namings, namingArgs, genStates, genLits, choices, uses,
       bindings, congruences, congruenceArgs, placements, placementEntries,
-      literalFactors, constraintLits, satOrder, introducedLits, genPlacements, strings, stringsLen, proofText, numFunctions,
+      literalFactors, constraintLits, satOrder, introducedLits, genPlacements, created, strings, stringsLen, proofText, numFunctions,
       numPredicates, numSorts, numTerms, numLiterals, numFormulas, numUnits,
       proofTextLen
     }
@@ -556,6 +563,11 @@ structure Symbol where
   it means the opposite by the predicate than the ones before it do.
   -/
   flipped : Bool := false
+  /--
+  When vampire created the symbol, counted over functions and predicates alike:
+  a symbol it introduced is made of symbols that exist already.
+  -/
+  created : Nat := 0
 deriving Repr, Inhabited
 
 /-- A term: a variable, or a functor applied to arguments. -/
@@ -717,7 +729,8 @@ def function? (p : Proof) (functor : UInt32) : Option Symbol :=
       let numerator ← (p.string (at_ 3)).toInt?
       let denominator ← (p.string (at_ 4)).toNat?
       return { sort, multiplies, numerator, denominator }
-    some { name := p.string (at_ 0), arity := at_ 1, numeral? }
+    some { name := p.string (at_ 0), arity := at_ 1, numeral?
+           created := (readU32 p.data (p.layout.created + functor.toNat * 4)).toNat }
 
 /-- Every function symbol of the problem's signature. -/
 def functions (p : Proof) : Array Symbol :=
@@ -730,7 +743,13 @@ def predicate? (p : Proof) (predicate : UInt32) : Option Symbol :=
     name := p.string (p.field p.layout.predicates 3 predicate.toNat 0)
     arity := p.field p.layout.predicates 3 predicate.toNat 1
     flipped := p.field p.layout.predicates 3 predicate.toNat 2 != 0
+    created := (readU32 p.data
+      (p.layout.created + (p.layout.numFunctions + predicate.toNat) * 4)).toNat
   }
+
+/-- Every predicate symbol of the problem's signature. -/
+def predicates (p : Proof) : Array Symbol :=
+  (Array.range p.layout.numPredicates).filterMap fun i => p.predicate? (UInt32.ofNat i)
 
 /-- The name of the sort vampire numbers `i`, which has to be one of them. -/
 private def sortNameAt (p : Proof) (i : UInt32) : String :=
@@ -1084,6 +1103,11 @@ def name? (u : Unit) : Option String :=
   let off := u.field 12
   if off == none32 then none else some (u.proof.string off)
 
+/-- The first symbol vampire recorded this step to introduce. -/
+def introducedSymbol? (u : Unit) : Option String :=
+  let off := u.field 38
+  if off == none32 then none else some (u.proof.string off)
+
 /--
 The names this step's clause holds under.
 
@@ -1242,7 +1266,8 @@ def genClause? (u : Unit) : Option GenClause :=
 
 /--
 Which of a general splitting component's literals is the name the splitting
-introduced, and `none` for anything else.
+introduced, and which of what is left of the clause it split denies it; `none`
+for anything else.
 -/
 def splittingName? (u : Unit) : Option Nat :=
   let i := u.field 30

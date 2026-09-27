@@ -150,15 +150,16 @@ def general (step : Step) : ReconstructM Expr := do
     withDisjunction parts fun d => do
     -- What the name denies, at the variables it is applied to.
     let quantified ← halfHolds split rest vars
-    -- The conclusion denies the name; the rest of it is the other half.
-    let mut denied := none
-    for (l, j) in conclusion.literals.zipIdx do
-      if let some symbol := l.symbol? then
-        if symbol.name == name && !l.polarity then
-          denied := some j
-          break
-    let some i := denied
-      | throwError "the conclusion does not deny the name `{name}`"
+    -- The conclusion denies the name, where the worker recorded it; the rest
+    -- of it is the other half.
+    let some i := step.unit.splittingName?
+      | throwError "general splitting step {step.unit.number} does not record \
+          where it denies `{name}`"
+    let some denial := conclusion.literals[i]?
+      | throwError "general splitting step {step.unit.number} has no literal {i}"
+    unless (denial.symbol?.map (·.name)) == some name && !denial.polarity do
+      throwError "literal {i} of general splitting step {step.unit.number} does \
+        not deny `{name}`"
     -- The half holds throughout, which is the denial of the name.
     let held ← withLocalDeclD `h quantified fun h => do
       mkLambdaFVars #[h] (d.inject i

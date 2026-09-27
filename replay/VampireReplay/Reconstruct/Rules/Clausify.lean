@@ -552,17 +552,33 @@ private partial def variablesOf (t : Term) : Array UInt32 :=
   if t.isVar then #[t.var] else t.args.flatMap variablesOf
 
 /--
-Binds every symbol a unit's clausification introduced by skolemising.
+The symbols one step of a clausification introduced by skolemising, with the
+variables they stand for: read off the clause it left them bound in, as the
+step records every occurrence's under the one variable. Nothing for a step that
+skolemised nothing.
+-/
+def skolemsOfStep (sorts : Array (UInt32 × String)) (c : GenClause) :
+    ReconstructM (Array (UInt32 × Term)) := do
+  let some parent := c.parent? | return #[]
+  let some position := c.position? | return #[]
+  let some (replaced, sign) := parent.literals[position.toNat]?
+    | throwError "a clausification step replaced a position that is not there"
+  unless skolemises (← connectiveOf replaced) sign do return #[]
+  let occurrence := Std.HashMap.ofList c.bindings.toList
+  return (boundOf sorts replaced).filterMap fun (v, _) =>
+    occurrence[v]?.map (v, ·)
+
+/--
+Binds the symbols one step of a clausification introduced by skolemising.
 
 Where each skolemisation happened is read off the recorded steps rather than
 looked for: `newcnf` skolemises a subformula at the polarity it occurs with,
 and for a universal inside an equivalence that is not anywhere an existential
 can be found.
 -/
-private partial def registerAlong (sorts : Array (UInt32 × String))
+def registerStep (sorts : Array (UInt32 × String))
     (skolems : Std.HashMap UInt32 Term) (c : GenClause) : ReconstructM PUnit := do
   let some parent := c.parent? | return
-  registerAlong sorts skolems parent
   let some position := c.position? | return
   let some (replaced, sign) := parent.literals[position.toNat]?
     | throwError "a clausification step replaced a position that is not there"
@@ -570,13 +586,9 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
   let bound := boundOf sorts replaced
   -- The same variable is skolemised once for each occurrence of the quantifier
   -- that calls for it, and to a symbol of its own each time, so which symbol
-  -- this occurrence introduced is read off the clause it left it bound in
-  -- rather than off the step, which records them all under the one variable.
-  let occurrence := Std.HashMap.ofList c.bindings.toList
-  let skolems := bound.foldl (init := skolems) fun acc (v, _) =>
-    match occurrence[v]? with
-    | some image => acc.insert v image
-    | none => acc
+  -- this occurrence introduced is read off the clause it left it bound in.
+  let skolems := (← skolemsOfStep sorts c).foldl (init := skolems) fun acc (v, image) =>
+    acc.insert v image
   -- A variable the quantifier's body mentions is either an argument of the
   -- symbols being introduced, and stands for itself, or one the clause has
   -- already bound, and stands for what it was bound to -- which is why the
@@ -600,18 +612,19 @@ private partial def registerAlong (sorts : Array (UInt32 × String))
       pending := waiting
     registerBlock sorts sign skolems vars replaced
 
-def registerSkolemsOf (u : Vampire.Unit) : ReconstructM PUnit := do
-  let some clause := u.genClause? | return
-  -- The unit's own records last, so that they win: a parent numbers its
-  -- variables independently, and one of its variables can have the number of
-  -- one of the unit's.
-  let skolems := Std.HashMap.ofList
-    (u.parents.flatMap (·.skolems) ++ u.skolems).toList
-  if skolems.isEmpty then return
-  registerAlong (u.parents.flatMap (·.varSorts) ++ u.varSorts) skolems clause
+/--
+What a unit's clausification is read with: the sorts of its variables and the
+skolem terms it and its premises recorded, the unit's own last, so that they
+win -- a parent numbers its variables independently, and one of its variables
+can have the number of one of the unit's.
+-/
+def skolemContext (u : Vampire.Unit) :
+    Array (UInt32 × String) × Std.HashMap UInt32 Term :=
+  (u.parents.flatMap (·.varSorts) ++ u.varSorts,
+   Std.HashMap.ofList (u.parents.flatMap (·.skolems) ++ u.skolems).toList)
 
 /-- The generalised clauses a clause was reached through, the first one first. -/
-private partial def chainTo (c : GenClause) (chain : Array GenClause := #[]) :
+partial def chainTo (c : GenClause) (chain : Array GenClause := #[]) :
     Array GenClause :=
   match c.parent? with
   | some parent => chainTo parent (chain.push c)

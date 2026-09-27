@@ -220,12 +220,6 @@ structure State where
   numerals : Std.HashMap (Expr × Int) Expr := {}
   /-- The universe each sort an equality has been stated at lives in. -/
   levels : Std.HashMap Expr Level := {}
-  /--
-  What went wrong binding the names a step introduces, for each step whose
-  names could not be bound before replay began: reported with the first name
-  that is then missing, since a name nothing bound is otherwise all it says.
-  -/
-  bindFailures : Array (UInt32 × MessageData) := #[]
 
 abbrev ReconstructM := ReaderT Context (StateRefT State MetaM)
 
@@ -246,19 +240,11 @@ proof introduced binds it.
 
 The names vampire introduces itself -- skolems, AVATAR's components, the
 symbols of its definitions -- are bound before any step is replayed, so meeting
-one unbound means that binding it failed, or that no rule binds that kind of
-name yet. What went wrong binding is reported with it, since the missing name
-is otherwise all the message says.
+one unbound means that no rule binds that kind of name yet.
 -/
-def throwIntroduced (kind name : String) : ReconstructM α := do
-  let failures := (← get).bindFailures
-  let why :=
-    if failures.isEmpty then m!""
-    else m!"\nbinding what the proof introduces failed for {failures.size} \
-      step(s):{MessageData.joinSep (failures.toList.map fun (n, e) =>
-        m!"\n  step {n}: {e}") ""}"
+def throwIntroduced (kind name : String) : ReconstructM α :=
   throwError "{kind} `{name}` has no Lean counterpart: it is not from the goal, \
-    and replay did not bind it{why}"
+    and replay did not bind it"
 
 /-- The Lean type a TPTP sort stands for, if it stands for one. -/
 def sortType? (name : String) : ReconstructM (Option Expr) := do

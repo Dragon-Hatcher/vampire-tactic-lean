@@ -382,9 +382,12 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- negation, so failing means the name holds and the clause can be used.
     let mut proof := clauseProof
     let mut stated ← instantiateMVars clauseStated
+    -- `Splitter` writes the negated names the clause held under first, and
+    -- the components after them.
+    let assumptions := disjuncts.extract 0 parent.splits.size
     for name in parent.splits do
       let (flipped, says) ← flipName name
-      let some i := disjuncts.findIdx? (· == flippedName name)
+      let some i := assumptions.findIdx? (· == flippedName name)
         | throwError "the negation of `{name}` is not among{indentExpr target}"
       let body ← namedFormula name
       let holds ← mkAppM ``Iff.mp
@@ -405,17 +408,8 @@ def splitClause (step : Step) : ReconstructM Expr := do
     let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool × Bool) := {}
     for (name, i) in disjuncts.zipIdx do
       let key := (splitName name).2
-      -- A name the clause held under is in the split clause flipped, and is no
-      -- component of it -- unless it is one: a component that is the
-      -- complement of an assumption is named by the assumption's flip. Which
-      -- an occurrence is, the step's premises say: each component occurrence
-      -- has a renaming recorded against its definition, so one with none left
-      -- is the assumption.
-      if parent.splits.contains (flippedName name) then
-        let componentsLeft : Bool := match definitions[key]? with
-          | some (_, uses, _) => decide (met.getD key 0 < uses.size)
-          | none => false
-        unless componentsLeft do continue
+      -- The names the clause held under come first, and are no components.
+      if i < parent.splits.size then continue
       let some (definition, uses, position) := definitions[key]?
         | throwError "no definition was recorded for `{name}`"
       let seen := met.getD key 0

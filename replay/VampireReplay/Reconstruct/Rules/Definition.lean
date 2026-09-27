@@ -28,10 +28,6 @@ private def stripForalls (f : Formula) : ReconstructM Formula := do
     f := body
   return f
 
-/-- Whether a symbol of that name occurs in a term. -/
-private partial def mentions (name : String) (t : Term) : Bool :=
-  !t.isVar && ((t.symbol?.map (·.name)) == some name || t.args.any (mentions name))
-
 /-- The single literal a definition step states. -/
 private def definitionLiteral (u : Vampire.Unit) : ReconstructM Literal := do
   if let some c := u.clause? then
@@ -63,31 +59,16 @@ private def registerFunctionDefinition (u : Vampire.Unit) : ReconstructM PUnit :
   let #[lhs, rhs] := l.args
     | throwError "equality with {l.args.size} arguments"
   withVars u.varSorts {} fun vars _ => do
-    let fresh? (t other : Term) : ReconstructM (Option (String × Array Term)) := do
-      if t.isVar then return none
-      let some symbol := t.symbol? | return none
-      if ← isGoalSymbol symbol.name then return none
-      let args := t.args
-      unless args.all (·.isVar) do return none
-      unless (args.map (·.var)).toList.Nodup do return none
-      if mentions symbol.name other then return none
-      return some (symbol.name, args)
-    let bound (name : String) : ReconstructM Bool :=
-      return (← get).introduced.contains name
-    let (name, args, body) ←
-      match ← fresh? lhs rhs, ← fresh? rhs lhs with
-      | some (name, args), none => pure (name, args, rhs)
-      | none, some (name, args) => pure (name, args, lhs)
-      | some (l, largs), some (r, rargs) =>
-        match ← bound l, ← bound r with
-        | false, true => pure (l, largs, rhs)
-        | true, false => pure (r, rargs, lhs)
-        | _, _ =>
-          throwError "a function_definition step should introduce one symbol, \
-            but either side of {l} could be it"
-      | none, none =>
-        throwError "a function_definition step should introduce a symbol, \
-          but neither side of {l} is a fresh symbol applied to variables"
+    -- The side being defined is the one headed by the symbol vampire
+    -- recorded the step to introduce.
+    let some name := u.introducedSymbol?
+      | throwError "function_definition step {u.number} records no symbol it introduced"
+    let heads (t : Term) : Bool := !t.isVar && (t.symbol?.map (·.name)) == some name
+    let (args, body) ←
+      if heads lhs then pure (lhs.args, rhs)
+      else if heads rhs then pure (rhs.args, lhs)
+      else throwError "neither side of the function_definition {l} is headed by \
+        {name}, the symbol it introduced"
     let locals ← args.mapM fun arg => do
       unless arg.isVar do
         throwError "function_definition applied {name} to {arg}, not a variable"
@@ -352,37 +333,6 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
         mkAppM ``Eq.mp #[atom, h])
 
 /--
-A proof of what is kept of a definition, from the definition.
-
-Under the binders both sides share, one direction of an equivalence is what the
-equivalence says either way round.
--/
-private partial def weaken (premise stated conclusion : Expr) :
-    ReconstructM Expr := do
-  if let (.forallE _ d body _, .forallE n d' body' _) := (← whnf stated, conclusion) then
-    unless (← isProp d) && !body.hasLooseBVars do
-      unless ← isDefEq d d' do
-        throwError "the definition binds{indentExpr d}\nbut the implication kept \
-          from it binds{indentExpr d'}"
-      return ← withLocalDeclD n d' fun x => do
-        let inner ← weaken (mkApp premise x) (body.instantiate1 x) (body'.instantiate1 x)
-        mkLambdaFVars #[x] inner
-  let some (antecedent, consequent) := conclusion.arrow?
-    | throwError "expected the kept part of a definition to be an implication, \
-      got{indentExpr conclusion}"
-  if let some (left, right) := stated.iff? then
-    if (← isDefEq left antecedent) && (← isDefEq right consequent) then
-      return ← mkAppM ``Iff.mp #[premise]
-    if (← isDefEq right antecedent) && (← isDefEq left consequent) then
-      return ← mkAppM ``Iff.mpr #[premise]
-    throwError "neither direction of{indentExpr stated}\nis the implication \
-      kept{indentExpr conclusion}"
-  if ← isDefEq stated conclusion then
-    return premise
-  throwError "the implication kept{indentExpr conclusion}\ndoes not match the \
-    definition{indentExpr stated}"
-
-/--
 `pure_predicate_removal`: a step that does not follow from its premise.
 
 `PredicateDefinition::replacePurePredicates` replaces a predicate occurring
@@ -409,8 +359,31 @@ one still needed.
 way round as an implication rather than an equivalence.
 -/
 def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
-  let ⟨_, premiseProof, premiseStated⟩ ← step.onlyPremise
-  weaken premiseProof (← instantiateMVars premiseStated) (← step.conclusion)
+  let ⟨parent, premiseProof, _⟩ ← step.onlyPremise
+  let some definition := parent.formula?
+    | throwError "unused_predicate_definition_removal should be given a formula"
+  let some kept := step.unit.formula?
+    | throwError "unused_predicate_definition_removal should state a formula"
+  -- `makeImplFromDef` builds the implication of the very sides of the
+  -- equivalence, under the same quantifier: which way round it kept is whether
+  -- it begins with the equivalence's left side.
+  let underQuantifier (f : Formula) : ReconstructM (Nat × Formula) := do
+    unless (← connectiveOf f) matches .«forall» do return (0, f)
+    let some body := f.subformulas[0]? | throwError "a quantifier without a body"
+    return (f.boundVars.size, body)
+  let (bound, equivalence) ← underQuantifier definition
+  let (_, implication) ← underQuantifier kept
+  let #[left, right] := equivalence.subformulas
+    | throwError "unused_predicate_definition_removal should be given an equivalence"
+  let some antecedent := implication.subformulas[0]?
+    | throwError "unused_predicate_definition_removal should state an implication"
+  let direction ←
+    if antecedent == left then pure ``Iff.mp
+    else if antecedent == right then pure ``Iff.mpr
+    else throwError "the implication unused_predicate_definition_removal kept \
+      begins with neither side of the definition"
+  forallBoundedTelescope (← step.conclusion) (some bound) fun xs _ => do
+    mkLambdaFVars xs (← mkAppM direction #[mkAppN premiseProof xs])
 
 /--
 The term an `inequality_splitting_name_introduction` step named, and the sort it
@@ -522,8 +495,8 @@ def introducesName : InferenceRule → Bool
 
 /--
 Binds what a definition step introduces. What is named may itself mention a
-name introduced elsewhere, so this can fail and be worth retrying once more
-names are known.
+name introduced elsewhere, which vampire created before it and so is bound
+first (`bindIntroduced`).
 -/
 def register (u : Vampire.Unit) : ReconstructM PUnit := do
   match u.rule? with

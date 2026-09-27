@@ -139,6 +139,48 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
     modify fun st => { st with proofs := st.proofs.insert u.number s }
     replayAll steps (i + 1) (bound.push s) refutation
 
+/-- The symbols a term mentions, by name. -/
+private partial def termSymbols (t : Term) (acc : Array String) : Array String :=
+  if t.isVar then acc
+  else t.args.foldl (fun acc a => termSymbols a acc)
+    (match t.symbol? with | some s => acc.push s.name | none => acc)
+
+/-- The symbols a literal mentions, by name. -/
+private def literalSymbols (l : Literal) (acc : Array String) : Array String :=
+  l.args.foldl (fun acc a => termSymbols a acc)
+    (match l.symbol? with | some s => acc.push s.name | none => acc)
+
+/-- The symbols a formula mentions, by name. -/
+private partial def formulaSymbols (f : Formula) (acc : Array String) : Array String :=
+  let acc := match f.literal? with | some l => literalSymbols l acc | none => acc
+  f.subformulas.foldl (fun acc g => formulaSymbols g acc) acc
+
+/-- The symbols a unit's statement mentions, by name. -/
+private def unitSymbols (u : Vampire.Unit) : Array String :=
+  match u.clause?, u.formula? with
+  | some c, _ => c.literals.foldl (fun acc l => literalSymbols l acc) #[]
+  | none, some f => formulaSymbols f #[]
+  | none, none => #[]
+
+/-- One thing the proof introduces, and what binds it. -/
+private structure Introduction where
+  /--
+  When the latest symbol it is made of was created. Vampire makes a symbol of
+  symbols that exist already -- a name of the formula it names, a skolem of
+  the formula it witnesses -- so binding in this order binds what each is made
+  of first. Skolems introduced together go when the first of them was created,
+  since what speaks of it can be made before the rest are.
+  -/
+  created : Nat
+  /--
+  Whether it introduces a symbol, which is then the latest it is made of: it
+  goes before anything else made of that symbol.
+  -/
+  introduces : Bool
+  /-- The step that records it. -/
+  unit : Vampire.Unit
+  bind : ReconstructM PUnit
+
 /--
 Binds every name the proof introduces, before any step is replayed.
 
@@ -146,82 +188,100 @@ Neither kind of introduction can be relied on to come first while replaying.
 Splitting makes a definition a premise of the steps using its name, but naming
 does not: it replaces a subformula in place and states the definition as a
 separate root. And a definition's own body can mention a skolem, while what an
-existential is skolemised over can mention a named predicate, so the two are
-bound together, in rounds, until a round binds nothing.
+existential is skolemised over can mention a named predicate. Vampire made each
+symbol of ones that existed already, and records when each was created, so they
+are bound in that order.
 -/
-private partial def bindIntroduced : ReconstructM PUnit := do
+private def bindIntroduced : ReconstructM PUnit := do
   let proof := (← read).proof
-  -- Where the existentials a unit's skolems came from are written down: its
-  -- own formula, unless a skolemisation step transformed a formula into it.
-  let skolemSource (u : Vampire.Unit) : Option (Vampire.Unit × Formula) :=
-    match u.rule? with
-    | some .skolemize => do
-      let parent ← u.parents[0]?
-      return (parent, ← parent.formula?)
-    | _ => do return (u, ← u.formula?)
-  let bind (u : Vampire.Unit) : ReconstructM PUnit := do
+  -- Only what replay binds: the goal's symbols are there already, and vampire
+  -- makes a numeral's or an interpreted operation's symbol whenever it first
+  -- meets one, which says nothing about what anything is made of.
+  let goal := (← read).symbols.symbols
+  let created : Std.HashMap String Nat :=
+    (proof.functions ++ proof.predicates).foldl (init := {}) fun m s =>
+      if s.numeral?.isSome || s.name.startsWith "$" || goal.contains s.name then m
+      else m.insert s.name s.created
+  let latest (names : Array String) : Nat :=
+    names.foldl (fun m n => max m (created.getD n 0)) 0
+  -- Skolems are introduced several at once, and what speaks of the first of
+  -- them can be made before the last is: such a binding goes when its first
+  -- symbol was created.
+  let earliest (skolems : Array Term) : Nat :=
+    (skolems.filterMap fun t => t.symbol?.map fun s => created.getD s.name 0).foldl min
+      (latest (skolems.foldl (fun acc t => termSymbols t acc) #[]))
+  -- What clausification named, which nothing in the proof states: the name
+  -- stands for the formula, so binding it to that formula is what it means.
+  let bindNaming (u : Vampire.Unit) (name : String) (arguments : Array UInt32)
+      (named : Formula) : ReconstructM PUnit := do
+    if ← resolvesSymbol name then return
+    let sorts := u.varSorts
+    let bound := boundSorts sorts arguments
+    unless bound.size == arguments.size do
+      throwError "step {u.number} named a formula over variables it does \
+        not record the sorts of"
+    let definition ← reading u <| withVars bound {} fun vars locals => do
+      mkLambdaFVars locals (← formula sorts vars named)
+    defineIntroduced name definition
+  let mut introductions : Array Introduction := #[]
+  -- Clausification steps several of its clauses share, each bound once.
+  let mut steps : Std.HashSet UInt32 := {}
+  for u in proof.units do
     if (u.rule?.map Definition.introducesName).getD false then
-      Definition.register u
+      introductions := introductions.push
+        { created := latest (unitSymbols u), unit := u, bind := Definition.register u
+          -- An avatar definition names a component by no symbol.
+          introduces := u.rule? != some .avatarDefinition }
     if u.rule? == some .generalSplittingComponent then
-      Splitting.register u
-    -- What clausification named, which nothing in the proof states: the name
-    -- stands for the formula, so binding it to that formula is what it means.
+      introductions := introductions.push
+        { created := latest (unitSymbols u), introduces := true, unit := u
+          bind := Splitting.register u }
     for (name, arguments, named) in u.namings do
-      unless ← resolvesSymbol name do
-        let sorts := u.varSorts
-        let bound := boundSorts sorts arguments
-        unless bound.size == arguments.size do
-          throwError "step {u.number} named a formula over variables it does \
-            not record the sorts of"
-        let definition ← reading u <| withVars bound {} fun vars locals => do
-          mkLambdaFVars locals (← formula sorts vars named)
-        defineIntroduced name definition
+      introductions := introductions.push
+        { created := latest (formulaSymbols named #[name]), introduces := true, unit := u
+          bind := bindNaming u name arguments named }
     -- Clausification records the steps it took, which say where each of its
     -- skolemisations happened; anything else is looked for in the formula.
-    if u.genClause?.isSome then
-      Clausify.registerSkolemsOf u
+    if let some clause := u.genClause? then
+      let (sorts, skolems) := Clausify.skolemContext u
+      if skolems.isEmpty then continue
+      for c in Clausify.chainTo clause do
+        if steps.contains c.index then continue
+        let introduced ← Clausify.skolemsOfStep sorts c
+        if introduced.isEmpty then continue
+        steps := steps.insert c.index
+        introductions := introductions.push
+          { created := earliest (introduced.map (·.2)), introduces := true, unit := u
+            bind := Clausify.registerStep sorts skolems c }
     else unless u.skolems.isEmpty do
-      let some (owner, f) := skolemSource u
+      -- Where the existentials a unit's skolems came from are written down:
+      -- its own formula, unless a skolemisation step transformed a formula
+      -- into it.
+      let source : Option (Vampire.Unit × Formula) :=
+        match u.rule? with
+        | some .skolemize => do
+          let parent ← u.parents[0]?
+          return (parent, ← parent.formula?)
+        | _ => do return (u, ← u.formula?)
+      let some (owner, f) := source
         | throwError "step {u.number} records skolems but states no formula"
-      registerSkolems (owner.varSorts ++ u.varSorts)
-        (Std.HashMap.ofList u.skolems.toList) {} f
-  let mut pending := proof.units.filter fun u =>
-    (u.rule?.map Definition.introducesName).getD false
-      || u.rule? == some .generalSplittingComponent || !u.skolems.isEmpty
-      || !u.namings.isEmpty
-      || (u.genClause?.isSome && u.parents.any fun p => !p.skolems.isEmpty)
-  -- Which names a step mentions is not said, so the order is found by
-  -- trying: a step that fails is tried again once another has bound
-  -- something, until a round binds nothing. A failed attempt is undone -- the
-  -- metavariables it assigned and anything it bound -- so that it leaves
-  -- nothing half-made behind, and what it failed with is kept.
-  let mut failures : Std.HashMap UInt32 MessageData := {}
-  repeat
-    let mut progressed := false
-    let mut again := #[]
-    for u in pending do
-      let saved ← Meta.saveState
-      let state ← get
-      try
-        bind u
-        progressed := true
-        failures := failures.erase u.number
-      catch e =>
-        saved.restore
-        set state
-        failures := failures.insert u.number e.toMessageData
-        again := again.push u
-    pending := again
-    unless progressed && !pending.isEmpty do break
-  -- What is left may be bound while replaying -- a definition mentioning a
-  -- skolem that clausifying introduces is -- so it is not an error yet; it is
-  -- reported when a name it would have bound is first needed.
-  for u in pending do
-    let name := (u.rule?.map (·.name)).getD "unknown"
-    trace[vampire] "could not bind what step {u.number} ({name}) introduces: \
-      {failures.getD u.number m!"no reason given"}"
-  modify fun s => { s with bindFailures := pending.map fun u =>
-    (u.number, failures.getD u.number m!"no reason given") }
+      introductions := introductions.push
+        { created := earliest (u.skolems.map (·.2)), introduces := true, unit := u
+          bind := registerSkolems (owner.varSorts ++ u.varSorts)
+            (Std.HashMap.ofList u.skolems.toList) {} f }
+  let ordered := introductions.zipIdx.qsort fun (a, i) (b, j) =>
+    a.created < b.created
+      || (a.created == b.created && (a.introduces && !b.introduces
+        || (a.introduces == b.introduces && i < j)))
+  for (introduction, _) in ordered do
+    trace[vampire] "binding {introduction.created} {introduction.introduces} step \
+      {introduction.unit.number} ({(introduction.unit.rule?.map (·.name)).getD "?"})"
+    try
+      introduction.bind
+    catch e =>
+      let u := introduction.unit
+      throwError "binding what step {u.number} ({(u.rule?.map (·.name)).getD "unknown"}) \
+        introduces: {e.toMessageData}"
 
 /--
 Replays a refutation as a Lean proof of `False` from the hypotheses in the
