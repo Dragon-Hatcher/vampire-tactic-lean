@@ -26,8 +26,8 @@ private inductive Kept
   /-- The truth value it simplified to. -/
   | truth (holds : Bool)
   /--
-  A proposition, with its parts where it is a junction: a junction of the same
-  connective is merged into the one around it.
+  A proposition, with its connective where it is a junction, and its parts, or
+  a quantifier: one of the same connective is merged into the one around it.
   -/
   | prop (e : Expr) (junction : Option (Connective × Array Expr) := none)
 deriving Inhabited
@@ -160,7 +160,11 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
     let itemExprs := items.map (·.2.2)
     let r : Kept := match itemExprs.size with
       | 0 => .truth isAnd
-      | 1 => .prop itemExprs[0]!
+      -- The one part left, as it is: a child kept whole keeps its
+      -- connective, which the junction around this one merges.
+      | 1 => match items[0]! with
+        | (i, none, _) => results[i]!.1
+        | (_, some _, e) => .prop e
       | _ => .prop (junction fn unit itemExprs) (some (connective, itemExprs))
     let childParts (i : Nat) : Array Expr := match results[i]!.1 with
       | .prop _ (some (c, parts)) => if c == connective then parts else #[]
@@ -274,11 +278,16 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
               atElements (mkApp p (mkAppN h xs)))
           return (.truth false, ← implication (mkConst ``False) fun h =>
             mkAppOptM ``False.elim #[some stated, some h])
-        | .prop b' _ =>
-          let r ← mkForallFVars xs b'
+        | .prop b' inner =>
+          -- A body that became a universal is merged into this one, the
+          -- block's variables pushed onto the front of the body's one by one:
+          -- in the reverse of their order.
+          let ys := if inner matches some (.«forall», _) then xs.reverse else xs
+          let r ← mkForallFVars ys b'
+          let kept : Kept := .prop r (some (.«forall», #[]))
           if positive then
-            return (.prop r, ← implication stated fun h => do mkLambdaFVars xs (mkApp p (mkAppN h xs)))
-          return (.prop r, ← implication r fun hr => do mkLambdaFVars xs (mkApp p (mkAppN hr xs)))
+            return (kept, ← implication stated fun h => do mkLambdaFVars ys (mkApp p (mkAppN h xs)))
+          return (kept, ← implication r fun hr => do mkLambdaFVars xs (mkApp p (mkAppN hr ys)))
       else
         match k with
         | .truth false =>
@@ -291,13 +300,16 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
           if positive then return (.truth true, ← implication stated fun _ => pure (mkConst ``True.intro))
           return (.truth true, ← implication (mkConst ``True) fun _ => do
             atElements (← existsIntro xs bodyStated (mkApp p (mkConst ``True.intro))))
-        | .prop b' _ =>
-          let r ← xs.foldrM (fun x acc => do mkAppM ``Exists #[← mkLambdaFVars #[x] acc]) b'
+        | .prop b' inner =>
+          -- As for a universal: a body that became an existential is merged.
+          let ys := if inner matches some (.«exists», _) then xs.reverse else xs
+          let r ← ys.foldrM (fun x acc => do mkAppM ``Exists #[← mkLambdaFVars #[x] acc]) b'
+          let kept : Kept := .prop r (some (.«exists», #[]))
           if positive then
-            return (.prop r, ← implication stated fun h => do
-              existsElim xs bodyStated h r fun hb => existsIntro xs b' (mkApp p hb))
-          return (.prop r, ← implication r fun hr => do
-            existsElim xs b' hr stated fun hb => existsIntro xs bodyStated (mkApp p hb))
+            return (kept, ← implication stated fun h => do
+              existsElim xs bodyStated h r fun hb => existsIntro ys b' (mkApp p hb))
+          return (kept, ← implication r fun hr => do
+            existsElim ys b' hr stated fun hb => existsIntro xs bodyStated (mkApp p hb))
   | _ => unchanged
 
 /-- `pure_predicate_removal`: the premise with its pure predicates replaced. -/

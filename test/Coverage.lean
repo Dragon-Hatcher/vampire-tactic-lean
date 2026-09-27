@@ -29,6 +29,15 @@ example {ι : Type} (mem : ι → ι → Prop) (pair : ι → ι → ι) (prod :
     (a b z : ι) (hz : mem z (prod a b)) : ∃ x y, z = pair x y ∧ mem x a := by
   vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [*]
 
+-- A clause that no longer mentions a variable the formula quantified, which a
+-- skolem it stays bound under still takes: `c(z, w)` of `∀ x, ∃ y, …`, the
+-- skolem for `y` taking `x`.
+#guard_msgs (drop info) in
+example {ι : Type} (b : ι → ι → Prop) (c : ι → ι → Prop) (a : ι)
+    (h : ∀ x, ∃ y, (∀ z w, c z w) ∧ b x y) (hb : ∀ x y, ¬ b x y ∨ ¬ b y x) (hc : ¬ c a a) :
+    False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("newcnf", "on")]) [h, hb, hc]
+
 -- A block of existentials under universals: skolems that are functions.
 #guard_msgs (drop info) in
 example {ι : Type} (r : ι → ι → ι → Prop) (h : ∀ x, ∃ y z, r x y z)
@@ -244,6 +253,24 @@ example (p q r : Prop) (h : (r ∨ p) ∧ q) (h2 : ¬q) : False := by
 example {ι : Type} (p q r : ι → Prop) (a : ι) (h : ∀ x, (r x ∨ p x) ∧ q x)
     (h2 : ¬q a) : False := by
   vampire (mode := "vampire") (cores := 1) [h, h2]
+
+-- A junction left with one part is that part, which the junction around it
+-- merges: `(p ∧ (a ∨ b)) ∨ c` is `c ∨ a ∨ b`.
+#guard_msgs (drop info) in
+example (p a b c : Prop) (h : (p ∧ (a ∨ b)) ∨ c) (ha : ¬a) (hb : ¬b) (hc : ¬c) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, ha, hb, hc]
+
+-- A body that becomes a quantifier of the same kind is merged into the one
+-- around it, whose variables go onto the front of its block one by one: in
+-- the reverse of their order.
+#guard_msgs (drop info) in
+example {α : Type} (p : Prop) (q : α → α → α → Prop) (a : α) (h : ∀ x y : α, p ∧ ∀ z, q x y z)
+    (hq : ¬ q a a a) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, hq]
+#guard_msgs (drop info) in
+example {α : Type} (p : Prop) (q : α → α → α → Prop) (a : α) (h : ∃ x y : α, p ∧ ∃ z, q x y z)
+    (hq : ∀ x y z, ¬ q x y z) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, hq]
 
 -- Unused predicate definition removal: `d` is used only positively, so its
 -- definition is kept one way round, and then `q`, pure in what is left, is

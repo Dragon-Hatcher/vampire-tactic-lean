@@ -801,9 +801,24 @@ def clausify (step : Step) : ReconstructM Expr := do
     match step.unit.genClause? with
     | some clause =>
       -- A variable the clause quantifies stands for what it was bound to;
-      -- one the clause kept stands for the local the conclusion binds for it.
-      for (v, image) in clause.bindings do
-        vars := vars.insert v (← term vars image)
+      -- one the clause kept stands for the local the conclusion binds for it;
+      -- and one it no longer mentions -- which a skolem's argument, or a
+      -- clause it was reached through, still can -- for something of its
+      -- sort: the clause holds whatever it is.
+      let bound := clause.bindings.map (·.1)
+      vars ← coverVars vars (sorts.filter fun (v, _) => !vars.contains v && !bound.contains v)
+      -- A binding can stand on another: its image mentions variables other
+      -- bindings give. Each is read once every variable it mentions is known.
+      let mut pending := clause.bindings
+      while !pending.isEmpty do
+        let (ready, waiting) := pending.partition fun (_, image) =>
+          (variablesOf image).all vars.contains
+        if ready.isEmpty then
+          throwError "the bindings of step {step.unit.number}'s clause stand on \
+            variables nothing binds: {waiting.map (·.1)}"
+        for (v, image) in ready do
+          vars := vars.insert v (← term vars image)
+        pending := waiting
       -- As `bindIntroduced` read them: the unit's own records win.
       let (_, skolems) := skolemContext step.unit
       let proof ← proveChain { sorts, vars, premise := premiseProof, locals := xs, skolems }
