@@ -8,17 +8,27 @@ Rules that restate a formula without changing what it says.
 Flattening merges nested junctions and adjacent quantifiers, cancels double
 negations and pushes a negation into a literal. Most of that is invisible once
 the formula is a Lean proposition -- `∀ x y` already is two binders, and an
-n-ary junction folds the same either way -- and `equiv` accounts for the rest.
+n-ary junction folds the same either way -- and `relate` accounts for the rest.
 -/
 
 namespace Vampire.Reconstruct.Congruence
 
 open Lean Meta
 
-/-- A step that restates its premise. -/
+/--
+A step that restates its premise: flattening, which cancels double negations
+and rebuilds literals -- sharing them, their equations' sides in vampire's
+order -- and rectification, which renames variables, drops a quantifier over
+one nothing mentions, and rebuilds literals too.
+Closure only quantifies.
+-/
 def restated (step : Step) : ReconstructM Expr := do
   let ⟨_, proof, stated⟩ ← step.onlyPremise
-  restate proof stated (← step.conclusion)
+  let r : Restating := match step.rule with
+    | .flatten => { doubleNegations := true, equations := true, junctions := true }
+    | .rectify => { equations := true, vacuousQuantifiers := true }
+    | _ => {}
+  restate proof stated (← step.conclusion) r
 
 /--
 A step that restates its first premise, the others being definitions it

@@ -15,9 +15,11 @@ open Lean Meta
 /--
 `input`: a formula of the problem, which is a hypothesis of the goal.
 
-The hypothesis proves it, but not always as stated: vampire reads the formula
-back with its own nesting of junctions and quantifier blocks, and states some
-comparisons the other way round. `equiv` relates the two.
+The hypothesis proves it, but not always as stated: vampire's parser folds a
+`~` into an atom's polarity, so `~~p` is `p`, merges nested junctions of one
+connective, as the translation writes them, and shares an equation with its
+sides in an order of its own; and an equation between propositions is written
+`<=>`.
 -/
 def input (step : Step) : ReconstructM Expr := do
   let some name := step.unit.name?
@@ -25,5 +27,7 @@ def input (step : Step) : ReconstructM Expr := do
   let some hypothesis := (← read).symbols.hypotheses[name]?
     | throwError "no hypothesis was given the name `{name}`"
   restate hypothesis (← inferType hypothesis) (← step.conclusion)
+    { atomDoubleNegations := true, equations := true, junctions := true,
+      propositionEquations := true }
 
 end Vampire.Reconstruct.Input

@@ -26,15 +26,8 @@ Substituting into a literal makes vampire build a fresh one, and an equality is
 oriented by its own term order, so the conclusion can state an equality the
 other way round from the premise.
 -/
-private partial def literalIff (p c : Expr) : ReconstructM Expr := do
-  if ← isDefEq p c then
-    return ← mkAppOptM ``Iff.refl #[some p]
-  if p.isAppOfArity ``Not 1 && c.isAppOfArity ``Not 1 then
-    return ← mkAppM ``not_congr #[← literalIff p.appArg! c.appArg!]
-  if let (some (α, a, b), some (_, a', b')) := (p.eq?, c.eq?) then
-    if (← isDefEq a b') && (← isDefEq b a') then
-      return ← mkAppOptM ``eq_comm #[some α, some a, some b]
-  throwError "cannot relate{indentExpr p}\nto{indentExpr c}"
+private def literalIff (p c : Expr) : ReconstructM Expr :=
+  relate { equations := true } p c
 
 /--
 Walks a skolemisation step, premise beside conclusion, returning the
