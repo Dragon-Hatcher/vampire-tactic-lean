@@ -16,7 +16,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "c264f14a1950be15a76ed468ced41ea635f150c3"
+def vampireRev : String := "678230d234cc23336c6f771953f680871705b8e2"
 
 /--
 The submodules vampire's build needs.
@@ -24,7 +24,7 @@ The submodules vampire's build needs.
 `z3` is not among them: vampire uses z3 only if it finds one already built, and
 it is the bulk of the repository.
 -/
-def vampireSubmodules : Array String := #["cadical", "viras"]
+def vampireSubmodules : Array String := #["cadical"]
 
 /-- `git`, with its output kept unless it fails. -/
 private def git (cwd : FilePath) (args : Array String) : IO Unit := do
