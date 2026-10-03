@@ -1,5 +1,7 @@
 import Auto.Tactic
 import Mathlib.Algebra.Group.Defs
+import Mathlib.Tactic.NormNum.OfScientific
+import Vampire.Arith
 import VampireReplay.Translate
 
 namespace Vampire.Preprocess
@@ -25,9 +27,9 @@ private def saying (name : Name) (term : Expr) : MetaM (Option (Expr × Expr)) :
   let (mvars, _, stated) ← forallMetaTelescope (← inferType lemma_)
   let some (_, lhs, rhs) := stated.eq? | return none
   unless ← isDefEq lhs term do return none
-  let says ← instantiateMVars (mkAppN lemma_ mvars)
-  if says.hasExprMVar then return none
-  return some (← instantiateMVars rhs, says)
+  let holds ← instantiateMVars (mkAppN lemma_ mvars)
+  if holds.hasExprMVar then return none
+  return some (← instantiateMVars rhs, holds)
 
 /--
 The largest literal exponent that is written out as multiplications.
@@ -66,41 +68,62 @@ private partial def powProduct (e : Expr) : MetaM (Option (Expr × Expr)) := do
   if exponent == 0 then return ← saying ``pow_zero e
   if exponent == 1 then return ← saying ``pow_one e
   -- `x ^ k = x ^ (k - 1) * x`, and then the same again of the smaller power.
-  let some (product, says) ← saying ``pow_succ e | return none
+  let some (product, holds) ← saying ``pow_succ e | return none
   let_expr HMul.hMul _ _ _ _ inner x := product | return none
   let some (expanded, innerSays) ← powProduct inner | return none
   let congruence ← withLocalDeclD `t (← inferType x) fun t => do
     mkCongrArg (← mkLambdaFVars #[t] (← mkAppM ``HMul.hMul #[t, x])) innerSays
-  return some (← mkAppM ``HMul.hMul #[expanded, x], ← mkEqTrans says congruence)
-
-/-- The literal powers of a proposition, written out. -/
-private def expandPowers : Simp.Simproc := fun e => do
-  match ← powProduct e with
-  | some (product, says) => return .visit { expr := product, proof? := some says }
-  | none => return .continue
+  return some (← mkAppM ``HMul.hMul #[expanded, x], ← mkEqTrans holds congruence)
 
 /--
-A hypothesis with the literal powers of what it says written out, or itself
-where it has none.
+A decimal, `3.25` or `8e-2`, as the fraction it stands for, `13 / 4` or `2 / 25`
+-- a whole number as itself -- with a proof that it is the same number.
+
+TPTP writes a real as a decimal, but vampire reads one as the fraction it is,
+and replay writes what it read back that way. So the fraction is what the
+prover is asked about, written as replay writes one (`ratNumeral`), and the
+decimal is related to it here, by evaluating the two (`Arith.numerically`).
+-/
+private def decimalFraction (e : Expr) : MetaM (Option (Expr × Expr)) := do
+  unless e.isAppOfArity ``OfScientific.ofScientific 5 do return none
+  let τ ← inferType e
+  let .sort (.succ u) ← whnf (← inferType τ) | return none
+  let some q := (← Mathlib.Meta.NormNum.derive (u := u) (α := τ) e).toRat | return none
+  let whole (n : Nat) := mkAppOptM ``OfNat.ofNat #[some τ, some (mkRawNatLit n), none]
+  let fraction ← if q.den == 1 then whole q.num.toNat
+    else mkAppM ``HDiv.hDiv #[← whole q.num.toNat, ← whole q.den]
+  return some (fraction, ← Arith.numerically (← mkEq e fraction))
+
+/-- The literal powers and decimals of a proposition, written out. -/
+private def writeOut : Simp.Simproc := fun e => do
+  if let some (product, holds) ← powProduct e then
+    return .visit { expr := product, proof? := some holds }
+  if let some (fraction, holds) ← decimalFraction e then
+    return .done { expr := fraction, proof? := some holds }
+  return .continue
+
+/--
+A hypothesis with the literal powers and decimals of what it says written out,
+or itself where it has none.
 -/
 private def rewritten (stated : Expr) : MetaM (Option (Expr × Expr)) := do
   let context ← Simp.mkContext {} (simpTheorems := #[])
     (congrTheorems := ← getSimpCongrTheorems)
-  let (result, _) ← Simp.main stated context (methods := { post := expandPowers })
+  let (result, _) ← Simp.main stated context (methods := { post := writeOut })
   match result.proof? with
   | none => return none
-  | some says => return some (result.expr, says)
+  | some holds => return some (result.expr, holds)
 
 /--
-A proof of something with the literal powers of what it says written out, or
-itself where it says none.
+A proof of something with the literal powers and decimals of what it says
+written out, or itself where it says none.
 -/
-def withoutPowers (h : Expr) : MetaM Expr := do
-  let some (_, says) ← rewritten (← instantiateMVars (← inferType h)) | return h
-  mkEqMP says h
+def writtenOut (h : Expr) : MetaM Expr := do
+  let some (_, holds) ← rewritten (← instantiateMVars (← inferType h)) | return h
+  mkEqMP holds h
 
 /--
-A lemma with the literal powers of what it says written out.
+A lemma with the literal powers and decimals of what it says written out.
 
 Every lemma monomorphization is given goes through this, before it is given
 them: what monomorphization leaves of `x ^ 3` is an opaque function applied
@@ -108,10 +131,10 @@ to `x` and to the natural number `3`, with the instance that said what the
 power meant replaced by one of its own. There is nothing left to write out
 by then, and a natural number is not something the prover is told about.
 -/
-def lemmaWithoutPowers (fact : Auto.Lemma) : MetaM Auto.Lemma := do
-  let some (stated, says) ← rewritten (← instantiateMVars fact.type) | return fact
+def lemmaWrittenOut (fact : Auto.Lemma) : MetaM Auto.Lemma := do
+  let some (stated, holds) ← rewritten (← instantiateMVars fact.type) | return fact
   return { fact with
-    proof := ← mkEqMP says fact.proof
+    proof := ← mkEqMP holds fact.proof
     type := stated }
 
 /-- A term-level `if-then-else` lifted out into a function of its own. -/
@@ -123,7 +146,7 @@ private structure Lifted where
   /-- `fun xs => ite c a b`. -/
   value : Expr
   /-- `∀ xs, (c → f xs = a) ∧ (¬c → f xs = b)`, over the placeholder. -/
-  says : Expr
+  holds : Expr
   /-- Its proof, `if_pos` and `if_neg` under the binders. -/
   proof : Expr
 
@@ -153,7 +176,7 @@ private def lifting (e : Expr) : StateRefT (Array Lifted) MetaM Expr := do
     let u ← getLevel α
     let eq (rhs : Expr) := mkApp3 (mkConst ``Eq [u]) α applied rhs
     let notC := mkApp (mkConst ``Not) c
-    let says := mkApp2 (mkConst ``And) (← mkArrow c (eq a)) (← mkArrow notC (eq b))
+    let holds := mkApp2 (mkConst ``And) (← mkArrow c (eq a)) (← mkArrow notC (eq b))
     let pos ← withLocalDeclD `h c fun h => do
       mkLambdaFVars #[h] (mkAppN (mkConst ``if_pos [u]) #[c, inst, h, α, a, b])
     let neg ← withLocalDeclD `h notC fun h => do
@@ -162,7 +185,7 @@ private def lifting (e : Expr) : StateRefT (Array Lifted) MetaM Expr := do
       placeholder
       type := ← mkForallFVars xs α
       value := ← mkLambdaFVars xs t
-      says := ← mkForallFVars xs says
+      holds := ← mkForallFVars xs holds
       proof := ← mkLambdaFVars xs
         (mkApp4 (mkConst ``And.intro) (← mkArrow c (eq a)) (← mkArrow notC (eq b)) pos neg) })
     return .done applied)
@@ -205,7 +228,7 @@ def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
       | some t => (hinted h (local_ t), role)
       | none => (h, role))
   for l in lifted do
-    out := out.push (hinted (local_ l.proof) (local_ l.says), .axiom)
+    out := out.push (hinted (local_ l.proof) (local_ l.holds), .axiom)
   return (goal, out)
 
 /--
@@ -436,7 +459,7 @@ def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
     -- what a lemma is stated of is settled by monomorphization, and it can
     -- only settle it where the lemma still says which universes and which
     -- instances it is waiting for.
-    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWithoutPowers).mapM preprocessLemma
+    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWrittenOut).mapM preprocessLemma
     let lemmas ← Meta.withDefault (Auto.rewriteIteCondDecide lemmas)
     let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
     -- The atoms are locals only while `lean-auto` has them in scope, so the

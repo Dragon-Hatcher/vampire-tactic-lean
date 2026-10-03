@@ -118,13 +118,14 @@ def pose (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma) :
         (Preprocess.mono copy hs)
     else Preprocess.intros copy (hs.map (·.proof))
   -- Vampire has no exponentiation, so a literal power is written out as the
-  -- multiplications it stands for -- in Lean, with a proof, so that what is
-  -- asked and what is replayed say the same thing. Under `+mono` the lemmas
+  -- multiplications it stands for, and it reads a decimal as a fraction, so a
+  -- decimal is written as that fraction -- in Lean, with a proof, so that what
+  -- is asked and what is replayed say the same thing. Under `+mono` the lemmas
   -- are also written out before monomorphization, by
-  -- `Preprocess.lemmaWithoutPowers`; this pass runs on both paths all the same.
+  -- `Preprocess.lemmaWrittenOut`; this pass runs on both paths all the same.
   let hypotheses ← preprocessed.goal.withContext <|
     preprocessed.hypotheses.mapM fun (h, role) => do
-      return (← Preprocess.withoutPowers h, role)
+      return (← Preprocess.writtenOut h, role)
   -- Vampire reads no `if-then-else` over terms, so each is lifted out into a
   -- function defined by its two cases.
   let (goal, hypotheses) ← Preprocess.liftIte preprocessed.goal hypotheses

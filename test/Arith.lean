@@ -58,3 +58,20 @@ example (x : ℝ) : x ≤ ⌈x⌉ := by vampire
 #guard_msgs (drop info) in
 example : ∀ (X : ℤ), 5 - 3 = X → X = 2 := by
   vampire (mode := "vampire") (cores := 1)
+
+-- Decimals: vampire reads one as the fraction it is, and replay writes that
+-- back as `13 / 4`, so the decimal is written as that fraction before it is
+-- translated, with a proof that the two are one number.
+#guard_msgs (drop info) in
+example (x : ℝ) (h : x = 3.25) : 4 * x = 13 := by vampire [*]
+
+#guard_msgs (drop info) in
+example (x : ℚ) (h : 8e-2 * x = 1) : x = 12.5 := by vampire [*]
+
+-- A whole number written as a decimal, and a negative one.
+#guard_msgs (drop info) in
+example (x : ℝ) (h1 : -0.75 < x) (h2 : x < 1e0) : x ≠ -1 ∧ x ≠ 2.0 := by vampire [*]
+
+-- Under `+mono` a lemma's decimals are written out before monomorphization.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (h : ∀ y, f y = y * 0.5) : f 3.0 = 1.5 := by vampire +mono [h]
