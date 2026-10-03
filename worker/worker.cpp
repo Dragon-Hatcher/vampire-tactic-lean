@@ -1275,7 +1275,7 @@ struct Encoder {
 
     uint32_t firstUse = static_cast<uint32_t>(uses.size() / 8);
     uint32_t numUses = 0;
-    if (const Stack<InferenceStore::PremiseUse>* recorded =
+    if (const InferenceStore::Uses* recorded =
           InferenceStore::instance()->premiseUses(u)) {
       for (const auto& use : *recorded) {
         uint32_t firstBinding = static_cast<uint32_t>(bindings.size() / 2);
@@ -1314,7 +1314,7 @@ struct Encoder {
     // the quantifier prefix its conclusion is rebuilt with, so that adding
     // them does not change that prefix.
     uint32_t numBoundSorts = 0;
-    if (const Stack<InferenceStore::PremiseUse>* recorded =
+    if (const InferenceStore::Uses* recorded =
           InferenceStore::instance()->premiseUses(u)) {
       DHMap<unsigned, TermList, FnvHash, IdentityHash> boundSorts;
       // The premises, by the number a use names them with: where an image is a
@@ -1429,8 +1429,8 @@ struct Encoder {
     uint32_t numPlacements = 0;
     auto place = [&](uint32_t position, uint32_t useIndex,
                      const std::vector<Literal*>& from, Clause* into,
-                     const Stack<std::pair<unsigned, TermList>>* useBindings,
-                     const Stack<InferenceStore::RewrittenLiteral>* rewritten) {
+                     const InferenceStore::Bindings* useBindings,
+                     const InferenceStore::Packed<InferenceStore::RewrittenLiteral>* rewritten) {
       struct Bound {
         DHMap<unsigned, TermList> map;
         TermList apply(unsigned v) {
@@ -1522,7 +1522,7 @@ struct Encoder {
     // A split clause is a formula, of names, and what is placed for it is its
     // components' literals, into the clause it splits.
     if (u->isClause() || inference.rule() == InferenceRule::AVATAR_SPLIT_CLAUSE) {
-      const Stack<InferenceStore::PremiseUse>* recorded =
+      const InferenceStore::Uses* recorded =
         InferenceStore::instance()->premiseUses(u);
       // The uses recorded against a premise, in order.
       auto usesOf = [&](unsigned number) {

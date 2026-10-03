@@ -50,4 +50,4 @@ Kernel/ALASCA/Preprocessor.hpp:214	*	integer conversion, which the tactic refuse
 Kernel/ALASCA/Preprocessor.hpp:247	*	integer conversion, which the tactic refuses (Config.refused?)
 Kernel/ALASCA/Preprocessor.hpp:338	*	integer conversion's quotient elimination, which the tactic refuses (Config.refused?)
 Kernel/ALASCA/Preprocessor.hpp:354	*	integer conversion's quotient elimination, which the tactic refuses (Config.refused?)
-Saturation/Splitter.cpp:1288	*	a temporary clause the definition's formula is made from; the proof has the formula, never the clause
+Saturation/Splitter.cpp:1286	*	a temporary clause the definition's formula is made from; the proof has the formula, never the clause
