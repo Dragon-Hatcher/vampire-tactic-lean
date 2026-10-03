@@ -51,64 +51,170 @@ def flipEquality (h : Expr) : ReconstructM (Option Expr) := do
   return some (← symmLiteral τ lhs rhs negated h)
 
 /--
-Whether ALASCA's unifier reads a term as arithmetic: a sum, a product, a
-difference, a negation or a numeral, rather than an uninterpreted symbol
-applied, which it unifies argument by argument.
+Whether a term is arithmetic, which two terms equal as numbers may differ in: a
+sum, a product, a difference, a negation, a numeral or its multiple, or a cast.
 -/
 private def arithmetic (e : Expr) : Bool :=
   match e.getAppFn with
   | .const c _ =>
     c == ``HAdd.hAdd || c == ``HSub.hSub || c == ``HMul.hMul || c == ``HDiv.hDiv
       || c == ``Neg.neg || c == ``OfNat.ofNat || c == ``OfScientific.ofScientific
-      || c == ``Nat.cast || c == ``Int.cast || c == `Rat.cast
+      || c == ``linMul || c == ``Nat.cast || c == ``Int.cast || c == `Rat.cast
   | _ => false
+
+/--
+Whether ALASCA's unifier reads a term as arithmetic, which is narrower: a sum,
+a numeral's multiple (`linMul`) or the numeral one (`UnificationWithAbstraction.cpp`,
+`alasca`, its `interpreted`). Every other symbol, a product of two terms or a
+cast among them, it unifies argument by argument, as it does an uninterpreted
+one.
+-/
+private def unifierArithmetic (e : Expr) : Bool :=
+  e.isAppOf ``HAdd.hAdd || e.isAppOf ``linMul || e.nat? == some 1
+
+/--
+`a = b` where the two are one up to the identities of a commutative ring, at
+any depth; `none` where they are not. Nothing is decided about numbers: a
+certificate that relates its terms to a step's by ring arithmetic alone asks
+this, and a term that is not the one it looks for is not an error.
+-/
+def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
+  if a == b then return some (← mkEqRefl a)
+  let normal ← (← read).ringNormalForms #[a, b]
+  unless ← sameUpToInstances normal[0]!.1 normal[1]!.1 do
+    return none
+  let same ← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2)
+  return some (← mkExpectedTypeHint same (← mkEq a b))
+
+/--
+The pair of `equal`, an abstracting unifier's deferred pairs with what says
+each is equal, that `difference` is: `x`, `y`, `x = y` and `difference = x - y`,
+or `none`. ALASCA's unifier defers two terms it cannot unify as `P ≠ N`, where
+`P - N` is their difference split into its positive and negative monomials
+(`UnificationWithAbstraction.cpp`, `alasca`): the pair is the one whose
+difference, either way round as vampire shares the constraint, has the same
+normal form.
+-/
+private def deferredPair (equal : Array (Expr × Expr × Expr)) (difference : Expr) :
+    ReconstructM (Option (Expr × Expr × Expr × Expr)) := do
+  let candidates := equal.flatMap fun (x, y, p) => #[(x, y, p, false), (y, x, p, true)]
+  let differences ← candidates.mapM fun (x, y, _, _) => mkAppM ``HSub.hSub #[x, y]
+  let normals ← (← read).ringNormalForms (#[difference] ++ differences)
+  let some i := (normals.extract 1 normals.size).findIdx? (·.1 == normals[0]!.1)
+    | return none
+  let (x, y, p, flipped) := candidates[i]!
+  let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
+  return some (x, y, ← if flipped then mkEqSymm p else pure p, he)
+
+/--
+The summands of `e` as ALASCA's unifier reads a sum (`iterAtoms`): each term
+it does not read as arithmetic, with the numeral it is multiplied by, times
+`k`, onto `out`; a numeral as its value times `one`.
+-/
+private partial def summandsOf (one e : Expr) (k : Rat) (out : Array (Expr × Rat)) :
+    Array (Expr × Rat) :=
+  if e.isAppOfArity ``HAdd.hAdd 6 then
+    summandsOf one e.appArg! k (summandsOf one e.appFn!.appArg! k out)
+  else if let some c := numeralValue? e then out.push (one, k * c)
+  else if e.isAppOfArity ``linMul 4 then
+    match numeralValue? e.appFn!.appArg! with
+    | some c => summandsOf one e.appArg! (k * c) out
+    | none => out.push (e, k)
+  else out.push (e, k)
+
+/--
+`a = b` for two sums ALASCA's unifier unified with no variable left among
+their summands (`alasca`, its last case). Their difference, summand by summand,
+falls into groups by head symbol, each summing to zero: a group it deferred as
+a pair (`deferredPair`), or else one with a single summand of one sign, which
+it unified with each of the other sign, `unify` saying when two are one. `none`
+where a group is neither. Summands identical by now are one: the unifier read
+them before it bound what made them so.
+-/
+private def bySummands (equal : Array (Expr × Expr × Expr))
+    (unify : Expr → Expr → ReconstructM (Option Expr)) (a b : Expr) :
+    ReconstructM (Option Expr) := do
+  let τ ← inferType a
+  let one ← wholeNumeral τ 1
+  let mut difference : Array (Expr × Rat) := #[]
+  for (t, k) in summandsOf one b (-1) (summandsOf one a 1 #[]) do
+    match difference.findIdx? (·.1 == t) with
+    | some i => difference := difference.modify i fun (t, c) => (t, c + k)
+    | none => difference := difference.push (t, k)
+  difference := difference.filter (·.2 != 0)
+  let linear (summands : Array (Expr × Rat)) : ReconstructM Expr := do
+    let terms ← summands.mapM fun (t, c) => do mkAppM ``HMul.hMul #[← ratNumeral τ c, t]
+    terms.foldlM (fun sum t => mkAppM ``HAdd.hAdd #[sum, t]) (← wholeNumeral τ 0)
+  -- Each `c (u - v)` with `u = v`, which the difference is the sum of.
+  let mut pieces : Array (Rat × Expr × Expr × Expr) := #[]
+  let mut heads : Array Expr := #[]
+  for (t, _) in difference do
+    unless heads.contains t.getAppFn do heads := heads.push t.getAppFn
+  for head in heads do
+    let group := difference.filter (·.1.getAppFn == head)
+    unless group.foldl (· + ·.2) (0 : Rat) == 0 do return none
+    if let some (x, y, h, _) ← deferredPair equal (← linear group) then
+      pieces := pieces.push (1, x, y, h)
+      continue
+    let negative := group.filter (·.2 < 0)
+    let positive := group.filter (·.2 > 0)
+    let some (single, others) :=
+        if negative.size == 1 then some (negative[0]!.1, positive)
+        else if positive.size == 1 then some (positive[0]!.1, negative)
+        else none
+      | return none
+    for (t, c) in others do
+      let some h ← unify single t | return none
+      pieces := pieces.push (c, t, single, ← mkEqSymm h)
+  if pieces.isEmpty then return none
+  -- `x = y`, for `x` the sum of each `c u` and `y` of each `c v`.
+  let add ← mkAppOptM ``HAdd.hAdd #[τ, τ, τ, none]
+  let mul ← mkAppOptM ``HMul.hMul #[τ, τ, τ, none]
+  let mut sum : Option (Expr × Expr × Expr) := none
+  for (c, u, v, h) in pieces do
+    let k ← ratNumeral τ c
+    let hk ← mkCongrArg (mkApp mul k) h
+    sum := some <| ← match sum with
+      | none => pure (mkApp2 mul k u, mkApp2 mul k v, hk)
+      | some (x, y, hs) => do
+        pure (mkApp2 add x (mkApp2 mul k u), mkApp2 add y (mkApp2 mul k v),
+          ← mkCongr (← mkCongrArg add hs) hk)
+  let some (x, y, h) := sum | return none
+  let normals ← (← read).ringNormalForms
+    #[← mkAppM ``HSub.hSub #[a, b], ← mkAppM ``HSub.hSub #[x, y]]
+  unless normals[0]!.1 == normals[1]!.1 do return none
+  let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[1]!.2)
+  return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
 
 /--
 `a = b`, for two terms ALASCA's unifier unified, where `equal` are the pairs it
 deferred with what says each is equal; `none` where they are not.
 
 Its unifier works up to arithmetic: `f(X + 1)` and `f(a)` unify by `X ↦ a - 1`,
-which makes them equal as numbers rather than one term. So the two are compared
-in ring normal form, with the deferred pairs, their atoms numbered alike -- a
-unification it solved is then one term -- and descended as the unifier
-descends them: two applications of one uninterpreted symbol argument by
-argument, and anything it reads as arithmetic as a question about numbers,
-which the deferred pairs are facts for.
+which makes them equal as numbers rather than one term. So the two are
+descended as the unifier descends them, and an arithmetic pair is first asked
+whether it is equal as numbers, in ring normal form. If not, the unifier's own
+reading decides: a sum or a multiple, which it reads as arithmetic, is a pair
+it deferred or one it matched summand by summand (`bySummands`), and anything
+else -- an uninterpreted symbol, but also a product of two terms or a cast --
+it unified argument by argument. Only arithmetic is
+normalised: normalising a whole literal would let the normaliser rewrite the
+proposition itself, `t = t` to `True` where a predicate unfolds to an equation.
 -/
 partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) :
     ReconstructM (Option Expr) := do
-  if a == b then return some (← mkEqRefl a)
-  let normal ← (← read).ringNormalForms
-    (#[a, b] ++ equal.flatMap fun (x, y, _) => #[x, y])
-  -- What says each normal form is what it normalises.
-  let normalEq (i : Nat) (h : Expr) : MetaM Expr := do
-    mkEqTrans (← mkEqSymm normal[2 * i + 2]!.2) (← mkEqTrans h normal[2 * i + 3]!.2)
-  let pairs ← equal.zipIdx.mapM fun ((_, _, h), i) => do
-    return (normal[2 * i + 2]!.1, normal[2 * i + 3]!.1, ← normalEq i h)
   let rec go (a b : Expr) : ReconstructM (Option Expr) := do
     if a == b then return some (← mkEqRefl a)
-    for (x, y, p) in pairs do
+    for (x, y, p) in equal do
       if x == a && y == b then return some p
       if x == b && y == a then return some (← mkEqSymm p)
     if arithmetic a || arithmetic b then
-      -- ALASCA's unifier defers two terms it cannot unify as `P ≠ N`, where
-      -- `P - N` is their difference split into its positive and negative
-      -- monomials (`UnificationWithAbstraction.cpp`, `alasca`): the pair for
-      -- these two is the one with their difference, either way round as
-      -- vampire shares the constraint, and `a = b` follows from it.
-      if pairs.isEmpty then return none
-      -- The pair for these two is the one whose difference, either way round,
-      -- has their difference's normal form.
-      let difference ← mkAppM ``HSub.hSub #[a, b]
-      let candidates := pairs.flatMap fun (x, y, p) => #[(x, y, p, false), (y, x, p, true)]
-      let differences ← candidates.mapM fun (x, y, _, _) => mkAppM ``HSub.hSub #[x, y]
-      let normals ← (← read).ringNormalForms (#[difference] ++ differences)
-      let some i := (normals.extract 1 normals.size).findIdx? (·.1 == normals[0]!.1)
-        | return none
-      let (_, _, p, flipped) := candidates[i]!
-      let he ← mkEqTrans normals[0]!.2 (← mkEqSymm normals[i + 1]!.2)
-      let h ← if flipped then mkEqSymm p else pure p
-      return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
+      if let some h ← ringEqual a b then return some h
+    if unifierArithmetic a || unifierArithmetic b then
+      if equal.isEmpty then return none
+      if let some (_, _, h, he) ← deferredPair equal (← mkAppM ``HSub.hSub #[a, b]) then
+        return some (← mkAppM `Vampire.Lemmas.eq_of_sub_eq #[h, he])
+      return ← bySummands equal go a b
     unless a.isApp && b.isApp do return none
     let as := a.getAppArgs
     let bs := b.getAppArgs
@@ -123,22 +229,7 @@ partial def equalModuloRing (equal : Array (Expr × Expr × Expr)) (a b : Expr) 
         let some p ← go x y | return none
         proof ← mkCongr proof p
     return some proof
-  let some same ← go normal[0]!.1 normal[1]!.1 | return none
-  let same ← mkEqTrans normal[0]!.2 (← mkEqTrans same (← mkEqSymm normal[1]!.2))
-  return some (← mkExpectedTypeHint same (← mkEq a b))
-
-/--
-`a = b` where the two are one up to the identities of a commutative ring, at
-any depth; `none` where they are not. Nothing is decided about numbers: a
-certificate that relates its terms to a step's by ring arithmetic alone asks
-this, and a term that is not the one it looks for is not an error.
--/
-def ringEqual (a b : Expr) : ReconstructM (Option Expr) := do
-  if a == b then return some (← mkEqRefl a)
-  let normal ← (← read).ringNormalForms #[a, b]
-  unless ← sameUpToInstances normal[0]!.1 normal[1]!.1 do
-    return none
-  let same ← mkEqTrans normal[0]!.2 (← mkEqSymm normal[1]!.2)
+  let some same ← go a b | return none
   return some (← mkExpectedTypeHint same (← mkEq a b))
 
 /--

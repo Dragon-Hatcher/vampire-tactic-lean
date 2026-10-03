@@ -421,6 +421,41 @@ example (p : ℝ → Prop) (a : ℝ) (h1 : ∀ x, p (x + 1)) (h2 : ¬ p a) : Fal
   vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
     ("function_definition_elimination", "none")]) [*]
 
+-- Constrained resolution through a product: ALASCA's unifier reads a product
+-- of two terms as an uninterpreted symbol and descends into it, deferring the
+-- sums inside, `f x + f b ≠ f d + f e`.
+#guard_msgs (drop info) in
+example (f : ℝ → ℝ) (p : ℝ → Prop) (b c d e : ℝ) (h1 : ∀ x, p ((f x + f b) * c))
+    (h2 : ¬ p ((f d + f e) * c)) (h3 : ∀ x, x < d ∨ f x + f b = f d + f e) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
+-- Constrained resolution inside a sum: ALASCA's unifier matches `f (…)` with
+-- `f (…)` among the summands of `c + f (…)` and descends into them, deferring
+-- the sums inside, `g x + g b ≠ g d + g e`.
+#guard_msgs (drop info) in
+example (f g : ℝ → ℝ) (p : ℝ → Prop) (b c d e : ℝ) (h1 : ∀ x, p (f (g x + g b) + c))
+    (h2 : ¬ p (f (g d + g e) + c)) (h3 : ∀ x, x < d ∨ g x + g b = g d + g e) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
+-- Constrained resolution deferring two pairs from one sum, one for each symbol
+-- its summands are grouped by.
+#guard_msgs (drop info) in
+example (f g : ℝ → ℝ) (p q : ℝ → Prop) (b d e : ℝ) (h1 : ∀ x, p (f x + f b + (g x + g b)))
+    (h2 : ¬ p (f d + f e + (g d + g e))) (h3 : ∀ x, f x + f b = f d + f e ∨ q x)
+    (h4 : ∀ x, g x + g b = g d + g e ∨ q x) (h5 : ∀ x, ¬ q x) : False := by
+  vampire (mode := "vampire") (cores := 1) (options := #[("abstracting_linear_arithmetic_superposition_calculus", "on"),
+    ("function_definition_elimination", "none")]) [*]
+
+-- Constrained resolution of `X0 * -5 = 10`: the deferred pair is between the
+-- equation's sides, and only those are arithmetic -- normalising the whole
+-- literal would make an equation it unfolds to `True`. (TPTP ARI115_1, under
+-- the strategy that found it.)
+#guard_msgs (drop info) in
+example : ∃ x : ℤ, x * -5 = 10 := by
+  vampire (strategy := "ott+21_1024_to=lakbo:sil=128000:alasca=on:wl=60:uwa=alasca_main:nwc=0.5:random_seed=93277:cond=on:i=16:fgj=on:ep=RS:asg=force:nm=10:hb=500:rtra=on:qa=off:rawr=on_1")
+
 -- ALASCA's Fourier–Motzkin by a unifier that solved `X + 1 = a`: the atoms
 -- are equal as numbers, not one term.
 #guard_msgs (drop info) in

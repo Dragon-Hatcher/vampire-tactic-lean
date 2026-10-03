@@ -53,6 +53,27 @@ partial def wholeNumeral (τ : Expr) (n : Int) : ReconstructM Expr := do
   modify fun s => { s with numerals := s.numerals.insert (τ, n) e }
   return e
 
+/-- The number `e` is, for a numeral as replay writes one (`wholeNumeral`, `n / d`). -/
+partial def numeralValue? (e : Expr) : Option Rat :=
+  if e.isAppOfArity ``OfNat.ofNat 3 then
+    match e.appFn!.appArg! with
+    | .lit (.natVal n) => some (n : Rat)
+    | _ => none
+  else if e.isAppOfArity ``Neg.neg 3 then (numeralValue? e.appArg!).map (- ·)
+  else if e.isAppOfArity ``HDiv.hDiv 6 then do
+    let a ← numeralValue? e.appFn!.appArg!
+    let b ← numeralValue? e.appArg!
+    if b == 0 then none else some (a / b)
+  else if e.isAppOfArity ``HMul.hMul 6 then do
+    return (← numeralValue? e.appFn!.appArg!) * (← numeralValue? e.appArg!)
+  else if e.isAppOfArity ``Int.cast 3 then numeralValue? e.appArg!
+  else none
+
+/-- The numeral for `q` at `τ`, written as replay writes one. -/
+def ratNumeral (τ : Expr) (q : Rat) : ReconstructM Expr := do
+  if q.den == 1 then return ← wholeNumeral τ q.num
+  mkAppM ``HDiv.hDiv #[← wholeNumeral τ q.num, ← wholeNumeral τ (Int.ofNat q.den)]
+
 /-- The term at one of TPTP's arithmetic types, cast into it if need be. -/
 def castTo (τ : Expr) (args : Array Expr) : ReconstructM (Option Expr) := do
   let #[a] := args | return none

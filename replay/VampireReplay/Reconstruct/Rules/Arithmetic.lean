@@ -291,27 +291,6 @@ decision procedure runs. Replay is precompiled and does not import the lemmas;
 it names them.
 -/
 
-/-- The number `e` is, for a numeral as replay writes one (`wholeNumeral`, `n / d`). -/
-private partial def numeralValue? (e : Expr) : Option Rat :=
-  if e.isAppOfArity ``OfNat.ofNat 3 then
-    match e.appFn!.appArg! with
-    | .lit (.natVal n) => some (n : Rat)
-    | _ => none
-  else if e.isAppOfArity ``Neg.neg 3 then (numeralValue? e.appArg!).map (- ·)
-  else if e.isAppOfArity ``HDiv.hDiv 6 then do
-    let a ← numeralValue? e.appFn!.appArg!
-    let b ← numeralValue? e.appArg!
-    if b == 0 then none else some (a / b)
-  else if e.isAppOfArity ``HMul.hMul 6 then do
-    return (← numeralValue? e.appFn!.appArg!) * (← numeralValue? e.appArg!)
-  else if e.isAppOfArity ``Int.cast 3 then numeralValue? e.appArg!
-  else none
-
-/-- The numeral for `q` at `τ`, written as replay writes one. -/
-private def ratNumeral (τ : Expr) (q : Rat) : ReconstructM Expr := do
-  if q.den == 1 then return ← wholeNumeral τ q.num
-  mkAppM ``HDiv.hDiv #[← wholeNumeral τ q.num, ← wholeNumeral τ (Int.ofNat q.den)]
-
 /-- `0 < c`, for a numeral `c`. -/
 private def positive (c : Expr) : ReconstructM Expr := do
   (← read).numerically (← mkAppM ``LT.lt #[← wholeNumeral (← inferType c) 0, c])
