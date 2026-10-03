@@ -10,7 +10,10 @@ premise to the conclusion may undo -- nothing else: each is applied exactly
 where the two differ in that way, and anything else is an error.
 -/
 structure Restating where
-  /-- Vampire's parser folds `~` into an atom's polarity: `¬¬a`, of an atom, is `a`. -/
+  /--
+  Vampire's parser folds `~` into an atom's polarity: negations stacked over an
+  atom come out as one literal, `¬¬a` as `a`.
+  -/
   atomDoubleNegations : Bool := false
   /-- Flattening cancels double negations anywhere. -/
   doubleNegations : Bool := false
@@ -40,6 +43,16 @@ private def unfoldNe (e : Expr) : Expr :=
     | .const _ levels => mkNot (mkAppN (.const ``Eq levels) e.getAppArgs)
     | _ => e
   else e
+
+/--
+Whether `e` is negations stacked over an atom, `x ≠ y` counting as one over
+`x = y`: what vampire's parser folds into a single literal, each `~` over a
+literal flipping its polarity.
+-/
+private partial def negatedAtom (e : Expr) : Bool :=
+  match (unfoldNe e).not? with
+  | some inner => negatedAtom inner
+  | none => isAtom e
 
 /-- `p₀ ∘ (p₁ ∘ … pₙ)`, the parts of a junction of `fn` nested to the right. -/
 private def rightNested (fn : Name) (parts : Array Expr) : Expr := Id.run do
@@ -89,10 +102,11 @@ partial def relate (r : Restating) (a b : Expr) : ReconstructM Expr := do
   let b := unfoldNe (← instantiateMVars b)
   if a == b then return mkApp (mkConst ``Iff.refl) a
   if ← sameFormula a b then return ← mkExpectedTypeHint (mkApp (mkConst ``Iff.refl) a) (← mkAppM ``Iff #[a, b])
-  -- A double negation the step cancelled.
+  -- A double negation the step cancelled: `¬(x ≠ y)` is one too. The parser
+  -- cancels every one over an atom, however many are stacked there.
   if let some inner := a.not? then
-    if let some x := inner.not? then
-      if r.doubleNegations || (r.atomDoubleNegations && isAtom x) then
+    if let some x := (unfoldNe inner).not? then
+      if r.doubleNegations || (r.atomDoubleNegations && negatedAtom x) then
         let rest ← relate r x b
         return ← mkAppM ``Iff.trans #[mkApp (mkConst ``Classical.not_not) x, rest]
   -- An equation between propositions, which the translation wrote as `<=>`.

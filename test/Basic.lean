@@ -134,3 +134,22 @@ example (p q r : ℤ → Prop) (a b : ℤ)
     (h1 : ∀ x, (p (if a < b then x else b) ∧ q x) ∨ (r x ∧ p x) ∨ (q x ∧ r (if a < b then b else x)))
     (h2 : ∀ x, ¬ p x) (h3 : ∀ x, ¬ r x) : False := by
   vampire (mode := "vampire") (cores := 1) (options := #[("naming", "2")]) [*]
+
+-- Negations stacked over an atom: vampire's parser folds each `~` over a
+-- literal into its polarity, so any number of them come out as one literal.
+-- `x ≠ y` counts as one over `x = y`.
+#guard_msgs (drop info) in
+example {ι : Type} (a b : ι) (h : a = b) : ¬(a ≠ b) := by
+  vampire (mode := "vampire") (cores := 1) [h]
+#guard_msgs (drop info) in
+example (p : Prop) (h : ¬¬¬p) (hp : p) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, hp]
+#guard_msgs (drop info) in
+example (p : Prop) (h : ¬¬¬¬p) (hp : ¬p) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, hp]
+#guard_msgs (drop info) in
+example {ι : Type} (a b : ι) (h : ¬¬¬(a ≠ b)) (h2 : a ≠ b) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, h2]
+#guard_msgs (drop info) in
+example (p : Prop) (h : ¬¬¬¬¬p) (hp : p) : False := by
+  vampire (mode := "vampire") (cores := 1) [h, hp]
