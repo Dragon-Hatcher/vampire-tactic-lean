@@ -16,7 +16,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "fcdac5a4215ee288e238d8874fcb2315916fb9fd"
+def vampireRev : String := "c074921dcc272c983338d3a59663cee3a5afed67"
 
 /--
 The submodules vampire's build needs.
