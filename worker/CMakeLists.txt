@@ -27,6 +27,15 @@ set_target_properties(vampire-worker PROPERTIES
 target_include_directories(vampire-worker PRIVATE ${VAMPIRE_INCLUDES})
 target_compile_definitions(vampire-worker PRIVATE ${VAMPIRE_DEFINITIONS})
 target_compile_options(vampire-worker PRIVATE ${VAMPIRE_OPTIONS})
+# Nothing links against the worker or loads it, so it exports nothing. A C++
+# executable otherwise exports its thousands of weak definitions, and dyld
+# looks each one up in the export trie on every launch: that was more than
+# half of the worker's start-up, about 4ms of 7ms on an M-series Mac. On Linux
+# an executable exports nothing unless asked to.
+if(APPLE)
+  target_link_options(vampire-worker PRIVATE "LINKER:-no_exported_symbols")
+endif()
+
 # Where vampire's sources are, which the site an inference records starts with.
 target_compile_definitions(vampire-worker PRIVATE
   VAMPIRE_SOURCE_ROOT="${VAMPIRE_SOURCE_DIR}")
