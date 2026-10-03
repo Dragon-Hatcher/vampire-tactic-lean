@@ -16,7 +16,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "aeb2890f85192105b2f7a665a9d06d42752955cd"
+def vampireRev : String := "223c2eea59e99a5619826548e0f6d99d35bb2ad3"
 
 /--
 The submodules vampire's build needs.
@@ -74,6 +74,14 @@ def vampireSourceDir (pkg : Package) : IO FilePath := do
 
 def vampireBuildType : String :=
   if get_config? vampireDebug |>.isSome then "Debug" else "Release"
+
+/--
+Whether vampire keeps where it made each inference, which the worker writes
+into the proof and the coverage log reads (`bench/coverage-run.sh` builds with
+`-K vampireSites`). It costs every unit eight bytes, so it is off otherwise;
+a debug build keeps them regardless.
+-/
+def vampireInferenceSites : Bool := get_config? vampireSites |>.isSome
 
 /--
 Available memory in GiB, as far as the platform will say.
@@ -143,6 +151,8 @@ target «vampire-worker» pkg : FilePath := Job.async do
   addTrace (.ofHash (Hash.ofString (← vampireState vampireDir)))
   for source in ["worker.cpp", "CMakeLists.txt"] do
     addTrace (.ofHash (← computeFileHash (pkg.dir / "worker" / source)))
+  -- And how it is configured, so that switching sites on or off rebuilds it.
+  addTrace (.ofHash (Hash.ofString s!"sites={vampireInferenceSites}"))
   let cmakeDir := pkg.buildDir / "cmake"
   let exe := cmakeDir / "vampire-worker"
   proc (quiet := true) {
@@ -151,7 +161,8 @@ target «vampire-worker» pkg : FilePath := Job.async do
       "-S", (pkg.dir / "worker").toString,
       "-B", cmakeDir.toString,
       s!"-DVAMPIRE_SOURCE_DIR={vampireDir}",
-      s!"-DCMAKE_BUILD_TYPE={vampireBuildType}"
+      s!"-DCMAKE_BUILD_TYPE={vampireBuildType}",
+      s!"-DINFERENCE_SITES={if vampireInferenceSites then "ON" else "OFF"}"
     ]
   }
   proc {
