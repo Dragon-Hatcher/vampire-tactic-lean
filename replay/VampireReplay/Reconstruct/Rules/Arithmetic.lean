@@ -169,10 +169,12 @@ def literalwise (step : Step) : ReconstructM Expr := do
     unless step.rule == .theoryNormalization do
       throwError "{step.rule.name} rewrote a formula, which only theory normalization does"
     -- The formula's atoms each rewritten where they stand, and what that
-    -- makes is the formula vampire stated, up to how it writes one.
+    -- makes is the formula vampire stated, but that an equation it rebuilt is
+    -- shared with its sides in an order of vampire's own.
     let (rewritten, h) ← rewriteAtoms
       (fun a => do (← read).literalRewritten .theoryNormalization a) stated
     return ← restate (← mkAppM ``Iff.mp #[h, proof]) rewritten (← step.conclusion)
+      { equations := true }
   -- ALASCA's strong normalization of comparisons shares the rule and can make
   -- two literals of one, which it records with the literal they were made of
   -- (`strongNormalization`).

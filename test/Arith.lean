@@ -52,3 +52,9 @@ example (x : ℝ) : (⌊x⌋ : ℝ) ≤ x := by vampire
 example (x : ℝ) : x < ⌊x⌋ + 1 := by vampire
 #guard_msgs (drop info) in
 example (x : ℝ) : x ≤ ⌈x⌉ := by vampire
+
+-- TPTP ARI090_1: theory normalization of a formula rebuilds `5 - 3 = x` as
+-- `x = 5 + -3`, the equation shared with its sides the other way round.
+#guard_msgs (drop info) in
+example : ∀ (X : ℤ), 5 - 3 = X → X = 2 := by
+  vampire (mode := "vampire") (cores := 1)
