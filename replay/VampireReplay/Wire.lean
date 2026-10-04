@@ -92,7 +92,7 @@ inductive Fm where
   | binary (c : Connective) (lhs rhs : Fm)
   | not (f : Fm)
   | quant (all : Bool) (vars : Array (UInt32 × String)) (body : Fm)
-  /-- `$true`, `$false`, and the two connectives the format names `$$`. -/
+  /-- `$true` or `$false`. -/
   | const (c : Connective)
   /-- `$$name('n')`: a name splitting gave a formula. -/
   | name (n : String)
@@ -299,8 +299,6 @@ private partial def unitary : M Fm := do
   match t with
   | .app "$true" #[] => return .const .true
   | .app "$false" #[] => return .const .false
-  | .app "$$bool_term" #[] => return .const .boolTerm
-  | .app "$$noconn" #[] => return .const .noconn
   | .app "$$name" #[.app n #[]] => return .name n
   | _ =>
     if ← lookingAt "!=" then
@@ -1086,49 +1084,59 @@ private def validate (units : Array UnitRec) (sats : Array SatRec) (gens : Array
       index "a replaced position" position.toNat gens[parent.toNat]!.literals.size
     for (k, _) in g.placements do index "a generalised placement" k g.literals.size
 
+/--
+The header: the comment lines before the first annotated formula that read
+`key: value`, by key. The SZS lines have no such colon and are not among them.
+-/
+private def header (text : String) : Std.HashMap String String := Id.run do
+  let mut out := {}
+  for line in text.splitOn "\n" do
+    unless line.startsWith "%" do
+      if line.trimAscii.isEmpty then continue else break
+    match (String.ofList (line.toList.drop 1)).trimAscii.toString.splitOn ": " with
+    | key :: value@(_ :: _) => out := out.insert key (": ".intercalate value)
+    | _ => pure ()
+  return out
+
 /-- Builds the tables from the annotated formulas of a proof. -/
 private def build (text : String) (all : Array Annotated) : Except Error Proof := do
-  let some header := all.find? (·.name == "vampire_info")
-    | Error.fail "malformed proof from the worker: it has no `vampire_info`"
-  let rs := records header.info
-  let field (key : String) : Except Error (Array GT) := match rs[key]? with
-    | some args => pure args
-    | none => Error.fail s!"malformed proof from the worker: `vampire_info` has no {key}"
-  let nat : GT → Except Error Nat
-    | .num text => match text.toNat? with
-      | some n => pure n
-      | none => Error.fail s!"malformed proof from the worker: {text} in `vampire_info`"
-    | _ => Error.fail "malformed proof from the worker: `vampire_info` is malformed"
-  let some v := (← field "format")[0]? | Error.fail "malformed `vampire_info`"
-  let v ← nat v
+  let rs := header text
+  let field (key : String) : Except Error String := match rs[key]? with
+    | some value => pure value
+    | none => Error.fail s!"malformed proof from the worker: its header has no `{key}`"
+  let nats (key : String) : Except Error (List Nat) := do
+    match (← field key).splitOn " " |>.mapM (·.toNat?) with
+    | some ns => pure ns
+    | none => Error.fail s!"malformed proof from the worker: its header's `{key}` is malformed"
+  let [v] ← nats "format" | Error.fail "malformed proof from the worker: its header's `format` is malformed"
   if v != formatVersion then
     Error.fail (s!"the worker writes proof format version {v}, but replay reads \
       version {formatVersion}; run `lake build` to rebuild the worker")
   -- Steps name their rules, so a rule added, removed or moved would be read
   -- as itself; the count and fingerprint still say when the generated copy is
   -- stale, before a step names a rule it lacks.
-  let #[numRules, fingerprint] ← field "rules" | Error.fail "malformed `rules`"
-  let numRules ← nat numRules
-  let fingerprint := (← nat fingerprint).toUInt32
+  let [numRules, fingerprint] ← nats "rules"
+    | Error.fail "malformed proof from the worker: its header's `rules` is malformed"
+  let fingerprint := fingerprint.toUInt32
   if numRules != InferenceRule.count || fingerprint != InferenceRule.fingerprint then
     Error.fail (s!"the vampire the worker was built from declares \
       {numRules} inference rules (fingerprint {fingerprint}), but \
       replay/VampireReplay/InferenceRule.lean was generated for \
       {InferenceRule.count} (fingerprint {InferenceRule.fingerprint}); rerun \
       scripts/gen-inference-rules.py")
-  let reason ← match (← field "termination") with
-    | #[.word "refutation"] => pure .refutation
-    | #[.word "satisfiable"] => pure .satisfiable
-    | #[.word "refutation_not_found"] => pure .refutationNotFound
-    | #[.word "inappropriate"] => pure .inappropriate
-    | #[.word "unknown"] => pure .unknown
-    | #[.word "time_limit"] => pure .timeLimit
-    | #[.word "instruction_limit"] => pure .instructionLimit
-    | #[.word "memory_limit"] => pure .memoryLimit
-    | #[.word "activation_limit"] => pure .activationLimit
-    | _ => Error.fail "malformed proof from the worker: unknown termination reason"
-  let #[boundary] ← field "polarity_flip_boundary" | Error.fail "malformed `polarity_flip_boundary`"
-  let boundary ← nat boundary
+  let reason ← match ← field "termination" with
+    | "refutation" => pure .refutation
+    | "satisfiable" => pure .satisfiable
+    | "refutation_not_found" => pure .refutationNotFound
+    | "inappropriate" => pure .inappropriate
+    | "unknown" => pure .unknown
+    | "time_limit" => pure .timeLimit
+    | "instruction_limit" => pure .instructionLimit
+    | "memory_limit" => pure .memoryLimit
+    | "activation_limit" => pure .activationLimit
+    | r => Error.fail s!"malformed proof from the worker: unknown termination reason {r}"
+  let [boundary] ← nats "polarity flip boundary"
+    | Error.fail "malformed proof from the worker: its header's `polarity flip boundary` is malformed"
   let units := all.filter (numbered ·.name "u")
   let sats := all.filter (numbered ·.name "sat_")
   let gens := all.filter (numbered ·.name "gen_")
@@ -1141,23 +1149,22 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
     let satRecs ← sats.mapM buildSat
     let unitRecs ← units.mapM buildUnit
     let refutation ← match rs["refutation"]? with
-      | some #[g] => some <$> resolve (← get).units "the refutation" (← gtWord g)
-      | _ => pure none
+      | some name => some <$> resolve (← get).units "the refutation" name
+      | none => pure none
     return (unitRecs, satRecs, genRecs, refutation)
   let ((unitRecs, satRecs, genRecs, refutation), b) ←
     go.run { units := names units, sats := names sats, gens := names gens }
   validate unitRecs satRecs genRecs b.formulas
-  let strategy ← match rs["strategy"]? with
-    | some #[.word s] => pure (some s)
-    | _ => pure none
-  let times ← match rs["times"]? with
-    | some #[a, b, c] => pure (some (← nat a, ← nat b, ← nat c))
-    | _ => pure none
+  let times ← if rs.contains "times" then
+      match ← nats "times" with
+      | [a, b, c] => pure (some (a, b, c))
+      | _ => Error.fail "malformed proof from the worker: its header's `times` is malformed"
+    else pure none
   return {
     functionTable := b.functions, predicateTable := b.predicates
     termTable := b.terms, literalTable := b.literals, formulaTable := b.formulas
     unitTable := unitRecs, satTable := satRecs, genTable := genRecs
-    refutationIdx := refutation, strategyText := strategy, times, text
+    refutationIdx := refutation, strategyText := rs["strategy"]?, times, text
     terminationReason := reason, polarityFlipBoundary := boundary.toUInt32 }
 
 end Tstp

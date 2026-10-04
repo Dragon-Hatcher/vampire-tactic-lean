@@ -18,16 +18,21 @@
  * structure.
  *
  *   % SZS status <status> for problem
+ *   % format: N
+ *   % termination: R
+ *   % rules: Count Fingerprint
+ *   % polarity flip boundary: B
+ *   % refutation: uK
+ *   % strategy: ...
+ *   % times: Strategy Setup FoundAt
  *   % SZS output start Refutation for problem      (with a refutation only)
- *
- *   tff(vampire_info, unknown, $true, unknown, [format(N), termination(R),
- *       rules(Count,Fingerprint), polarity_flip_boundary(B), refutation(uK),
- *       strategy('...'), times(Strategy,Setup,FoundAt)])
+ *     The header, as comments like the SZS lines, each `key: value`, before
+ *     the first annotated formula. `format` is the version of this format.
  *     `termination` is vampire's termination reason, `refutation_not_found`
  *     and so on; SZS cannot tell all of them apart. `rules` are how many
  *     inference rules vampire declares and a hash of their names in order
  *     (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt), which the Lean side
- *     checks its generated copy against. `polarity_flip_boundary` is the
+ *     checks its generated copy against. `polarity flip boundary` is the
  *     number of the first step polarity flipping made, or zero. The last three
  *     are there with a refutation only: the step that is the refutation, the
  *     strategy that found it, from which alone the same run can be had again,
@@ -1647,21 +1652,20 @@ public:
       throw UserErrorException("unknown termination reason " + std::to_string(reason));
     std::string out;
     out += "% SZS status " + std::string(szs[reason]) + " for problem\n";
+    out += "% format: " + std::to_string(FORMAT) + "\n";
+    out += "% termination: " + std::string(reasons[reason]) + "\n";
+    out += "% rules: " + std::to_string(RULE_COUNT) + " " +
+           std::to_string(VAMPIRE_RULE_FINGERPRINT) + "\n";
+    out += "% polarity flip boundary: " +
+           std::to_string(InferenceStore::instance()->polarityFlipBoundary()) + "\n";
+    if (refutation != NONE)
+      out += "% refutation: " + unitName(refutation) + "\n";
+    if (_enc.strategy != NONE)
+      out += "% strategy: " + string(_enc.strategy) + "\n% times: " +
+             std::to_string(_enc.strategyMs) + " " + std::to_string(_enc.setupMs) + " " +
+             std::to_string(_enc.foundAtMs) + "\n";
     if (refutation != NONE)
       out += "% SZS output start Refutation for problem\n";
-
-    out += "tff(vampire_info, unknown, $true, unknown, [format(" +
-      std::to_string(FORMAT) + "), termination(" + reasons[reason] + "), rules(" +
-      std::to_string(RULE_COUNT) + "," + std::to_string(VAMPIRE_RULE_FINGERPRINT) +
-      "), polarity_flip_boundary(" +
-      std::to_string(InferenceStore::instance()->polarityFlipBoundary()) + ")";
-    if (refutation != NONE)
-      out += ", refutation(" + unitName(refutation) + ")";
-    if (_enc.strategy != NONE)
-      out += ", strategy(" + quoted(string(_enc.strategy)) + "), times(" +
-        std::to_string(_enc.strategyMs) + "," + std::to_string(_enc.setupMs) + "," +
-        std::to_string(_enc.foundAtMs) + ")";
-    out += "]).\n";
 
     declarations(out);
     for (uint32_t i = 0; i < _enc.units.size() / UNIT_WIDTH; i++)
@@ -1864,11 +1868,13 @@ private:
         out = "$$name(" + atom(string(F[7 * f + 6])) + ")";
         break;
       case BOOL_TERM:
-        out = "$$bool_term";
-        break;
+        // FOOL's boolean terms, which the tactic never sends and replay could
+        // not state.
+        throw UserErrorException("cannot write a formula that is a boolean term: "
+                                 "FOOL is not supported");
       default:
-        out = "$$noconn";
-        break;
+        throw UserErrorException("cannot write a formula of connective " +
+                                 std::to_string(F[7 * f]));
     }
     _formulaText[f] = std::move(out);
     _formulaDone[f] = true;
