@@ -12,7 +12,7 @@ one is just `lean` on it under the package's `LEAN_PATH`. They are independent, 
 the corpus is elaborated across all cores; `-j` sets the width.
 
 Output is one line per problem -- `ok`, or the first error `lean` reported -- and a
-summary. The tactic itself starts the worker as a separate process, so the default
+summary. The tactic itself starts Vampire as a separate process, so the default
 width leaves a core spare.
 """
 import argparse, concurrent.futures as cf, os, subprocess, sys, time

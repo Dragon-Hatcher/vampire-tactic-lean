@@ -40,7 +40,7 @@ def lean_path() -> str:
 def dynlibs() -> list[str]:
     """The `--load-dynlib` flags Lake passes when it elaborates a file importing `Vampire`.
 
-    The worker is started by a native function, which `lean` can only call out of a
+    Vampire is started by a native function, which `lean` can only call out of a
     library it has been given, and the replay core is precompiled, so without its
     library the tactic runs in the interpreter. Lake names the libraries in each
     module's setup, so they are read from there rather than guessed at.

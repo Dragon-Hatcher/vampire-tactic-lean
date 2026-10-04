@@ -18,7 +18,7 @@ that is what lets the two sit in different packages.
 package vampireReplay
 
 /--
-Compiles the shim that starts the worker. `spawn.c` says why it exists, and
+Compiles the shim that starts vampire. `spawn.c` says why it exists, and
 `VampireReplay/Spawn.lean` why it is in this package.
 -/
 target spawnShim pkg : FilePath := do

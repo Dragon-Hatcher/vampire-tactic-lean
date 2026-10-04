@@ -54,8 +54,8 @@ CMAKE_BUILD_PARALLEL_LEVEL=8 lake build
 ```
 
 For development, `VAMPIRE_DIR` points at a Vampire checkout of your own instead
-of the pinned one, and `VAMPIRE_WORKER` points straight at an already-built
-`vampire-worker` binary.
+of the pinned one, and `VAMPIRE_BINARY` points straight at an already-built
+`vampire` binary.
 
 ## Usage
 
@@ -156,9 +156,7 @@ vampire took 2126ms, not counting what Lean then does with the proof term:
   preprocessing 227ms
   translation   0ms
   search        1807ms
-    worker overhead         18ms
-    parsing the problem     0ms
-    failed strategies       1598ms
+    everything else         1616ms
     successful strategy     191ms
   replay        92ms
 the proof vampire found had 292 steps
@@ -166,9 +164,11 @@ the proof vampire found had 292 steps
 
 Most of the search is usually spent on the failed strategies. Naming the
 successful one skips them, and the tactic reports the saving when it suggests
-the strategy. Here, naming it took the search from 1807ms to 248ms. "Worker
-overhead" is everything outside the schedule: starting the worker, writing and
-reading files, and exiting.
+the strategy. Here, naming it took the search from 1807ms to 248ms. "Everything
+else" is what the search spent outside the successful strategy: starting
+Vampire, parsing the problem and the failed strategies, which Vampire does not
+divide up; the first two are a few milliseconds, and naming the strategy does
+not save them.
 
 Sharing the term's subterms and checking it in the kernel happen after the
 tactic returns, so they are not in that total; `set_option profiler true`
@@ -188,16 +188,16 @@ from a slow replay.
 | `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, only that one was tried; remove it to run the whole schedule |
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
 | `vampire's proof uses …, which this tactic does not replay yet` | Vampire used an inference rule that has no reconstruction yet. `+admit` closes the goal anyway, with a `sorry` for those steps and a warning saying so |
-| `could not find vampire-worker` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_WORKER` |
+| `could not find vampire` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_BINARY` |
 | `Could not find native implementation of … spawn` | `lean` was started without the libraries Lake loads. Build and run through Lake (an editor, `lake build` and `lake test` all do), or pass the `--load-dynlib` flags `scripts/trace-problem.sh` reads out of Lake's own setup |
-| `vampire failed: …` | the worker could not be run at all |
+| `vampire failed: …` | Vampire could not be run, or printed nothing that could be read |
 
 ## Licence
 
-The Lean code here, and `worker/worker.cpp`, are MIT; see `LICENSE`. Vampire
-itself is BSD 3-Clause and is fetched at build time rather than vendored, so
-what this repository distributes is only the MIT part. `NOTICE` records what the
-built worker is made of and what each piece is under.
+The Lean code here is MIT; see `LICENSE`. Vampire itself is BSD 3-Clause and is
+fetched at build time rather than vendored, so what this repository distributes
+is only the MIT part. `NOTICE` records what the built Vampire is made of and
+what each piece is under.
 
 ## Repository
 
@@ -205,16 +205,14 @@ built worker is made of and what each piece is under.
   literal rewrites, ring normalization, the lemmas arithmetic steps are
   certified by, and `norm_num`'s numeral evaluation), and the syntax.
 - `replay/` — a package of its own holding the replay, and `spawn.c`, which
-  starts the worker without copying the address space: `Translate.lean` goes to
-  TPTP, `Wire.lean` reads the TSTP the prover wrote, and `Reconstruct/` replays
+  starts Vampire without copying the address space: `Translate.lean` goes to
+  TPTP, `Wire.lean` reads what Vampire printed -- the TSTP proof
+  `--proof tptp --proof_extra full` writes, which Vampire's
+  `Kernel/TPTPProofExtra.hpp` describes -- and `Reconstruct/` replays
   it, one module per family of inference rules. Separate so that it can be
   precompiled and so run as native code rather than in the interpreter, which
   is worth about three times the replay; that is possible only because none of
   it imports Mathlib, what needs Mathlib being handed in rather than called.
-- `worker/` — the C++ program that runs one proof attempt and writes out the
-  proof vampire gives under `--proof tptp --proof_extra full`: TSTP, with what
-  the fork records of each step in it (the fork's `Kernel/TPTPProofExtra.hpp`
-  describes the format).
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
   from SMT-LIB, each with the original beside its Lean statement. Development
   only; not needed to use the tactic.
@@ -222,6 +220,6 @@ built worker is made of and what each piece is under.
   `lake run problems` runs it, over the whole corpus or what its arguments
   name. `scripts/trace-problem.sh` does one problem with tracing on.
 - `test/` — `lake test`: the tactic's own examples, which must close their goals
-  without a warning, the worker on ten TPTP problems, and the `smoke` split of
+  without a warning, Vampire on ten TPTP problems, and the `smoke` split of
   the corpus, the quickest problem of each family. CI runs it on every push and
   the whole corpus weekly.

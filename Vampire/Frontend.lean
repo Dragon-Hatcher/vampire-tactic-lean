@@ -4,7 +4,7 @@ import Vampire.Arith
 import Vampire.LiteralRewrite
 import Vampire.Preprocess
 import VampireReplay.Reconstruct
-import Vampire.Worker
+import Vampire.Run
 
 namespace Vampire
 
@@ -253,16 +253,17 @@ when the goal changes.
 private def suggestStrategyThreshold : Nat := 100
 
 /--
-What the schedule spent on the strategies the winning one won against:
-everything between the schedule starting and the proof being found, less the
-winner's own run. Starting the worker and parsing the problem are outside
-that, and a run naming the strategy pays them too, so this is what naming it
-saves. `none` when there is no proof to have found.
+What the search spent other than on the winning strategy's own run: starting
+vampire, parsing the problem, and the strategies the winning one won against.
+Naming the strategy saves the last of these, and vampire does not say how the
+rest divides, so this is at most a few milliseconds more than what naming it
+saves -- what starting vampire and parsing the problem take. `none` when there
+is no proof to have found, or vampire did not say what the winner ran for.
 -/
-private def failedStrategiesTime (proof : Proof) : Option Nat := do
-  let foundAt ← proof.foundAtTime?
-  let spent := (← proof.setupTime?) + (← proof.strategyTime?)
-  return foundAt - spent
+private def otherThanWinnerTime (query : Query) : Option Nat := do
+  let winner ← query.proof.strategyTime?
+  guard (winner ≤ query.search)
+  return query.search - winner
 
 /--
 `proof`, which proves `goal`, put in a lemma of its own and applied to the
@@ -364,7 +365,9 @@ private def recordCoverage (proof : Proof) (outcome : Reconstruct.Outcome) :
     seen := seen.insert u.number
     let name := (u.rule?.map (·.name)).getD s!"rule{u.ruleIndex}"
     let status := if outcome.unimplemented.contains name then "admitted" else "replayed"
-    lines := lines ++ s!"{name}\t{u.site?.getD "?"}\t{status}\t{file}\n"
+    -- The site column is kept for `bench/coverage.py`; vampire no longer says
+    -- where it made an inference.
+    lines := lines ++ s!"{name}\t?\t{status}\t{file}\n"
     todo := todo ++ u.parents
   let handle ← IO.FS.Handle.mk path .append
   handle.putStr lines
@@ -419,19 +422,13 @@ private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
     m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
   let part (name : String) (took : Nat) : MessageData :=
     m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
-  -- Where the search went: everything outside the schedule (starting the
-  -- worker, writing and reading files, exiting), parsing the problem, then
-  -- the strategies that did not find the proof, then the one that did.
+  -- Where the search went: the strategy that found the proof, and everything
+  -- else -- starting vampire, parsing the problem, the strategies that did not
+  -- find it -- which vampire does not divide up.
   let within := Id.run do
-    let (some foundAt, some setup, some winner, some failed) :=
-      (query.proof.foundAtTime?, query.proof.setupTime?,
-        query.proof.strategyTime?, failedStrategiesTime query.proof)
+    let (some winner, some other) := (query.proof.strategyTime?, otherThanWinnerTime query)
       | return m!""
-    if foundAt == 0 || setup + winner > foundAt || foundAt > query.search then
-      return m!""
-    return part "worker overhead" (query.search - foundAt)
-      ++ part "parsing the problem" setup
-      ++ part "failed strategies" failed
+    return part "everything else" other
       ++ part "successful strategy" winner
   let found := match query.proof.strategy? with
     | some strategy => m!"; the strategy that found it is \"{strategy}\""
@@ -452,7 +449,7 @@ or not this does.
 private def suggestStrategy (stx : Syntax) (rest : Array Syntax) (query : Query) :
     TacticM PUnit := do
   let some strategy := query.proof.strategy? | return
-  let some saved := failedStrategiesTime query.proof | return
+  let some saved := otherThanWinnerTime query | return
   unless saved ≥ suggestStrategyThreshold do return
   let rest := rest.filterMap fun s =>
     match s.reprint with
@@ -463,7 +460,7 @@ private def suggestStrategy (stx : Syntax) (rest : Array Syntax) (query : Query)
   let call := " ".intercalate
     (["vampire", s!"(strategy := {String.quote strategy})"] ++ rest.toList)
   Meta.Tactic.TryThis.addSuggestion stx { suggestion := call }
-    (header := s!"Naming the strategy that found the proof saves about \
+    (header := s!"Naming the strategy that found the proof saves up to \
       {saved}ms of the {query.search}ms search:")
 
 @[tactic vampireStx]

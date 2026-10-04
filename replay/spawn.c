@@ -1,5 +1,5 @@
 /*
- * Starting the worker without copying the address space.
+ * Starting vampire without copying the address space.
  *
  * Lean's `IO.Process.spawn` goes through libuv, which forks. Forking costs
  * time in proportion to the memory the parent has mapped, and a Lean process
@@ -13,7 +13,7 @@
  * the parent is holding: 0.2 ms from that same 6 GiB process.
  *
  * The child's output goes to files rather than pipes, so that nothing here
- * has to pump them while the worker runs.
+ * has to pump them while vampire runs.
  */
 #include <lean/lean.h>
 
@@ -36,18 +36,19 @@ static lean_obj_res vampire_spawn_error(const char *what, int code) {
 }
 
 /*
- * Runs `exe` with `args`, its output going to `outPath` and `errPath`, and
- * waits for it. Gives back what it exited with, or 128 + the signal that
- * stopped it, which is the shell's convention.
+ * Runs `exe` with `args` in the directory `cwd`, its output going to `outPath`
+ * and `errPath`, and waits for it. Gives back what it exited with, or 128 +
+ * the signal that stopped it, which is the shell's convention.
  */
 LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
+                                       b_lean_obj_arg cwd,
                                        b_lean_obj_arg outPath,
                                        b_lean_obj_arg errPath,
                                        lean_obj_arg world) {
   (void)world;
   size_t count = lean_array_size(args);
   char **argv = (char **)calloc(count + 2, sizeof(char *));
-  if (argv == NULL) return vampire_spawn_error("spawning the worker", ENOMEM);
+  if (argv == NULL) return vampire_spawn_error("spawning vampire", ENOMEM);
   argv[0] = (char *)lean_string_cstr(exe);
   for (size_t i = 0; i < count; i++)
     argv[i + 1] = (char *)lean_string_cstr(lean_array_get_core(args, i));
@@ -57,9 +58,23 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
   int rc = posix_spawn_file_actions_init(&actions);
   if (rc != 0) {
     free(argv);
-    return vampire_spawn_error("spawning the worker", rc);
+    return vampire_spawn_error("spawning vampire", rc);
   }
   int flags = O_WRONLY | O_CREAT | O_TRUNC;
+  /* The output files are opened, as `exe` is found, after the change of
+     directory: the caller passes absolute paths. */
+  /* The `_np` form, which macOS has had since 10.15 and glibc since 2.29;
+     macOS 26 deprecates it for a POSIX `posix_spawn_file_actions_addchdir`
+     that older systems lack. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  rc = posix_spawn_file_actions_addchdir_np(&actions, lean_string_cstr(cwd));
+#pragma GCC diagnostic pop
+  if (rc != 0) {
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    return vampire_spawn_error("spawning vampire", rc);
+  }
   /* Nothing to read: the child is given its problem as a file. */
   rc = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
   if (rc == 0)
@@ -69,7 +84,7 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
   if (rc != 0) {
     posix_spawn_file_actions_destroy(&actions);
     free(argv);
-    return vampire_spawn_error("spawning the worker", rc);
+    return vampire_spawn_error("spawning vampire", rc);
   }
 
   posix_spawnattr_t attr;
@@ -77,7 +92,7 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
   if (rc != 0) {
     posix_spawn_file_actions_destroy(&actions);
     free(argv);
-    return vampire_spawn_error("spawning the worker", rc);
+    return vampire_spawn_error("spawning vampire", rc);
   }
 #ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
   /* Hand the child nothing of ours but the three it was given. `posix_spawn`
@@ -89,7 +104,7 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     free(argv);
-    return vampire_spawn_error("spawning the worker", rc);
+    return vampire_spawn_error("spawning vampire", rc);
   }
 #endif
 
@@ -98,11 +113,11 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
   posix_spawnattr_destroy(&attr);
   posix_spawn_file_actions_destroy(&actions);
   free(argv);
-  if (rc != 0) return vampire_spawn_error("spawning the worker", rc);
+  if (rc != 0) return vampire_spawn_error("spawning vampire", rc);
 
   int status = 0;
   while (waitpid(child, &status, 0) < 0) {
-    if (errno != EINTR) return vampire_spawn_error("waiting for the worker", errno);
+    if (errno != EINTR) return vampire_spawn_error("waiting for vampire", errno);
   }
   uint32_t code = 1;
   if (WIFEXITED(status)) code = (uint32_t)WEXITSTATUS(status);

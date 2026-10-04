@@ -2,10 +2,10 @@ import Std.Data.HashMap
 import VampireReplay.InferenceRule
 
 /-!
-Reads what `vampire-worker` writes: the SZS status and a header, and the proof
-vampire gives under `--proof tptp --proof_extra full` -- TSTP, with what the
-fork records of each step in it. `worker/worker.cpp` describes the header and
-the fork's `Kernel/TPTPProofExtra.hpp` the proof.
+Reads what vampire prints when run with `--proof tptp --proof_extra full`: the
+SZS status, what the strategy that won said of itself, and the proof -- TSTP,
+with what vampire recorded of each step in it, which vampire's
+`Kernel/TPTPProofExtra.hpp` describes.
 
 Nothing is read off the shape of what the proof says where the proof can say
 it: a clause is a clause because it is `tcf`, a split name is one because its
@@ -28,7 +28,7 @@ namespace Vampire
 def none32 : UInt32 := 0xFFFFFFFF
 
 /--
-A placement entry's flags, as the worker writes them (`turned(E)`,
+A placement entry's flags, as the proof writes them (`turned(E)`,
 `rewritten(E)`): the literal became its place turned round, or rewritten
 into it; the rest of the word is the place.
 -/
@@ -321,7 +321,7 @@ private partial def typedVariable : M (UInt32 × String) := do
 mutual
 
 /--
-A formula that needs no parentheses around it. The worker parenthesises every
+A formula that needs no parentheses around it. Vampire parenthesises every
 junction and binary connective, writes a negation `~ (f)` and a negative
 literal `~p`, so that a parenthesis is the only thing that groups.
 -/
@@ -503,7 +503,7 @@ def parse (data : ByteArray) : Except Error (Array Annotated) :=
   | .ok out _ => .ok out
   | .error message pos =>
     let line := (data.extract 0 pos).foldl (fun n b => if b == '\n'.toUInt8 then n + 1 else n) 1
-    Error.fail s!"malformed proof from the worker: {message} at line {line}"
+    Error.fail s!"malformed proof from vampire: {message} at line {line}"
 
 end Tstp
 
@@ -525,7 +525,7 @@ deriving Repr, Inhabited
 structure Symbol where
   name : String
   arity : UInt32
-  /-- The number the symbol is, if it is one; the worker reads it off vampire. -/
+  /-- The number the symbol is, if it is one, as vampire writes it from its signature. -/
   numeral? : Option Numeral := none
   /--
   The truth value pure predicate removal replaced this predicate by, if it did
@@ -589,7 +589,7 @@ private structure UseRec where
 deriving Inhabited
 
 /--
-A congruence step as the worker numbers its kinds: `a` and `b` are terms for a
+A congruence step as vampire numbers its kinds: `a` and `b` are terms for a
 congruence (kind 1), and literals or earlier steps otherwise, `none32` where
 absent.
 -/
@@ -630,7 +630,6 @@ private structure UnitRec where
   splittingName : Option Nat := none
   literalFactors : Option (Array (Int × Nat)) := none
   procedure : Option LiteralProcedure := none
-  site : Option String := none
   introduced : Array (Nat × Option Nat) := #[]
   variant : Nat := 0
   introducedSymbol : Option String := none
@@ -655,9 +654,9 @@ private structure SatRec where
 deriving Inhabited
 
 /--
-A decoded proof: the tables the worker's TSTP was read into. Everything the
-accessors read is here, so a proof is independent of the process that
-produced it.
+A decoded proof: the tables vampire's TSTP was read into, and what the run
+said of itself. Everything the accessors read is here, so a proof is
+independent of the process that produced it.
 -/
 structure Proof where
   private mk ::
@@ -671,8 +670,8 @@ structure Proof where
   private genTable : Array GenRec
   private refutationIdx : Option UInt32
   private strategyText : Option String
-  /-- What the strategy ran for, what setting up took, and when the proof was found. -/
-  private times : Option (Nat × Nat × Nat)
+  /-- What the strategy that won ran for on the clock, in milliseconds. -/
+  private strategyMs : Option Nat
   private text : String
   /-- Why vampire stopped. -/
   terminationReason : TerminationReason
@@ -713,7 +712,7 @@ private structure Builder where
 private abbrev B := StateT Builder (Except Error)
 
 private def bail (message : String) : B α :=
-  throw ⟨s!"malformed proof from the worker: {message}"⟩
+  throw ⟨s!"malformed proof from vampire: {message}"⟩
 
 private def functorKey (name : String) (arity : Nat) (sort : String) : String :=
   s!"{name}\x00{arity}\x00{sort}"
@@ -744,11 +743,11 @@ private def rational (text : String) : Option (Int × Nat) :=
     return (← n.toInt?, d)
   | _ => none
 
-/-- The sort of a TPTP number, as the worker writes them. -/
+/-- The sort of a TPTP number, as vampire writes them. -/
 private def numberSort (text : String) : B String :=
   if text.contains '/' then pure "$rat"
   else if text.contains '.' || text.contains 'e' || text.contains 'E' then
-    bail s!"the decimal {text}, where the worker writes a real `$to_real(n/d)`"
+    bail s!"the decimal {text}, where vampire writes a real `$to_real(n/d)`"
   else pure "$int"
 
 /--
@@ -1145,7 +1144,6 @@ private def buildUnit (a : Annotated) : B UnitRec := do
       | .word "viras" => pure .viras
       | .word "inequality_predicate_normalization" => pure .inequalityPredicateNormalization
       | _ => bail s!"step {a.name} names an unknown literal procedure") }
-  if let some g ← single rs "site" then u := { u with site := some (← gtWord g) }
   if let some g ← single rs "introduced" then
     u := { u with introduced := ← (← gtList g).mapM fun l => do
       let a ← gtArgs "lit" 2 l
@@ -1286,7 +1284,7 @@ go on with a default where one is out of range.
 private def validate (units : Array UnitRec) (sats : Array SatRec) (gens : Array GenRec)
     (formulas : Array FormulaRec) : Except Error PUnit := do
   let malformed (what : String) : Except Error PUnit :=
-    Error.fail s!"malformed proof from the worker: {what}"
+    Error.fail s!"malformed proof from vampire: {what}"
   let index (what : String) (i bound : Nat) : Except Error PUnit :=
     if i < bound then pure () else malformed s!"{what} {i} is out of range (there are {bound})"
   for u in units do
@@ -1364,35 +1362,34 @@ private def header (text : String) : Std.HashMap String String := Id.run do
     | _ => pure ()
   return out
 
+/--
+What the run said of itself, outside the proof: why vampire stopped, and the
+strategy that won with what it ran for.
+-/
+structure Outcome where
+  reason : TerminationReason
+  strategy : Option String := none
+  strategyMs : Option Nat := none
+
 /-- Builds the tables from the annotated formulas of a proof. -/
-private def build (text : String) (all : Array Annotated) : Except Error Proof := do
+private def build (text : String) (all : Array Annotated) (outcome : Outcome) :
+    Except Error Proof := do
   let rs := header text
   let field (key : String) : Except Error String := match rs[key]? with
     | some value => pure value
-    | none => Error.fail s!"malformed proof from the worker: its header has no `{key}`"
+    | none => Error.fail s!"malformed proof from vampire: its header has no `{key}`"
   let nats (key : String) : Except Error (List Nat) := do
     match (← field key).splitOn " " |>.mapM (·.toNat?) with
     | some ns => pure ns
-    | none => Error.fail s!"malformed proof from the worker: its header's `{key}` is malformed"
+    | none => Error.fail s!"malformed proof from vampire: its header's `{key}` is malformed"
   -- The proof states its format, so there is a version to check wherever
-  -- there is a proof; a result without one is the header alone.
+  -- there is a proof.
   if rs.contains "format" || !all.isEmpty then
     let [v] ← nats "format"
-      | Error.fail "malformed proof from the worker: its header's `format` is malformed"
+      | Error.fail "malformed proof from vampire: its header's `format` is malformed"
     if v != formatVersion then
-      Error.fail (s!"the worker writes proof format version {v}, but replay reads \
-        version {formatVersion}; run `lake build` to rebuild the worker")
-  let reason ← match ← field "termination" with
-    | "refutation" => pure .refutation
-    | "satisfiable" => pure .satisfiable
-    | "refutation_not_found" => pure .refutationNotFound
-    | "inappropriate" => pure .inappropriate
-    | "unknown" => pure .unknown
-    | "time_limit" => pure .timeLimit
-    | "instruction_limit" => pure .instructionLimit
-    | "memory_limit" => pure .memoryLimit
-    | "activation_limit" => pure .activationLimit
-    | r => Error.fail s!"malformed proof from the worker: unknown termination reason {r}"
+      Error.fail (s!"vampire writes proof format version {v}, but replay reads \
+        version {formatVersion}; run `lake build` to rebuild vampire")
   let units := all.filter (numbered ·.name "f")
   let sats := all.filter (numbered ·.name "s")
   let gens := all.filter (numbered ·.name "g")
@@ -1411,35 +1408,151 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
   let ((unitRecs, satRecs, genRecs, refutation), b) ←
     go.run { units := names units, sats := names sats, gens := names gens }
   validate unitRecs satRecs genRecs b.formulas
-  let times ← if rs.contains "times" then
-      match ← nats "times" with
-      | [a, b, c] => pure (some (a, b, c))
-      | _ => Error.fail "malformed proof from the worker: its header's `times` is malformed"
-    else pure none
   return {
     functionTable := b.functions, predicateTable := b.predicates
     termTable := b.terms, literalTable := b.literals, formulaTable := b.formulas
     unitTable := unitRecs, satTable := satRecs, genTable := genRecs
-    refutationIdx := refutation, strategyText := rs["strategy"]?, times, text
-    terminationReason := reason }
+    refutationIdx := refutation, strategyText := outcome.strategy
+    strategyMs := outcome.strategyMs, text, terminationReason := outcome.reason }
 
 end Tstp
 
 namespace Proof
 
-/-- Reads the TSTP `vampire-worker` writes. -/
-def ofTstp (data : ByteArray) : Except Error Proof := do
-  let some text := String.fromUTF8? data
-    | Error.fail "malformed proof from the worker: it is not valid UTF-8"
-  Tstp.build text (← Tstp.parse data)
+/--
+A line of vampire's output as it says it, without the comment sign and,
+where several strategies run at once, the `(pid)` of the process that said
+it: that process, `""` without one, and what it said.
+-/
+private def said (line : String) : Option (String × String) := do
+  guard (line.startsWith "% ")
+  let rest := String.ofList (line.toList.drop 2)
+  if rest.startsWith "(" then
+    let pid := rest.toList.drop 1 |>.takeWhile Char.isDigit
+    let after := rest.toList.drop (1 + pid.length)
+    if !pid.isEmpty && after.head? == some ')' then
+      return (String.ofList pid, String.ofList (after.drop 1))
+  return ("", rest)
 
-/-- A time the worker writes only with a proof, `none` without one. -/
-private def ifProved (p : Proof) (pick : Nat × Nat × Nat → Nat) : Option Nat :=
-  if p.strategyText.isNone then none else p.times.map pick
+/-- Why vampire stopped, by the SZS status it gave. -/
+private def reasonOfStatus : String → Option TerminationReason
+  | "Theorem" | "Unsatisfiable" | "ContradictoryAxioms" => some .refutation
+  | "CounterSatisfiable" | "Satisfiable" => some .satisfiable
+  | "GaveUp" => some .refutationNotFound
+  | "Timeout" => some .timeLimit
+  | "InstrOut" => some .instructionLimit
+  | _ => none
+
+/-- Why vampire stopped, by what its statistics say: `Termination reason: …`. -/
+private def reasonOfStatistics (said : String) : Option TerminationReason :=
+  match said with
+  | "Refutation" => some .refutation
+  | "Satisfiable" => some .satisfiable
+  | "Time limit" => some .timeLimit
+  | "Instruction limit" => some .instructionLimit
+  | "Memory limit" => some .memoryLimit
+  | "Activation limit" => some .activationLimit
+  | "Inappropriate" => some .inappropriate
+  | "Unknown" => some .unknown
+  | _ => if said.startsWith "Refutation not found" then some .refutationNotFound else none
+
+/--
+The strategy as vampire's `strategy` option reads it, from the one a slice
+says it runs: what that says, less `proof_extra=full`, which is how the proof
+is written rather than how it is found, and which the tactic asks for anyway.
+A strategy encodes its options `name=value:…` between the first and last
+`_` (`Config.refused?`), so the pair is taken out with the separator before
+it, or after it where it is the first.
+-/
+private def searchStrategy (encoded : String) : String :=
+  let pair := "proof_extra=full"
+  if (encoded.splitOn s!":{pair}:").length == 2 then
+    ":".intercalate (encoded.splitOn s!":{pair}:")
+  else if (encoded.splitOn s!"_{pair}:").length == 2 then
+    "_".intercalate (encoded.splitOn s!"_{pair}:")
+  else if (encoded.splitOn s!":{pair}_").length == 2 then
+    "_".intercalate (encoded.splitOn s!":{pair}_")
+  else encoded
+
+/--
+What vampire printed, read: the outcome of the run and, where it found one,
+the proof.
+
+`problem` is the name vampire knows the problem by, its file's name without
+the extension, which it says the strategies it runs on. The parts read:
+
+- The verdict is the last SZS status printed. In portfolio mode a strategy
+  that succeeds has its result printed by the schedule once every other
+  strategy has been stopped, and one that fails prints none; when none
+  succeeds the schedule's own is the last thing said. A single strategy that
+  reaches a limit prints no status, but its statistics say why it stopped. A
+  run that ends saying neither -- a crash -- reads as `unknown`, and only what
+  vampire printed explains it.
+- The proof is between the SZS output markers.
+- The strategy that won is the one whose own last words follow the verdict,
+  the result being printed whole from what that strategy wrote: the first
+  `Termination reason` after the status is its, and the `(pid)` says which
+  process it was. Before it, that process said which strategy it ran and,
+  counting beats, what that took on the clock. With one strategy at a time
+  there is no `(pid)`, and the last strategy started is the one that won.
+-/
+def ofOutput (output : ByteArray) (problem : String) : Except Error Proof := do
+  let some text := String.fromUTF8? output
+    | Error.fail "malformed output from vampire: it is not valid UTF-8"
+  let lines := (text.splitOn "\n").toArray
+  let mut status : Option (Nat × String) := none
+  for h : i in [0:lines.size] do
+    if let some (_, w) := said lines[i] then
+      if w.startsWith "SZS status " then
+        status := some (i, (w.splitOn " ")[2]!)
+  -- Without a status, a run of one strategy in one process -- whose lines
+  -- carry no `(pid)` -- still says why it stopped in its statistics; no line
+  -- of a portfolio's slices speaks for the run.
+  let statistics := lines.reverse.findSome? fun line => do
+    let (pid, w) ← said line
+    guard (pid.isEmpty && w.startsWith "Termination reason: ")
+    reasonOfStatistics (String.ofList (w.toList.drop "Termination reason: ".length))
+  let reason := match status with
+    | some (_, word) => (reasonOfStatus word).getD .unknown
+    | none => statistics.getD .unknown
+  let startMarker := s!"% SZS output start Proof for {problem}"
+  let endMarker := s!"% SZS output end Proof for {problem}"
+  let block : Option String := do
+    let start ← lines.findIdx? (· == startMarker)
+    let stop ← (lines.extract (start + 1) lines.size).findIdx? (· == endMarker)
+    return "\n".intercalate (lines.extract (start + 1) (start + 1 + stop)).toList
+  if reason == .refutation && block.isNone then
+    Error.fail "vampire says it found a refutation but printed no proof"
+  -- The strategy that won, where one did.
+  let mut outcome : Tstp.Outcome := { reason }
+  if let (some (verdict, _), true) := (status, reason == .refutation || reason == .satisfiable) then
+    let winner := (lines.extract verdict lines.size).findSome? fun line => do
+      let (pid, w) ← said line
+      guard (w.startsWith "Termination reason:")
+      return pid
+    if let some pid := winner then
+      let before := (lines.extract 0 verdict).reverse.filterMap fun line => do
+        let (p, w) ← said line
+        guard (p == pid)
+        return w
+      let runs := s!" on {problem} for ("
+      let strategy := before.findSome? fun w => do
+        let parts := w.splitOn runs
+        guard (parts.length == 2 && w.endsWith ")")
+        return searchStrategy parts[0]!
+      let ms := before.findSome? fun w => do
+        guard (w.startsWith "beats ")
+        match w.splitOn " " with
+        | ["beats", _, "in", t] =>
+          if t.endsWith "ms" then (String.ofList (t.toList.take (t.length - 2))).toNat? else none
+        | _ => none
+      outcome := { outcome with strategy, strategyMs := ms }
+  let body := block.getD ""
+  Tstp.build body (← Tstp.parse body.toUTF8) outcome
 
 /--
 The strategy the proof was found by, as vampire's `strategy` option reads it,
-and `none` when there is no proof.
+and `none` when there is no proof or vampire did not say.
 
 In portfolio mode the strategy that wins is one of a schedule of them, and
 running it on its own is the same run without the ones it won against.
@@ -1447,35 +1560,19 @@ running it on its own is the same run without the ones it won against.
 def strategy? (p : Proof) : Option String := p.strategyText
 
 /--
-How long the strategy that found the proof ran for, in milliseconds, and
-`none` when there is no proof.
+How long the strategy that found the proof ran for on the clock, in
+milliseconds, and `none` when there is no proof or vampire did not say --
+it does where it counts beats.
 
 The schedule is worked through one strategy at a time, so what the search
-took beyond this went on strategies that did not find the proof -- which is
-what naming this one saves.
+took beyond this went on starting vampire, parsing the problem and the
+strategies that did not find the proof -- the last of which naming this one
+saves.
 -/
-def strategyTime? (p : Proof) : Option Nat := p.ifProved (·.1)
+def strategyTime? (p : Proof) : Option Nat :=
+  if p.strategyText.isNone then none else p.strategyMs
 
-/--
-What the search spent before the schedule began -- starting vampire up and
-parsing the problem -- in milliseconds, and `none` when there is no proof.
-
-A run that names the strategy pays this too, so it is not part of what
-naming one saves.
--/
-def setupTime? (p : Proof) : Option Nat := p.ifProved (·.2.1)
-
-/--
-When the proof was found, in milliseconds after the worker began, and `none`
-when there is no proof.
-
-What the caller timed beyond this went on starting the worker's process,
-which a run naming the strategy pays as well -- so the difference is not
-part of what naming one saves.
--/
-def foundAtTime? (p : Proof) : Option Nat := p.ifProved (·.2.2)
-
-/-- The proof as the worker wrote it, in TSTP. -/
+/-- The proof as vampire wrote it, in TSTP. -/
 def proofText (p : Proof) : String := p.text
 
 end Proof
@@ -1872,7 +1969,7 @@ one: what it could not unify it defers into disequality literals the inference
 puts into its conclusion. The step is sound because the conclusion failing
 makes each of those pairs equal, and then the two terms really are one. Where
 the inference put them says nothing by the time the clause is written out --
-literal selection permutes it in place -- so the worker finds each by which
+literal selection permutes it in place -- so vampire finds each by which
 literal it is.
 -/
 def constraints (u : Unit) : Array Nat := u.r.constraints
@@ -1909,12 +2006,6 @@ def introducedTerms (u : Unit) : Array (Option Term) :=
 
 /-- Which of the clauses of different shapes its rule builds this one is. -/
 def variant (u : Unit) : Nat := u.r.variant
-
-/--
-Where in vampire the inference was made, `file:line` in its source directory:
-one rule is made in several places, which do not all do the same.
--/
-def site? (u : Unit) : Option String := u.r.site
 
 /--
 The name the input gave this formula, and `none` for anything vampire derived.
@@ -1987,8 +2078,8 @@ the conclusion's literal it became and whether with its equation turned round,
 or `none` for one it became none of. `none` altogether where nothing was
 recorded -- for a formula, say.
 
-The worker works it out by substituting and comparing literals, which vampire
-shares, so a literal is placed rather than looked for.
+Vampire works it out by substituting and comparing literals, which it shares,
+so a literal is placed rather than looked for.
 -/
 def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
     Option (Array (Option (Nat × Bool))) :=
@@ -2013,7 +2104,7 @@ denominator positive. `none` where nothing was scaled.
 ALASCA normalization divides a comparison by the gcd of its coefficients,
 and turns an equation's sides round, which is a factor of `-1`; the factor
 depends on the order vampire keeps a polynomial's monomials in, which is
-nothing replay could reconstruct, so the worker records it.
+nothing replay could reconstruct, so vampire records it.
 -/
 def literalFactors? (u : Unit) : Option (Array (Int × Nat)) := u.r.literalFactors
 

@@ -1,5 +1,5 @@
 import VampireReplay.Wire
-import Vampire.Worker
+import Vampire.Run
 import VampireReplay.Translate
 import Vampire.Preprocess
 import VampireReplay.Reconstruct

@@ -22,7 +22,6 @@ Parse/SMTLIB2.cpp:2800	*	the SMT-LIB parser, and the tactic sends TPTP
 Parse/SMTLIB2.cpp:2815	*	the SMT-LIB parser, and the tactic sends TPTP
 Parse/SMTLIB2.cpp:2828	*	the SMT-LIB parser, and the tactic sends TPTP
 Parse/SMTLIB2.cpp:2868	*	the SMT-LIB parser, and the tactic sends TPTP
-vampire.cpp:406	*	the command-line vampire, which the worker does not link
 Shell/Interpolants.cpp:424	*	interpolation only, which the tactic never asks for
 Inferences/AnswerLiteralProcessors.cpp:84	*	question answering only, which the tactic never asks for
 Shell/AnswerLiteralManager.cpp:391	*	question answering only, which the tactic never asks for

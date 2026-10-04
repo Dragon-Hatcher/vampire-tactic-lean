@@ -22,7 +22,7 @@ if [ "${#matches[@]}" -gt 1 ]; then
 fi
 src=${matches[0]}
 dir=$(dirname "$src")
-# The libraries lake would load: the worker is started by a native function,
+# The libraries lake would load: Vampire is started by a native function,
 # which `lean` can only call out of a library it has been given. Read before
 # anything is made, so that a missing build stops here.
 libs=()

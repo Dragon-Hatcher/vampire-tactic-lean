@@ -1,11 +1,9 @@
-The Lean code in this repository, and `worker/worker.cpp`, are under the MIT
-licence in `LICENSE`. What that code is built against is not, and this file says
-what.
+The Lean code in this repository is under the MIT licence in `LICENSE`. What it
+builds and runs is not, and this file says what.
 
-This package builds and runs Vampire, and the `vampire-worker` binary it
-produces is Vampire with one extra translation unit (`worker/worker.cpp`) linked
-in. Vampire's licence is a BSD 3-Clause licence, which permits that; anyone who
-*distributes* such a binary has to carry Vampire's copyright notice and
+This package builds and runs Vampire, unmodified from the revision it pins.
+Vampire's licence is a BSD 3-Clause licence; anyone who *distributes* a binary
+of it has to carry Vampire's copyright notice and
 disclaimer with it, and may not use the names of Vampire's authors to endorse
 what they distribute. This repository does not distribute one -- it is built
 where it is used.
@@ -17,8 +15,8 @@ where it is used.
     clausification took.
     Vampire's licence is at https://vprover.github.io/license.html
 
-Vampire's own build fetches two further components as submodules, and links both
-into the binary:
+Vampire links two further components into the binary: one its build fetches as
+a submodule, and one carried in its own tree.
 
     CaDiCaL — https://github.com/arminbiere/cadical
     MIT licence, Copyright (c) 2016-2021 Armin Biere, Johannes Kepler
@@ -26,8 +24,9 @@ into the binary:
 
     VIRAS — https://github.com/joe-hauns/viras
     That repository carries no licence file and states no terms. This
-    repository does not use it directly: it is here only because Vampire's
-    build lists it as a submodule and compiles it into the binary.
+    repository does not use it directly: it is here only because Vampire
+    carries a copy of it, changed to say which virtual term made each of its
+    conclusions, and compiles it into the binary.
 
 `Vampire/Preprocess.lean` follows lean-smt in how it reduces a goal to the
 smallest query that states it. lean-smt is used under the Apache License 2.0.

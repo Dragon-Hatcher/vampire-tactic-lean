@@ -1,4 +1,4 @@
-# Builds the tactic and the worker, and runs `lake test`, which includes the
+# Builds the tactic and Vampire, and runs `lake test`, which includes the
 # smoke split of the corpus. The whole corpus is slower -- twenty minutes and
 # more -- so it runs once a week and when asked for.
 name: CI
@@ -36,8 +36,8 @@ jobs:
           path: |
             .lake/packages
             .lake/build/vampire
-            .lake/build/cmake
-          key: lake-${{ runner.os }}-${{ hashFiles('lake-manifest.json', 'lean-toolchain', 'lakefile.lean', 'worker/**') }}
+            .lake/build/vampire-build
+          key: lake-${{ runner.os }}-${{ hashFiles('lake-manifest.json', 'lean-toolchain', 'lakefile.lean') }}
           restore-keys: lake-${{ runner.os }}-
 
       - name: Fetch Mathlib's build

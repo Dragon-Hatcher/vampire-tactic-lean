@@ -11,12 +11,12 @@ require "leanprover-community" / "auto" @ git "v4.33.0"
 -- `replay/lakefile.lean`.
 require vampireReplay from "replay"
 
-/-- The vampire the worker is built from. -/
+/-- The vampire the tactic builds and runs. -/
 def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
-/-- The revision of `vampireRepo` the worker is built from. -/
-def vampireRev : String := "9d9fea6d6a0efcd49632316340a0d740e9efd849"
+/-- The revision of `vampireRepo` the tactic builds. -/
+def vampireRev : String := "178b11a681718a23cbe450d47242f8575d62cdbd"
 
 /--
 The submodules vampire's build needs.
@@ -76,14 +76,6 @@ def vampireBuildType : String :=
   if get_config? vampireDebug |>.isSome then "Debug" else "Release"
 
 /--
-Whether vampire keeps where it made each inference, which the worker writes
-into the proof and the coverage log reads (`bench/coverage-run.sh` builds with
-`-K vampireSites`). It costs every unit eight bytes, so it is off otherwise;
-a debug build keeps them regardless.
--/
-def vampireInferenceSites : Bool := get_config? vampireSites |>.isSome
-
-/--
 Available memory in GiB, as far as the platform will say.
 
 Linux reports what is available. macOS reports only what is installed, so half
@@ -140,34 +132,43 @@ private def vampireState (dir : FilePath) : BaseIO String := do
   | .error _ => return ""
 
 /--
-Builds the `vampire-worker` executable. `cmake` handles incrementality, so
-this runs whenever the checkout it builds from has moved, and reports a trace
-over the resulting binary.
+Builds vampire. `cmake` handles incrementality, so this runs whenever the
+checkout it builds from has moved, and reports a trace over the resulting
+binary.
+
+Two link settings are given here rather than being vampire's defaults, both
+about how the tactic runs it -- one short process per call:
+
+- Nothing links against vampire or loads it, so it exports nothing. A C++
+  executable otherwise exports its thousands of weak definitions, and dyld
+  looks each one up in the export trie on every launch: more than half of
+  vampire's start-up, about 4ms of 7ms on an M-series Mac. On Linux an
+  executable exports nothing unless asked to.
+- Link-time optimization: vampire's hot paths call small functions defined in
+  other files (ordering, substitution, the beat counter), which only the
+  linker can inline. About 4% off a search, the same search, and nothing off
+  what it finds.
 -/
-target «vampire-worker» pkg : FilePath := Job.async do
+target «vampire-binary» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg
-  -- Declared before the build so that editing either side re-runs it: what
-  -- git says of the vampire checkout, and the sources kept here.
+  -- Declared before the build so that editing the checkout re-runs it.
   addTrace (.ofHash (Hash.ofString (← vampireState vampireDir)))
-  for source in ["worker.cpp", "CMakeLists.txt"] do
-    addTrace (.ofHash (← computeFileHash (pkg.dir / "worker" / source)))
-  -- And how it is configured, so that switching sites on or off rebuilds it.
-  addTrace (.ofHash (Hash.ofString s!"sites={vampireInferenceSites}"))
-  let cmakeDir := pkg.buildDir / "cmake"
-  let exe := cmakeDir / "vampire-worker"
+  let cmakeDir := pkg.buildDir / "vampire-build"
+  let exe := cmakeDir / "vampire"
+  let linkFlags := if System.Platform.isOSX then "-Wl,-no_exported_symbols" else ""
   proc (quiet := true) {
     cmd := "cmake"
     args := #[
-      "-S", (pkg.dir / "worker").toString,
+      "-S", vampireDir.toString,
       "-B", cmakeDir.toString,
-      s!"-DVAMPIRE_SOURCE_DIR={vampireDir}",
       s!"-DCMAKE_BUILD_TYPE={vampireBuildType}",
-      s!"-DINFERENCE_SITES={if vampireInferenceSites then "ON" else "OFF"}"
+      s!"-DCMAKE_INTERPROCEDURAL_OPTIMIZATION={if vampireBuildType == "Release" then "ON" else "OFF"}",
+      s!"-DCMAKE_EXE_LINKER_FLAGS={linkFlags}"
     ]
   }
   proc {
     cmd := "cmake"
-    args := #["--build", cmakeDir.toString, "--target", "vampire-worker",
+    args := #["--build", cmakeDir.toString, "--target", "vampire",
               "--parallel", ← cmakeParallelLevel]
   }
   addTrace <| .ofHash (← computeFileHash exe)
@@ -175,7 +176,7 @@ target «vampire-worker» pkg : FilePath := Job.async do
 
 @[default_target]
 lean_lib Vampire where
-  needs := #[«vampire-worker»]
+  needs := #[«vampire-binary»]
 
 @[test_driver]
 lean_lib test where

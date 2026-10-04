@@ -1,7 +1,7 @@
 import Vampire
 
 /-!
-The worker and the decoder, without the tactic: each problem is handed to
+Vampire and the decoder, without the tactic: each problem is handed to
 vampire as TPTP and has to come back refuted, with a proof that decodes.
 
 The problems are found beside this file rather than in whatever directory the
@@ -20,7 +20,7 @@ private def problems : List String :=
   for name in problems do
     let problem ← IO.FS.readFile (dir / s!"{name}.p")
     match ← prove problem { timeout := 30 } (searchFrom := here.parent.getD ".") with
-    | .error e => throwError "{name}: the worker failed: {e}"
+    | .error e => throwError "{name}: vampire failed: {e}"
     | .ok (p, _) =>
       let some r := p.refutation?
         | throwError "{name}: not refuted: {p.terminationReason.describe}"
