@@ -32,17 +32,17 @@ inductive LiteralRewrite
   | generalization
   deriving Inhabited, BEq, Repr
 
-/-- The procedure the worker recorded as the number `n`: `InferenceStore::LiteralProcedure`. -/
-def LiteralRewrite.ofRecorded? : Nat → Option LiteralRewrite
-  | 0 => some .theoryNormalization
-  | 1 => some (.interpretedEvaluation false)
-  | 2 => some (.interpretedEvaluation true)
-  | 3 => some .polynomialEvaluation
-  | 4 => some .pushUnaryMinus
-  | 5 => some .alascaNormalization
-  | 6 => some .cancellation
-  | 7 => some .generalization
-  | _ => none
+/-- The rewrite the procedure vampire recorded performs, for those replayed literal by literal. -/
+def LiteralRewrite.ofRecorded? : LiteralProcedure → Option LiteralRewrite
+  | .theoryNormalization => some .theoryNormalization
+  | .interpretedEvaluation => some (.interpretedEvaluation false)
+  | .interpretedEvaluationNormalizing => some (.interpretedEvaluation true)
+  | .polynomialEvaluation => some .polynomialEvaluation
+  | .pushUnaryMinus => some .pushUnaryMinus
+  | .alascaNormalization => some .alascaNormalization
+  | .cancellation => some .cancellation
+  | .generalization => some .generalization
+  | .viras | .inequalityPredicateNormalization => none
 
 /-- What reconstruction needs to read a proof back into Lean. -/
 structure Context where

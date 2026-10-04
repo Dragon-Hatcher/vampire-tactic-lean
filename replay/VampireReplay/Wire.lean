@@ -2,9 +2,17 @@ import Std.Data.HashMap
 import VampireReplay.InferenceRule
 
 /-!
-Reads the proof `vampire-worker` writes: TSTP, with what the fork records of
-each step in the step's useful information. `worker/worker.cpp` describes the
-format at its top.
+Reads what `vampire-worker` writes: the SZS status and a header, and the proof
+vampire gives under `--proof tptp --proof_extra full` -- TSTP, with what the
+fork records of each step in it. `worker/worker.cpp` describes the header and
+the fork's `Kernel/TPTPProofExtra.hpp` the proof.
+
+Nothing is read off the shape of what the proof says where the proof can say
+it: a clause is a clause because it is `tcf`, a split name is one because its
+declaration marks it, a premise's use is its use because of where the proof
+puts it. What is worked out -- an equality's sort, from the declarations and
+the sorts of TPTP's operations -- is worked out only where it is certain, and
+otherwise refused.
 
 The file is parsed in two passes. The first reads it into the shape TPTP gives
 it -- annotated formulas, terms, formulas, general terms -- and the second
@@ -28,8 +36,8 @@ private def placedTurned : UInt32 := 0x80000000
 private def placedRewritten : UInt32 := 0x40000000
 private def placedIndex : UInt32 := 0x3FFFFFFF
 
-/-- The version of the format the worker writes (`FORMAT` in `worker.cpp`). -/
-private def formatVersion : Nat := 1
+/-- The version of the format vampire writes (`FORMAT` in `Kernel/TPTPProofExtra.cpp`). -/
+private def formatVersion : Nat := 2
 
 /-- Why a proof could not be had or read: what went wrong, in words. -/
 structure Error where
@@ -72,6 +80,43 @@ inductive Connective where
   | «forall» | «exists» | boolTerm | «false» | «true» | name | noconn
 deriving Inhabited, Repr, BEq, DecidableEq, Hashable
 
+/--
+The procedure a literal-wise simplification rewrote its premise by, as vampire
+records it (`InferenceStore::LiteralProcedure`): evaluation is whichever of
+several evaluators the options chose, and they rewrite a literal differently.
+-/
+inductive LiteralProcedure where
+  | theoryNormalization
+  | interpretedEvaluation
+  /-- `InterpretedEvaluation` with inequality normalization on. -/
+  | interpretedEvaluationNormalizing
+  | polynomialEvaluation
+  | pushUnaryMinus
+  | alascaNormalization
+  | cancellation
+  /-- Each literal is the premise's at the recorded witness, up to ring identities. -/
+  | generalization
+  /-- ALASCA's VIRAS quantifier elimination. -/
+  | viras
+  /--
+  ALASCA's strong normalization of comparisons, which can make one literal two,
+  so that no image is recorded.
+  -/
+  | inequalityPredicateNormalization
+deriving Inhabited, Repr, BEq, DecidableEq
+
+/-- How one of clausification's generalised clauses was reached. -/
+inductive GenClause.GenHow where
+  /-- A clause clausification started from: the formula, or a definition. -/
+  | introduced
+  /-- A position replaced by `replacement`, the rest kept. -/
+  | extended
+  /-- A position rewritten in place: a quantifier's body, a let's contents. -/
+  | replaced
+  /-- A position rewritten in place by a name for what stood there. -/
+  | named
+deriving Inhabited, Repr, BEq
+
 /-! ## Reading TSTP -/
 
 namespace Tstp
@@ -94,7 +139,11 @@ inductive Fm where
   | quant (all : Bool) (vars : Array (UInt32 × String)) (body : Fm)
   /-- `$true` or `$false`. -/
   | const (c : Connective)
-  /-- `$$name('n')`: a name splitting gave a formula. -/
+  /--
+  A split name, AVATAR's name for a component, standing as a formula: `n`, or
+  `~n` for one written negated. Split names are told apart from predicates by
+  their declarations, so the parser never makes one; the builder does.
+  -/
   | name (n : String)
 deriving Inhabited
 
@@ -106,6 +155,8 @@ inductive GT where
   | list (xs : Array GT)
   | fot (t : Tm)
   | tff (f : Fm)
+  /-- `data:term`, as in a parent's details `f12:[...]` or a variable's sort `X0:s`. -/
+  | colon (lhs rhs : GT)
 deriving Inhabited
 
 /-- What an annotated formula states: a formula, or a symbol's type. -/
@@ -299,7 +350,6 @@ private partial def unitary : M Fm := do
   match t with
   | .app "$true" #[] => return .const .true
   | .app "$false" #[] => return .const .false
-  | .app "$$name" #[.app n #[]] => return .name n
   | _ =>
     if ← lookingAt "!=" then
       expect "!="
@@ -323,7 +373,16 @@ private partial def binary (c : Connective) (op : String) (lhs : Fm) : M Fm := d
 
 end
 
+mutual
+
 private partial def general : M GT := do
+  let data ← generalData
+  if ← lookingAt ":" then
+    expect ":"
+    return .colon data (← general)
+  return data
+
+private partial def generalData : M GT := do
   if ← lookingAt "[" then
     expect "["
     let xs ← sepBy general "]"
@@ -347,6 +406,8 @@ private partial def general : M GT := do
     expect ")"
     return .app w args
   return .word w
+
+end
 
 /-- A type declaration: `f: (s1 * s2) > s`, `f: s1 > s` or `f: s`. -/
 private def typeDecl : M Body := do
@@ -529,7 +590,7 @@ private structure UnitRec where
   placements : Array PlacementRec := #[]
   splittingName : Option Nat := none
   literalFactors : Option (Array (Int × Nat)) := none
-  procedure : Option Nat := none
+  procedure : Option LiteralProcedure := none
   site : Option String := none
   introduced : Array (Nat × Option Nat) := #[]
   variant : Nat := 0
@@ -543,7 +604,7 @@ private structure GenRec where
   literals : Array (UInt32 × Bool)
   replacement : Array (UInt32 × Bool)
   bindings : Array (UInt32 × UInt32)
-  how : Nat
+  how : GenClause.GenHow
   placements : Array (Nat × Bool)
 deriving Inhabited
 
@@ -597,6 +658,14 @@ private structure Builder where
   literalIdx : Std.HashMap LiteralRec UInt32 := {}
   formulas : Array FormulaRec := #[]
   formulaIdx : Std.HashMap FormulaRec UInt32 := {}
+  /--
+  The function symbols declared, by the name and arity the proof writes them
+  with: ALASCA's multiplication by a numeral has no TPTP name of its own, so
+  the proof gives it one, and its declaration says what it is.
+  -/
+  declaredFunctors : Std.HashMap (String × Nat) UInt32 := {}
+  /-- The split names, which their declarations mark as such. -/
+  splitNames : Std.HashSet String := {}
   /-- Steps, propositional clauses and generalised clauses, by name. -/
   units : Std.HashMap String UInt32 := {}
   sats : Std.HashMap String UInt32 := {}
@@ -674,15 +743,17 @@ private partial def internTerm : Tm → B UInt32
     -- A real numeral, unless what it converts is an integer.
     if text.contains '/' then constant (← numeral text "$real" false)
     else constant { name := "$to_real", arity := 1 } #[← internTerm (.num text)]
-  | .app "$$lin_mul" #[k, x] => do
-    let (text, sort) ← match k with
-      | .num text => pure (text, ← numberSort text)
-      | .app "$to_real" #[.num text] => pure (text, "$real")
-      | _ => bail "a multiplication by something other than a numeral"
-    constant (← numeral text sort true) #[← internTerm x]
   | .app f args => do
     let args ← args.mapM internTerm
-    constant { name := f, arity := args.size.toUInt32 } args
+    match (← get).declaredFunctors[(f, args.size)]? with
+    | some i => internTermRec { isVar := false, value := i, args }
+    | none => constant { name := f, arity := args.size.toUInt32 } args
+
+/-- TPTP's arithmetic operations whose result is at the sort of their arguments. -/
+private def arithmeticAtArgumentSort : List String :=
+  ["$sum", "$difference", "$product", "$quotient", "$quotient_e", "$quotient_t",
+   "$quotient_f", "$remainder_e", "$remainder_t", "$remainder_f", "$uminus", "$floor",
+   "$ceiling", "$truncate", "$round", "$abs"]
 
 /--
 The sort of a term, for an equality's: a variable's from where it is bound, a
@@ -697,10 +768,11 @@ private partial def sortOf (env : Std.HashMap UInt32 String) : Tm → B String
   | .app "$to_real" _ => pure "$real"
   | .app "$to_rat" _ => pure "$rat"
   | .app "$to_int" _ => pure "$int"
-  | .app "$$lin_mul" #[k, _] => sortOf env k
   | .app f args => do
     if let some s := (← get).resultSorts[(f, args.size)]? then return s
-    if f.startsWith "$" then
+    -- TPTP's arithmetic operations, which are at the sort of what they apply
+    -- to; any other is no symbol this format can say the sort of.
+    if arithmeticAtArgumentSort.contains f then
       if let some a := args[0]? then return ← sortOf env a
     bail s!"the sort of {f} is not known"
 
@@ -712,6 +784,8 @@ private def internLiteralRec (r : LiteralRec) : B UInt32 := do
 
 private def internLiteral (env : Std.HashMap UInt32 String) : Fm → B UInt32
   | .atom polarity (.app p args) => do
+    if (← get).splitNames.contains p then
+      bail s!"the split name {p} stands where a literal of a predicate does"
     let args ← args.mapM internTerm
     internLiteralRec { predicate := ← internPredicate p args.size, polarity
                        isEquality := false, args, sort := none }
@@ -732,6 +806,12 @@ private def bindSorts (env : Std.HashMap UInt32 String) (vars : Array (UInt32 ×
   vars.foldl (fun e (v, s) => e.insert v s) env
 
 private partial def internFormula (env : Std.HashMap UInt32 String) : Fm → B UInt32
+  | .atom polarity (.app n #[]) => do
+    -- A split name stands as a formula of its own, a name rather than a literal.
+    if (← get).splitNames.contains n then
+      return ← internFormulaRec { connective := .name, name := some (if polarity then n else s!"~{n}") }
+    internFormulaRec { connective := .literal
+                       literal := some (← internLiteral env (.atom polarity (.app n #[]))) }
   | .atom polarity t => do
     internFormulaRec { connective := .literal, literal := some (← internLiteral env (.atom polarity t)) }
   | .eq polarity lhs rhs => do
@@ -772,6 +852,13 @@ private def gtWord : GT → B String
   | .word s => pure s
   | _ => bail "expected a name"
 
+/-- A variable, `X12`, as its number. -/
+private def gtVar : GT → B UInt32
+  | .word w => match (String.ofList (w.toList.drop 1)).toNat? with
+    | some n => if w.startsWith "X" then pure n.toUInt32 else bail s!"expected a variable, not {w}"
+    | none => bail s!"expected a variable, not {w}"
+  | _ => bail "expected a variable"
+
 private def gtTerm : GT → B UInt32
   | .fot t => internTerm t
   | _ => bail "expected a term"
@@ -786,17 +873,18 @@ private def gtArgs (f : String) (n : Nat) : GT → B (Array GT)
     else bail s!"expected {f} of {n} arguments, not {f'} of {args.size}"
   | _ => bail s!"expected {f}"
 
+/-- `[X0:s, X1:t]`: variables and their sorts. -/
 private def gtVarSorts (g : GT) : B (Array (UInt32 × String)) := do
-  (← gtList g).mapM fun v => do
-    let a ← gtArgs "v" 2 v
-    return (← gtU32 a[0]!, ← gtWord a[1]!)
+  (← gtList g).mapM fun
+    | .colon v s => do return (← gtVar v, ← gtWord s)
+    | _ => bail "expected a variable and its sort"
 
-private def gtBindings (g : GT) : B (Array (UInt32 × UInt32)) := do
-  (← gtList g).mapM fun b => do
-    let a ← gtArgs "bind" 2 b
-    return (← gtU32 a[0]!, ← gtTerm a[1]!)
+/-- `bind(X, $fot(t))`: what a variable was bound to. -/
+private def gtBinding (g : GT) : B (UInt32 × UInt32) := do
+  let a ← gtArgs "bind" 2 g
+  return (← gtVar a[0]!, ← gtTerm a[1]!)
 
-/-- A formula of a record, `$tff(f)` or, with free variables, `scoped([v(V,s)], $tff(f))`. -/
+/-- A formula of a record, `$tff(f)` or, with free variables, `scoped([X0:s, ...], $tff(f))`. -/
 private def gtFormula : GT → B UInt32
   | .tff f => internFormula {} f
   | .app "scoped" #[vars, .tff f] => do internFormula (bindSorts {} (← gtVarSorts vars)) f
@@ -809,30 +897,29 @@ private partial def gtPlaced : GT → B UInt32
   | .app "rewritten" #[g] => do return (← gtPlaced g) ||| placedRewritten
   | g => gtU32 g
 
-/-- Each record of useful information by its name. -/
-private def records (info : Array GT) : Std.HashMap String (Array GT) :=
-  info.foldl (init := {}) fun m g =>
-    match g with
-    | .app f args => m.insert f args
-    | .word f => m.insert f #[]
-    | _ => m
+/-- A term written as a general term, as `skolemize` writes the term it names. -/
+private partial def gtAsTerm : GT → B Tm
+  | .word w => do
+    if w.startsWith "X" && (String.ofList (w.toList.drop 1)).toNat?.isSome then
+      return .var (← gtVar (.word w))
+    return .app w #[]
+  | .num text => pure (.num text)
+  | .app f args => do return .app f (← args.mapM gtAsTerm)
+  | _ => bail "expected a term"
 
-/-- The rule a step names, by vampire's name for it. -/
-private def ruleByName : Std.HashMap String UInt32 :=
-  InferenceRule.all.zipIdx.foldl (init := {}) fun m (r, i) => m.insert r.name i.toUInt32
+/-- The rule a step names, by the name a TPTP proof writes it by. -/
+private def ruleNamed (step name : String) : B UInt32 := do
+  match InferenceRule.ofTptpName? name with
+  | some rule => pure (InferenceRule.all.idxOf rule).toUInt32
+  | none => throw ⟨s!"step {step} names the inference rule {name}, which \
+      replay/VampireReplay/InferenceRule.lean does not have; rerun \
+      scripts/gen-inference-rules.py"⟩
 
 /-- What a name refers to among those `names` holds, which it has to be one of. -/
 private def resolve (names : Std.HashMap String UInt32) (what name : String) : B UInt32 := do
   match names[name]? with
   | some i => pure i
   | none => bail s!"{what} {name} is not in the proof"
-
-/-- The single argument of a record, if the step has it. -/
-private def single (rs : Std.HashMap String (Array GT)) (key : String) : B (Option GT) :=
-  match rs[key]? with
-  | some #[g] => pure (some g)
-  | some _ => bail s!"malformed {key}"
-  | none => pure none
 
 private def congruenceStep : GT → B CongruenceRec
   | .app "input" #[a] => do return { kind := 0, a := ← gtU32 a }
@@ -846,24 +933,108 @@ private def congruenceStep : GT → B CongruenceRec
     return { kind := 5, a := ← gtU32 a, b := ← gtU32 b, args := ← (← gtList args).mapM gtOptNat }
   | _ => bail "unknown congruence step"
 
+/-- One premise use (`use(...)`, or `use` with nothing in it), and its placement. -/
+private def gtUse (premise : UInt32) (g : GT) : B (UseRec × Option (Array UInt32)) := do
+  let items := match g with
+    | .app "use" items => items
+    | _ => #[]
+  let mut use : UseRec := { premise, literal := none, term := none, flags := 0, bindings := #[],
+                            other := none, factor := none }
+  let mut placed := none
+  for item in items do
+    match item with
+    | .app "literal" #[l] => use := { use with literal := some (← gtU32 l) }
+    | .app "term" #[t] => use := { use with term := some (← gtTerm t) }
+    | .app "bind" _ => use := { use with bindings := use.bindings.push (← gtBinding item) }
+    | .word "rewrites_whole_premise" => use := { use with flags := use.flags ||| 1 }
+    | .app "virtual" #[.word "epsilon"] => use := { use with flags := use.flags ||| 2 }
+    | .app "virtual" #[.word "plus_infinity"] => use := { use with flags := use.flags ||| 4 }
+    | .app "virtual" #[.word "minus_infinity"] => use := { use with flags := use.flags ||| 8 }
+    | .word "negated" => use := { use with flags := use.flags ||| 16 }
+    | .app "other" #[t] => use := { use with other := some (← gtTerm t) }
+    | .app "factor" #[t] => use := { use with factor := some (← gtTerm t) }
+    | .app "placed" #[entries] => placed := some (← (← gtList entries).mapM gtPlaced)
+    | _ => bail "unknown item of a premise use"
+  return (use, placed)
+
+/--
+The parents, and what the step recorded of each: the `j`th occurrence of a
+premise is the `j`th use recorded against it, and each use after those, which
+only the last occurrence holds, the one after; a placement belongs to the use
+it is in, or, on its own, to the occurrence's.
+-/
+private def buildParents (step : String) (parents : Array GT) :
+    B (Array UInt32 × Array UseRec × Array PlacementRec) := do
+  let units := (← get).units
+  let mut out := #[]
+  let mut uses := #[]
+  let mut placements := #[]
+  let mut seen : Std.HashMap UInt32 Nat := {}
+  for h : pos in [0:parents.size] do
+    let (name, details) ← match parents[pos] with
+      | .word name => pure (name, #[])
+      | .colon (.word name) details => pure (name, ← gtList details)
+      | _ => bail s!"step {step} has a malformed premise"
+    let i ← resolve units "the premise" name
+    let some number := (String.ofList (name.toList.drop 1)).toNat?
+      | bail s!"unexpected step name {name}"
+    let number := number.toUInt32
+    out := out.push i
+    let j := seen.getD number 0
+    let mut k := j
+    for d in details do
+      match d with
+      | .app "placed" #[entries] =>
+        unless details.size == 1 do
+          bail s!"step {step} places premise {name}'s literals beside a use"
+        placements := placements.push
+          { position := pos, use := j, entries := ← (← gtList entries).mapM gtPlaced }
+      | _ =>
+        let (use, placed) ← gtUse number d
+        uses := uses.push use
+        if let some entries := placed then
+          placements := placements.push { position := pos, use := k, entries }
+        k := k + 1
+    seen := seen.insert number (max (j + 1) k)
+  return (out, uses, placements)
+
+/-- Each record of useful information by its name. -/
+private def records (info : Array GT) : Std.HashMap String (Array GT) :=
+  info.foldl (init := {}) fun m g =>
+    match g with
+    | .app f args => m.insert f args
+    | .word f => m.insert f #[]
+    | _ => m
+
+/-- The single argument of a record, if the step has it. -/
+private def single (rs : Std.HashMap String (Array GT)) (key : String) : B (Option GT) :=
+  match rs[key]? with
+  | some #[g] => pure (some g)
+  | some _ => bail s!"malformed {key}"
+  | none => pure none
+
 private def buildUnit (a : Annotated) : B UnitRec := do
   let some number := (String.ofList (a.name.toList.drop 1)).toNat?
     | bail s!"unexpected step name {a.name}"
-  let rs := records a.info
-  let (rule, parents, fileName) ← match a.source with
-    | some (.app "inference" #[.word r, _, .list premises]) => do
-      let some rule := ruleByName[r]?
-        | throw ⟨s!"step {a.name} names the inference rule {r}, which \
-            replay/VampireReplay/InferenceRule.lean does not have; rerun \
-            scripts/gen-inference-rules.py"⟩
-      let units := (← get).units
-      pure (rule, ← premises.mapM fun p => do resolve units "the premise" (← gtWord p), none)
-    | some (.app "file" #[_, n]) => pure (0, #[], some (← gtWord n))
-    | _ => bail s!"step {a.name} has no source"
+  -- The rule, the premises, and the information the source and the
+  -- annotation hold between them.
+  let (rule, parents, uses, placements, name, info) ← match a.source with
+    | some (.app "file" #[_, n]) => pure (0, #[], #[], #[], some (← gtWord n), a.info)
+    | some (.app "file" #[_]) => pure (0, #[], #[], #[], none, a.info)
+    | some (.app "introduced" #[.word _, .list items, .list #[]]) => do
+      let some (GT.word r) := items[0]? | bail s!"step {a.name} names no rule"
+      pure (← ruleNamed a.name r, #[], #[], #[], none, items.extract 1 items.size ++ a.info)
+    | some (.app "inference" #[.word r, .list items, .list premises]) => do
+      let (parents, uses, placements) ← buildParents a.name premises
+      pure (← ruleNamed a.name r, parents, uses, placements, none, items ++ a.info)
+    | _ => bail s!"step {a.name} has no source this format writes"
+  let rs := records info
   let .formula statement := a.body | bail s!"step {a.name} states no formula"
-  let mut u : UnitRec := { number := number.toUInt32, rule, isClause := a.language == "tcf", parents }
+  let mut u : UnitRec := { number := number.toUInt32, rule, isClause := a.language == "tcf",
+                           parents, uses, placements, name }
   if u.isClause then
-    -- A clause is quantified over its variables, in `varSorts`' order.
+    -- A clause is quantified over its variables, in `varSorts`' order, and
+    -- holds under the split names it denies, which come after its literals.
     let (varSorts, body) := match statement with
       | .quant true vars body => (vars, body)
       | f => (#[], f)
@@ -871,33 +1042,41 @@ private def buildUnit (a : Annotated) : B UnitRec := do
       | .junction false subs => subs
       | .const .false => #[]
       | f => #[f]
-    u := { u with varSorts, literals := ← lits.mapM (internLiteral (bindSorts {} varSorts)) }
+    let splitNames := (← get).splitNames
+    let isSplit : Fm → Bool
+      | .atom _ (.app n #[]) => splitNames.contains n
+      | _ => false
+    let own := lits.takeWhile (!isSplit ·)
+    let splits ← (lits.extract own.size lits.size).mapM fun
+      | .atom false (.app n #[]) => if splitNames.contains n then pure n
+          else bail s!"step {a.name} has a literal after its split names"
+      | .atom true (.app n #[]) => if splitNames.contains n then pure s!"~{n}"
+          else bail s!"step {a.name} has a literal after its split names"
+      | _ => bail s!"step {a.name} has a literal after its split names"
+    u := { u with varSorts, splits, literals := ← own.mapM (internLiteral (bindSorts {} varSorts)) }
   else
-    let varSorts ← match ← single rs "var_sorts" with
+    let varSorts ← match ← single rs "variable_sorts" with
       | some g => gtVarSorts g
       | none => pure #[]
     u := { u with varSorts, formula := ← internFormula (bindSorts {} varSorts) statement }
   if let some g ← single rs "bound_sorts" then u := { u with boundVarSorts := ← gtVarSorts g }
-  u := { u with name := fileName }
   if let some g ← single rs "input_name" then u := { u with name := some (← gtWord g) }
-  if let some g ← single rs "skolems" then
-    u := { u with skolems := ← (← gtList g).mapM fun s => do
-      let a ← gtArgs "skolem" 2 s
-      return (← gtU32 a[0]!, ← gtTerm a[1]!) }
-  if let some g ← single rs "uses" then
-    u := { u with uses := ← (← gtList g).mapM fun use => do
-      let a ← gtArgs "use" 7 use
-      return { premise := ← gtU32 a[0]!, literal := (← gtOptNat a[1]!).map (·.toUInt32)
-               term := ← gtOptTerm a[2]!, flags := ← gtU32 a[3]!
-               bindings := ← gtBindings a[4]!, other := ← gtOptTerm a[5]!
-               factor := ← gtOptTerm a[6]! } }
-  if let some g ← single rs "splits" then u := { u with splits := ← (← gtList g).mapM gtWord }
+  -- The first symbol it introduced, which the first list of symbols names
+  -- (vampire lists a split name it introduced in a list of its own).
+  let splitNames := (← get).splitNames
+  for item in info do
+    if let .app "new_symbols" #[_, .list syms] := item then
+      let syms ← syms.mapM gtWord
+      if u.introducedSymbol.isNone && !syms.any splitNames.contains then
+        u := { u with introducedSymbol := syms[0]? }
+    if let .app "skolemize" #[v, t] := item then
+      u := { u with skolems := u.skolems.push (← gtVar v, ← internTerm (← gtAsTerm t)) }
   if let some g ← single rs "sat_premise" then
     u := { u with satPremise := some (← resolve (← get).sats "the propositional clause" (← gtWord g)) }
   if let some g ← single rs "namings" then
     u := { u with namings := ← (← gtList g).mapM fun n => do
       let a ← gtArgs "naming" 3 n
-      return (← gtWord a[0]!, ← (← gtList a[1]!).mapM gtU32, ← gtFormula a[2]!) }
+      return (← gtWord a[0]!, ← (← gtList a[1]!).mapM gtVar, ← gtFormula a[2]!) }
   if let some g ← single rs "gen_clause" then
     u := { u with genClause := some (← resolve (← get).gens "the generalised clause" (← gtWord g)) }
   if let some g ← single rs "choices" then
@@ -908,34 +1087,40 @@ private def buildUnit (a : Annotated) : B UnitRec := do
     u := { u with congruences := ← (← gtList g).mapM congruenceStep }
   if let some g ← single rs "constraints" then
     u := { u with constraints := ← (← gtList g).mapM gtNat }
-  if let some g ← single rs "placements" then
-    u := { u with placements := ← (← gtList g).mapM fun p => do
-      let a ← gtArgs "placement" 3 p
-      return { position := ← gtNat a[0]!, use := ← gtNat a[1]!
-               entries := ← (← gtList a[2]!).mapM gtPlaced } }
   if let some g ← single rs "splitting_name" then u := { u with splittingName := some (← gtNat g) }
   if let some g ← single rs "literal_factors" then
     u := { u with literalFactors := some (← (← gtList g).mapM fun q => do
       let .num text := q | bail "expected a rational"
       let some r := rational text | bail s!"unreadable rational {text}"
       pure r) }
-  if let some g ← single rs "procedure" then u := { u with procedure := some (← gtNat g) }
+  if let some g ← single rs "procedure" then
+    u := { u with procedure := some (← match g with
+      | .word "theory_normalization" => pure .theoryNormalization
+      | .word "interpreted_evaluation" => pure .interpretedEvaluation
+      | .word "interpreted_evaluation_normalizing" => pure .interpretedEvaluationNormalizing
+      | .word "polynomial_evaluation" => pure .polynomialEvaluation
+      | .word "push_unary_minus" => pure .pushUnaryMinus
+      | .word "alasca_normalization" => pure .alascaNormalization
+      | .word "cancellation" => pure .cancellation
+      | .word "generalization" => pure .generalization
+      | .word "viras" => pure .viras
+      | .word "inequality_predicate_normalization" => pure .inequalityPredicateNormalization
+      | _ => bail s!"step {a.name} names an unknown literal procedure") }
   if let some g ← single rs "site" then u := { u with site := some (← gtWord g) }
   if let some g ← single rs "introduced" then
     u := { u with introduced := ← (← gtList g).mapM fun l => do
       let a ← gtArgs "lit" 2 l
       return (← gtNat a[0]!, ← gtOptNat a[1]!) }
   if let some g ← single rs "variant" then u := { u with variant := ← gtNat g }
-  if let some g ← single rs "introduced_symbol" then
-    u := { u with introducedSymbol := some (← gtWord g) }
   if let some g ← single rs "introduced_terms" then
     u := { u with introducedTerms := ← (← gtList g).mapM gtOptTerm }
   return u
 
-/-- A propositional literal: a component's name, `~` before it for its negation. -/
+/-- A propositional literal: a split name, `~` before it for its negation. -/
 private def satLiteral : Fm → B String
-  | .name n => pure n
-  | .atom false (.app "$$name" #[.app n #[]]) => pure s!"~{n}"
+  | .atom polarity (.app n #[]) => do
+    unless (← get).splitNames.contains n do bail s!"{n} is no split name"
+    pure (if polarity then n else s!"~{n}")
   | _ => bail "expected a propositional literal"
 
 private def buildSat (a : Annotated) : B SatRec := do
@@ -944,16 +1129,17 @@ private def buildSat (a : Annotated) : B SatRec := do
     | .junction false subs => subs
     | .const .false => #[]
     | f => #[f]
-  let (premises, origin) ← match a.source with
-    | some (.app "inference" #[.word "sat_resolution", _, .list ps]) => do
+  let (premises, origin, order) ← match a.source with
+    | some (.app "inference" #[.word "rat", _, .list ps]) => do
       let sats := (← get).sats
-      pure (← ps.mapM fun p => do resolve sats "the propositional clause" (← gtWord p), none)
-    | some (.app "inference" #[.word "sat_conversion", _, .list #[p]]) => do
-      pure (#[], some (← resolve (← get).units "the step" (← gtWord p)))
-    | _ => pure (#[], none)
-  let order ← match ← single (records a.info) "order" with
-    | some g => some <$> (← gtList g).mapM gtNat
-    | none => pure none
+      pure (← ps.mapM fun p => do resolve sats "the propositional clause" (← gtWord p), none, none)
+    | some (.app "inference" #[.word "sat_conversion", .list items, .list #[p]]) => do
+      let order ← match ← single (records items) "order" with
+        | some g => some <$> (← gtList g).mapM gtNat
+        | none => pure none
+      pure (#[], some (← resolve (← get).units "the step" (← gtWord p)), order)
+    | some (.word "unknown") => pure (#[], none, none)
+    | _ => bail s!"{a.name} has no source this format writes"
   return { literals := ← lits.mapM satLiteral, premises, origin, order }
 
 private def buildGen (a : Annotated) : B GenRec := do
@@ -969,9 +1155,15 @@ private def buildGen (a : Annotated) : B GenRec := do
     | .word "none" => pure none
     | g => some <$> resolve (← get).gens "the generalised clause" (← gtWord g)
   return {
-    parent, position := (← gtOptNat position).map (·.toUInt32), how := ← gtNat how
+    parent, position := (← gtOptNat position).map (·.toUInt32)
+    how := ← match how with
+      | .word "introduced" => pure .introduced
+      | .word "extended" => pure .extended
+      | .word "replaced" => pure .replaced
+      | .word "named" => pure .named
+      | _ => bail s!"{a.name} was reached in an unknown way"
     literals := ← signed lits, replacement := ← signed replacement
-    bindings := ← gtBindings bindings
+    bindings := ← (← gtList bindings).mapM gtBinding
     placements := ← (← gtList placements).mapM fun
       | .app "turned" #[g] => do return (← gtNat g, true)
       | g => do return (← gtNat g, false) }
@@ -981,6 +1173,11 @@ private def declare (symbol : String) (args : Array String) (result : String)
     (info : Array GT) : B PUnit := do
   if result == "$tType" then return
   let rs := records info
+  -- A split name is propositional and of no signature.
+  if rs.contains "split_name" then
+    unless result == "$o" && args.isEmpty do bail s!"the split name {symbol} is no proposition"
+    modify fun b => { b with splitNames := b.splitNames.insert symbol }
+    return
   let created ← match ← single rs "created" with
     | some g => gtNat g
     | none => pure 0
@@ -992,9 +1189,20 @@ private def declare (symbol : String) (args : Array String) (result : String)
       | none => pure none
     modify fun b => { b with predicates := b.predicates.modify i.toNat fun s =>
       { s with created, pure? } }
-  else
-    discard <| internFunctor { name := symbol, arity := args.size.toUInt32, created }
-    modify fun b => { b with resultSorts := b.resultSorts.insert (symbol, args.size) result }
+    return
+  -- ALASCA's multiplication by a numeral, which the declaration says is one:
+  -- the symbol vampire has, named as vampire names it.
+  let sym ← match ← single rs "lin_mul" with
+    | some (.fot (.num text)) => do
+      pure { (← numeral text (← numberSort text) true) with created }
+    | some (.fot (.app "$to_real" #[.num text])) => do
+      pure { (← numeral text "$real" true) with created }
+    | some _ => bail s!"{symbol} multiplies by something other than a numeral"
+    | none => pure { name := symbol, arity := args.size.toUInt32, created }
+  let i ← internFunctor sym
+  modify fun b => { b with
+    resultSorts := b.resultSorts.insert (symbol, args.size) result
+    declaredFunctors := b.declaredFunctors.insert (symbol, args.size) i }
 
 /-- Whether `name` is `prefix` followed by digits. -/
 private def numbered (name pre : String) : Bool :=
@@ -1096,22 +1304,14 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
     match (← field key).splitOn " " |>.mapM (·.toNat?) with
     | some ns => pure ns
     | none => Error.fail s!"malformed proof from the worker: its header's `{key}` is malformed"
-  let [v] ← nats "format" | Error.fail "malformed proof from the worker: its header's `format` is malformed"
-  if v != formatVersion then
-    Error.fail (s!"the worker writes proof format version {v}, but replay reads \
-      version {formatVersion}; run `lake build` to rebuild the worker")
-  -- Steps name their rules, so a rule added, removed or moved would be read
-  -- as itself; the count and fingerprint still say when the generated copy is
-  -- stale, before a step names a rule it lacks.
-  let [numRules, fingerprint] ← nats "rules"
-    | Error.fail "malformed proof from the worker: its header's `rules` is malformed"
-  let fingerprint := fingerprint.toUInt32
-  if numRules != InferenceRule.count || fingerprint != InferenceRule.fingerprint then
-    Error.fail (s!"the vampire the worker was built from declares \
-      {numRules} inference rules (fingerprint {fingerprint}), but \
-      replay/VampireReplay/InferenceRule.lean was generated for \
-      {InferenceRule.count} (fingerprint {InferenceRule.fingerprint}); rerun \
-      scripts/gen-inference-rules.py")
+  -- The proof states its format, so there is a version to check wherever
+  -- there is a proof; a result without one is the header alone.
+  if rs.contains "format" || !all.isEmpty then
+    let [v] ← nats "format"
+      | Error.fail "malformed proof from the worker: its header's `format` is malformed"
+    if v != formatVersion then
+      Error.fail (s!"the worker writes proof format version {v}, but replay reads \
+        version {formatVersion}; run `lake build` to rebuild the worker")
   let reason ← match ← field "termination" with
     | "refutation" => pure .refutation
     | "satisfiable" => pure .satisfiable
@@ -1123,9 +1323,9 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
     | "memory_limit" => pure .memoryLimit
     | "activation_limit" => pure .activationLimit
     | r => Error.fail s!"malformed proof from the worker: unknown termination reason {r}"
-  let units := all.filter (numbered ·.name "u")
-  let sats := all.filter (numbered ·.name "sat_")
-  let gens := all.filter (numbered ·.name "gen_")
+  let units := all.filter (numbered ·.name "f")
+  let sats := all.filter (numbered ·.name "s")
+  let gens := all.filter (numbered ·.name "g")
   let names (as : Array Annotated) : Std.HashMap String UInt32 :=
     as.zipIdx.foldl (init := {}) fun m (a, i) => m.insert a.name i.toUInt32
   let go : B (Array UnitRec × Array SatRec × Array GenRec × Option UInt32) := do
@@ -1747,11 +1947,8 @@ nothing replay could reconstruct, so the worker records it.
 -/
 def literalFactors? (u : Unit) : Option (Array (Int × Nat)) := u.r.literalFactors
 
-/--
-For a literal-wise simplification, which procedure rewrote it, as the worker
-numbers them (`InferenceStore::LiteralProcedure`); `none` for anything else.
--/
-def literalProcedure? (u : Unit) : Option Nat := u.r.procedure
+/-- For a literal-wise simplification, which procedure rewrote it; `none` for anything else. -/
+def literalProcedure? (u : Unit) : Option LiteralProcedure := u.r.procedure
 
 /-- The generalised clause this clause came out of, if clausification made it. -/
 def genClause? (u : Unit) : Option GenClause := u.r.genClause.map (⟨u.proof, ·⟩)
@@ -1822,25 +2019,8 @@ def replacement (c : GenClause) : Array (Formula × Bool) :=
 def bindings (c : GenClause) : Array (UInt32 × Term) :=
   c.r.bindings.map fun (v, t) => (v, ⟨c.proof, t⟩)
 
-/-- How a generalised clause state was reached. -/
-inductive GenHow where
-  /-- A clause clausification started from: the formula, or a definition. -/
-  | introduced
-  /-- A position replaced by `replacement`, the rest kept. -/
-  | extended
-  /-- A position rewritten in place: a quantifier's body, a let's contents. -/
-  | replaced
-  /-- A position rewritten in place by a name for what stood there. -/
-  | named
-deriving Inhabited, Repr, BEq
-
 /-- How the clause was reached. -/
-def how (c : GenClause) : GenHow :=
-  match c.r.how with
-  | 0 => .introduced
-  | 1 => .extended
-  | 2 => .replaced
-  | _ => .named
+def how (c : GenClause) : GenHow := c.r.how
 
 /--
 Where each literal the step pushed went in the clause, in the order it pushed

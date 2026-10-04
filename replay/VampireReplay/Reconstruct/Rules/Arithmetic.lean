@@ -97,9 +97,6 @@ private partial def rewriteAtoms (rewrite : Expr → ReconstructM (Expr × Expr)
         ← mkAppM ``exists_congr #[← mkLambdaFVars #[x] hb])
   | _ => rewrite e
 
-/-- The worker's number for ALASCA's strong normalization of comparisons. -/
-private def inequalityPredicateNormalization : Nat := 9
-
 /--
 ALASCA's strong normalization of comparisons: `s ≥ t` as `s > t ∨ s = t`, and
 `s ≠ t` as `s > t ∨ t > s`, every other literal carried. The two literals each
@@ -178,7 +175,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
   -- ALASCA's strong normalization of comparisons shares the rule and can make
   -- two literals of one, which it records with the literal they were made of
   -- (`strongNormalization`).
-  if step.unit.literalProcedure? == some inequalityPredicateNormalization then
+  if step.unit.literalProcedure? == some .inequalityPredicateNormalization then
     return ← strongNormalization step
   let some procedure := step.unit.literalProcedure?.bind LiteralRewrite.ofRecorded?
     | throwError "step {step.unit.number} ({step.rule.name}) recorded no procedure"

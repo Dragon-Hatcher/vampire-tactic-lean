@@ -211,9 +211,10 @@ built worker is made of and what each piece is under.
   precompiled and so run as native code rather than in the interpreter, which
   is worth about three times the replay; that is possible only because none of
   it imports Mathlib, what needs Mathlib being handed in rather than called.
-- `worker/` — the C++ program that runs one proof attempt and writes the
-  derivation out as TSTP, with what the fork records of each step in its
-  useful information.
+- `worker/` — the C++ program that runs one proof attempt and writes out the
+  proof vampire gives under `--proof tptp --proof_extra full`: TSTP, with what
+  the fork records of each step in it (the fork's `Kernel/TPTPProofExtra.hpp`
+  describes the format).
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
   from SMT-LIB, each with the original beside its Lean statement. Development
   only; not needed to use the tactic.

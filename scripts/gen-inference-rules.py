@@ -8,12 +8,11 @@ lakefile.lean chooses it: `$VAMPIRE_DIR` if set, then a sibling `vampire-fork/`
 if there is one, and otherwise the pinned revision Lake fetched into
 `.lake/build/vampire`.
 
-The rules are read the way worker/CMakeLists.txt reads them: the enum's body
-runs to the first line starting with `};`, and a rule is a line holding an
-upper-case name followed by a comma, so the closing `GENERIC_THEORY_AXIOM_LAST`
-marker is not one.
+The enum's body runs to the first line starting with `};`, and a rule is a
+line holding an upper-case name followed by a comma, so the closing
+`GENERIC_THEORY_AXIOM_LAST` marker is not one. The name a TPTP proof writes
+each rule by is read from `Kernel::ruleName` in Kernel/Inference.cpp.
 """
-import hashlib
 import os
 import re
 import subprocess
@@ -68,9 +67,41 @@ def main() -> int:
     if len(names) != len(set(names)):
         print("InferenceRule has duplicate names", file=sys.stderr)
         return 1
-    # The worker hashes the names the same way, in `worker/CMakeLists.txt`, so
-    # that rules trading places are noticed as well as rules being added.
-    fingerprint = hashlib.sha256(",".join(names).encode()).hexdigest()[:8]
+    # The name each rule is written by in a TPTP proof: vampire's name for it
+    # (`Kernel::ruleName`), with `_` for its spaces. The markers that bound
+    # the enum's ranges share one, and no proof names them; any other rule
+    # has to have a name of its own, or a proof could not say which it is.
+    source = open(f"{root}/Kernel/Inference.cpp").read().splitlines()
+    try:
+        start = next(i for i, l in enumerate(source)
+                     if l.startswith("std::string Kernel::ruleName(InferenceRule rule)"))
+    except StopIteration:
+        print(f"could not find ruleName in {root}/Kernel/Inference.cpp", file=sys.stderr)
+        return 1
+    end = next(i for i in range(start + 1, len(source)) if source[i].startswith("}"))
+    display, pending = {}, []
+    for line in source[start:end]:
+        pending += re.findall(r"case InferenceRule::(\w+):", line)
+        returned = re.search(r'return "([^"]*)"', line)
+        if returned:
+            for rule in pending:
+                display[rule] = returned.group(1).replace(" ", "_")
+            pending = []
+    missing = [n for n in names if n not in display]
+    if missing:
+        print(f"ruleName gives no name to {missing}", file=sys.stderr)
+        return 1
+    sharing = {}
+    for n in names:
+        sharing.setdefault(display[n], []).append(n)
+    marker = lambda n: n.startswith("GENERIC_")
+    tptp = {}
+    for shown, rules in sharing.items():
+        if len(rules) == 1:
+            tptp[rules[0]] = shown
+        elif not all(marker(r) for r in rules):
+            print(f"ruleName gives {rules} the one name {shown!r}", file=sys.stderr)
+            return 1
     commit = subprocess.run(
         ["git", "-C", root, "rev-parse", "--short", "HEAD"],
         capture_output=True, text=True,
@@ -91,15 +122,6 @@ def main() -> int:
         "",
         "namespace InferenceRule",
         "",
-        f"/-- How many rules vampire declares. -/",
-        f"def count : Nat := {len(names)}",
-        "",
-        "/--",
-        "The first four bytes of the SHA-256 of the rules' names in order, joined",
-        "by commas: what the worker reports of the vampire it was built from.",
-        "-/",
-        f"def fingerprint : UInt32 := 0x{fingerprint}",
-        "",
         "/-- The rules, indexed as vampire numbers them. -/",
         "def all : Array InferenceRule :=",
         "  #[" + ", ".join("." + camel(n) for n in names) + "]",
@@ -109,6 +131,23 @@ def main() -> int:
     ]
     out += [f"  | .{camel(n)} => \"{n.lower()}\"" for n in names]
     out += [
+        "",
+        "/--",
+        "The name a TPTP proof writes the rule by, vampire's name for it with `_`",
+        "for its spaces; `none` for the markers that bound the rules' ranges.",
+        "-/",
+        "def tptpName? : InferenceRule → Option String",
+    ]
+    out += [f"  | .{camel(n)} => " + (f"some \"{tptp[n]}\"" if n in tptp else "none")
+            for n in names]
+    out += [
+        "",
+        "/-- The rule a TPTP proof names. -/",
+        "def ofTptpName? : String → Option InferenceRule",
+    ]
+    out += [f"  | \"{tptp[n]}\" => some .{camel(n)}" for n in names if n in tptp]
+    out += [
+        "  | _ => none",
         "",
         "instance : ToString InferenceRule := ⟨name⟩",
         "",
