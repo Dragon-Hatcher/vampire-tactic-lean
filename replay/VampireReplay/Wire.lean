@@ -162,6 +162,12 @@ deriving Inhabited
 /-- What an annotated formula states: a formula, or a symbol's type. -/
 inductive Body where
   | formula (f : Fm)
+  /--
+  A state of the new clausifier: its variables, and the disjuncts of its one
+  parenthesised disjunction, each as written -- one that is a disjunction is
+  one disjunct, in parentheses of its own.
+  -/
+  | disjuncts (vars : Array (UInt32 × String)) (items : Array Fm)
   | type (symbol : String) (args : Array String) (result : String)
 deriving Inhabited
 
@@ -428,6 +434,36 @@ private def typeDecl : M Body := do
     return .type symbol #[s] (← word)
   return .type symbol #[] s
 
+/--
+A new-clausifier state's statement, `! [X0: s, ...] : (D1 | ... | Dn)` or
+`$false`, read as written: the parenthesised disjunction's disjuncts are the
+state's guards and subformulas, which reading it as a formula would merge
+where one of them is a disjunction.
+-/
+private def stateBody : M Body := do
+  skipWs
+  let mut vars := #[]
+  if (← peek) == '!'.toUInt8 && (← peekAt 1) != '='.toUInt8 then
+    advance
+    expect "["
+    vars ← sepBy typedVariable "]"
+    expect "]"
+    expect ":"
+  if ← lookingAt "$false" then
+    expect "$false"
+    return .disjuncts vars #[]
+  expect "("
+  let mut items := #[← unitary]
+  while ← lookingAt "|" do
+    expect "|"
+    items := items.push (← unitary)
+  expect ")"
+  return .disjuncts vars items
+
+/-- Whether `name` is `prefix` followed by digits. -/
+private def numbered (name pre : String) : Bool :=
+  name.startsWith pre && (String.ofList (name.toList.drop pre.length)).toNat?.isSome
+
 private def annotated : M Annotated := do
   let language ← word
   expect "("
@@ -435,7 +471,10 @@ private def annotated : M Annotated := do
   expect ","
   let role ← word
   expect ","
-  let body ← if role == "type" then typeDecl else Body.formula <$> unitary
+  -- The format names the new clausifier's states `gN`, and no other step.
+  let body ← if role == "type" then typeDecl
+    else if numbered name "g" then stateBody
+    else Body.formula <$> unitary
   let mut source := none
   let mut info := #[]
   if ← lookingAt "," then
@@ -1142,29 +1181,64 @@ private def buildSat (a : Annotated) : B SatRec := do
     | _ => bail s!"{a.name} has no source this format writes"
   return { literals := ← lits.mapM satLiteral, premises, origin, order }
 
+/--
+One of the new clausifier's states, from its step: its statement's disjuncts
+are its guards and then its subformulas, the guards `X != t` its bindings, as
+many as `bound` lists, and a subformula `~ (F)` is `F` negative -- a positive
+one is never written as a negation.
+-/
 private def buildGen (a : Annotated) : B GenRec := do
-  let some #[parent, position, how, lits, replacement, bindings, placements] :=
-      (records a.info)["gen_state"]?
-    | bail s!"{a.name} is no generalised clause"
+  let .disjuncts vars disjuncts := a.body | bail s!"{a.name} states no generalised clause"
+  let (parent, items) ← match a.source with
+    | some (.app "inference" #[.word "clausification_step", .list items, .list #[p]]) => do
+      let name ← gtWord p
+      -- The parent state, or the step the first state was inferred from.
+      match (← get).gens[name]? with
+      | some i => pure (some i, items)
+      | none => do
+        discard <| resolve (← get).units "the step" name
+        pure (none, items)
+    | some (.app "introduced" #[.word "definition", .list items, .list #[]]) => do
+      let some (.word "clausification_step") := items[0]?
+        | bail s!"{a.name} is introduced, but not by clausification"
+      pure (none, items.extract 1 items.size)
+    | _ => bail s!"{a.name} is no clausification step"
+  let rs := records items
+  let how : GenClause.GenHow ← match items.find? (fun | .word _ => true | _ => false) with
+    | some (.word "introduced") => pure .introduced
+    | some (.word "extended") => pure .extended
+    | some (.word "replaced") => pure .replaced
+    | some (.word "named") => pure .named
+    | _ => bail s!"{a.name} was reached in an unknown way"
+  let position ← match ← single rs "position" with
+    | some g => some <$> gtU32 g
+    | none => pure none
+  let bound ← match ← single rs "bound" with
+    | some g => (← gtList g).mapM gtVar
+    | none => pure #[]
+  let some replacement ← single rs "replacement" | bail s!"{a.name} records no replacement"
+  let some placed ← single rs "placed" | bail s!"{a.name} records no placements"
+  let env := bindSorts {} vars
+  if disjuncts.size < bound.size then
+    bail s!"{a.name} has fewer disjuncts than the variables it binds"
+  let bindings ← (bound.zip (disjuncts.extract 0 bound.size)).mapM fun (p : UInt32 × Fm) =>
+    match p with
+    | (v, .eq false (.var v') t) => do
+      unless v == v' do bail s!"{a.name}'s guard for X{v} is not where it is listed"
+      return (v, ← internTerm t)
+    | (v, _) => bail s!"{a.name} has no guard for X{v}"
+  let literals ← (disjuncts.extract bound.size disjuncts.size).mapM fun (d : Fm) =>
+    match d with
+    | .not f => do return (← internFormula env f, false)
+    | f => do return (← internFormula env f, true)
   let signed (g : GT) : B (Array (UInt32 × Bool)) := do
     (← gtList g).mapM fun
       | .app "pos" #[f] => do return (← gtFormula f, true)
       | .app "neg" #[f] => do return (← gtFormula f, false)
       | _ => bail "expected a signed formula"
-  let parent ← match parent with
-    | .word "none" => pure none
-    | g => some <$> resolve (← get).gens "the generalised clause" (← gtWord g)
   return {
-    parent, position := (← gtOptNat position).map (·.toUInt32)
-    how := ← match how with
-      | .word "introduced" => pure .introduced
-      | .word "extended" => pure .extended
-      | .word "replaced" => pure .replaced
-      | .word "named" => pure .named
-      | _ => bail s!"{a.name} was reached in an unknown way"
-    literals := ← signed lits, replacement := ← signed replacement
-    bindings := ← (← gtList bindings).mapM gtBinding
-    placements := ← (← gtList placements).mapM fun
+    parent, position, how, literals, replacement := ← signed replacement, bindings
+    placements := ← (← gtList placed).mapM fun
       | .app "turned" #[g] => do return (← gtNat g, true)
       | g => do return (← gtNat g, false) }
 
@@ -1203,10 +1277,6 @@ private def declare (symbol : String) (args : Array String) (result : String)
   modify fun b => { b with
     resultSorts := b.resultSorts.insert (symbol, args.size) result
     declaredFunctors := b.declaredFunctors.insert (symbol, args.size) i }
-
-/-- Whether `name` is `prefix` followed by digits. -/
-private def numbered (name pre : String) : Bool :=
-  name.startsWith pre && (String.ofList (name.toList.drop pre.length)).toNat?.isSome
 
 /--
 Checks every position that picks out a clause's literal, a formula's
