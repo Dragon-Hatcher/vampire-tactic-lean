@@ -13,7 +13,7 @@ implication its polarity calls for.
 
 A pure predicate is never under an equivalence: an occurrence there counts as
 one of either polarity. Predicates are found pure one after another, and each
-step replaces those found before it was made: the worker records which
+step replaces those found before it was made: vampire records which
 predicates were replaced, by what, and in which order.
 -/
 

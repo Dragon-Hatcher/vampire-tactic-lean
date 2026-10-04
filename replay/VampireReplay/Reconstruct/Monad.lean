@@ -9,7 +9,7 @@ open Lean Meta
 /--
 The procedures that rewrite a clause a literal at a time -- each literal
 becomes one literal of the conclusion or is found false and dropped. Which one
-rewrote a clause the worker records: the inference rule does not say, since
+rewrote a clause vampire records: the inference rule does not say, since
 evaluation is whichever of three evaluators the options chose.
 
 * `theoryNormalization` (`InterpretedNormalizer`).

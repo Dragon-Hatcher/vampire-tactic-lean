@@ -178,7 +178,7 @@ theorem coh_rewrite {X Y I w : α} (i : ℤ) (hI : (i : α) = I) (hw : ∃ n : �
 variables `X0`, `X1`, ... it numbers itself. Each lemma here states one, its
 disjuncts in the order the axiom lists its literals and its arguments the
 variables in the order of their numbers, so that replay instantiates it at the
-clause's variables and places each disjunct where the worker recorded the
+clause's variables and places each disjunct where vampire recorded the
 axiom's literal went.
 -/
 

@@ -228,8 +228,8 @@ def interpreted (name : String) (args : Array Expr) :
     if (← inferType a).isConstOf ``Int then return some a
     return some (← mkAppM `Int.floor #[a])
   | _ =>
-    -- A numeral, whose value the worker read off vampire's signature rather
-    -- than leaving it to be parsed out of how the symbol is printed.
+    -- A numeral, whose value vampire wrote from its signature as TPTP writes
+    -- numbers, rather than leaving it to be parsed out of the symbol's name.
     let some n := (← read).numerals[(name, args.size)]? | return none
     let numeralAt (τ : Expr) : ReconstructM Expr := do
       if n.denominator == 1 then return ← wholeNumeral τ n.numerator

@@ -79,7 +79,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .closure => Congruence.restated step
   | .theoryNormalization => Arithmetic.literalwise step
   -- A disequality whose sides unify dropped, the unifier only renaming what
-  -- is left; the worker records it as equality resolution at that unifier.
+  -- is left; vampire records it as equality resolution at that unifier.
   | .subsumptionEqualityResolution =>
     Resolution.equalityResolutionWithDeletion step
   -- Backward demodulation builds its conclusion with the forward rule's name;

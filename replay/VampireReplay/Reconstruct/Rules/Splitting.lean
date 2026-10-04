@@ -150,7 +150,7 @@ def general (step : Step) : ReconstructM Expr := do
     withDisjunction parts fun d => do
     -- What the name denies, at the variables it is applied to.
     let quantified ← halfHolds split rest vars
-    -- The conclusion denies the name, where the worker recorded it; the rest
+    -- The conclusion denies the name, where vampire recorded it; the rest
     -- of it is the other half.
     let some i := step.unit.splittingName?
       | throwError "general splitting step {step.unit.number} does not record \

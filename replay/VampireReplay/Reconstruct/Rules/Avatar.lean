@@ -50,7 +50,7 @@ def component (step : Step) : ReconstructM Expr := do
   -- builds by pushing the clause's literals onto a list, so the two disagree
   -- over the order of the literals and over which variable is bound where.
   -- Both speak of vampire's variables, though, so the binders can be paired by
-  -- the variable each stands for, and each literal placed where the worker
+  -- the variable each stands for, and each literal placed where vampire
   -- recorded it went.
   let some definition := parent.formula?
     | throwError "an avatar component clause's definition states no formula"
@@ -286,7 +286,7 @@ private def satClause (states : Stated)
       -- Which of the propositional clause's literals each of the first-order
       -- one's became: a formula's disjuncts are named formulas (`Splitter`),
       -- each named as one of the literals is; a clause's are sorted by the
-      -- conversion, and the worker wrote down which is which.
+      -- conversion, and vampire wrote down which is which.
       let order ← match origin.formula?, c.originOrder? with
         | some f, _ => do
           let connective ← connectiveOf f
@@ -403,7 +403,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     -- How many times each name has been met, so that a component named twice
     -- takes its two renamings in turn.
     let mut met : Std.HashMap String Nat := {}
-    -- Which clause literal each component literal is, as the worker recorded
+    -- Which clause literal each component literal is, as vampire recorded
     -- it under the component's renaming: that literal is refuted by that
     -- negation, with nothing to look for.
     let mut negationAt : Std.HashMap Nat (Expr × Expr × Bool × Bool) := {}
@@ -474,13 +474,13 @@ def splitClause (step : Step) : ReconstructM Expr := do
       | throwError "an avatar split clause splits {parent}, which is not a clause"
     let clauseParts ← countedParts ``Or instantiated clause.size
     let contradiction ← elimGiven clauseParts (fun i hl => do
-      -- Each of the clause's literals is a component's, where the worker
+      -- Each of the clause's literals is a component's, where vampire
       -- recorded it went, turned round where it said so.
       let some (part, negation, flipped, negatedName) := negationAt[i]?
-        | throwError "the worker placed no component's literal at literal {i} of the \
+        | throwError "vampire placed no component's literal at literal {i} of the \
             clause {parent}, whose components are {disjuncts}"
       let some hl ← (if flipped then flipEquality hl else pure (some hl))
-        | throwError "the worker recorded literal {i} of {parent} as turned round, but it \
+        | throwError "vampire recorded literal {i} of {parent} as turned round, but it \
             is no equation"
       let literal ← instantiateMVars (← inferType hl)
       if part == literal then

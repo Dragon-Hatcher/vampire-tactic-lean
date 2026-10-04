@@ -43,7 +43,7 @@ def unfolded (step : Step) : ReconstructM Expr := do
     | throwError "{step.rule.name} should have at least one premise, got none"
   let some parent := step.unit.parents[0]?
     | throwError "{step.rule.name} should have at least one premise, got none"
-  -- Folding a clause rewrites each literal where it stands, and the worker
+  -- Folding a clause rewrites each literal where it stands, and vampire
   -- records which: a folded literal is the premise's through the names.
   if parent.clause?.isSome then
     return ← step.underVars fun kept target => do

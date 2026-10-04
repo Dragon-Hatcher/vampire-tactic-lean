@@ -5,7 +5,7 @@ Rules that leave a clause's literals alone but for dropping, repeating or
 reorienting them.
 
 Each comes to the same thing: every literal of the premise is a literal of the
-conclusion, or is refutable on its own, and the worker records where each went
+conclusion, or is refutable on its own, and vampire records where each went
 (`relateLiterals`), so nothing is searched for and nothing is rederived.
 -/
 
@@ -52,7 +52,7 @@ def condensation (step : Step) : ReconstructM Expr := do
     let (premiseAt, premiseType) ←
       instantiateAt parent use vars premiseProof premiseStated
     -- Every literal of the instance is one of the conclusion's, the two that
-    -- were unified having become one of them, where the worker recorded.
+    -- were unified having become one of them, where vampire recorded.
     carryAll premiseType target premiseAt (placed := step.placedAt 0)
       (sourceCount := parent.clauseSize?) (targetCount := step.unit.clauseSize?)
 

@@ -5,7 +5,7 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
-Where each literal of a premise went in the conclusion, as the worker recorded
+Where each literal of a premise went in the conclusion, as vampire recorded
 it: `Unit.placement?`.
 -/
 abbrev Placement := Array (Option (Nat × Bool))
@@ -42,27 +42,27 @@ def withInto (target : Expr) (count : Option Nat) (k : Into → ReconstructM Exp
   withDisjunction (← clauseLiterals target count) k
 
 /--
-A premise's `i`th literal placed where the worker recorded it went, turned
-round if it was. The worker records where every literal of a clause premise
+A premise's `i`th literal placed where vampire recorded it went, turned
+round if it was. Vampire records where every literal of a clause premise
 went; one it recorded as going nowhere the step acted on or dropped, which is
 for the rule to prove, not for this to look for.
 -/
 def Into.placeAt (into : Into) (placed : Option Placement) (i : Nat) (h : Expr) :
     ReconstructM Expr := do
   let some placement := placed
-    | throwError "the worker recorded no placement of the premise's literals"
+    | throwError "vampire recorded no placement of the premise's literals"
   let some (some (k, flipped)) := placement[i]?
-    | throwError "the worker recorded literal {i} as none of the conclusion's: the step \
+    | throwError "vampire recorded literal {i} as none of the conclusion's: the step \
         acted on it, which the rule has to say what of"
   let some h ← (if flipped then flipEquality h else pure (some h))
-    | throwError "the worker recorded literal {i} as turned round, but\
+    | throwError "vampire recorded literal {i} as turned round, but\
         {indentExpr (← instantiateMVars (← inferType h))}\nis no equality"
   let some part := into.parts[k]?
-    | throwError "the worker placed literal {i} at literal {k} of a conclusion of \
+    | throwError "vampire placed literal {i} at literal {k} of a conclusion of \
         {into.parts.size}"
   let stated ← instantiateMVars (← inferType h)
   unless stated == part do
-    throwError "the worker placed{indentExpr stated}\nat literal {k} of the \
+    throwError "vampire placed{indentExpr stated}\nat literal {k} of the \
       conclusion, which is{indentExpr part}"
   return into.inject k h
 
@@ -78,7 +78,7 @@ def elimLiterals (source : Expr) (count : Option Nat)
 
 /--
 `target` from a proof of `source`, whose literals the step carried into it:
-`carried i h` says what the `i`th gives, which is put where the worker
+`carried i h` says what the `i`th gives, which is put where vampire
 recorded it went (`placed`).
 -/
 def carryWith (source target proof : Expr) (into : Into)
@@ -90,7 +90,7 @@ def carryWith (source target proof : Expr) (into : Into)
 
 /--
 `target` from a proof of `source`, a clause whose literals the step carried,
-but for those the worker recorded as rewritten (`recordRewritten`): `rewrite h
+but for those vampire recorded as rewritten (`recordRewritten`): `rewrite h
 wanted` proves `wanted`, the conclusion's literal stated the way round the
 premise's is, from `h`, the premise's.
 -/
@@ -102,7 +102,7 @@ def carryRewritten (source target proof : Expr) (into : Into) (placement : Place
       unless rewritten[k]?.getD false do return h
       let some (some (j, flipped)) := placement[k]? | return h
       let some part := into.parts[j]?
-        | throwError "the worker placed literal {k} at literal {j} of a conclusion of \
+        | throwError "vampire placed literal {k} at literal {j} of a conclusion of \
             {into.parts.size}"
       let wanted ← if flipped then turnedRound part else pure part
       rewrite h wanted
@@ -110,7 +110,7 @@ where
   /-- An equality literal the other way round. -/
   turnedRound (e : Expr) : ReconstructM Expr := do
     let some (_, a, b, negated) := equalityLiteral? e
-      | throwError "the worker recorded{indentExpr e}\nas turned round, but it is no equation"
+      | throwError "vampire recorded{indentExpr e}\nas turned round, but it is no equation"
     let eq ← mkEq b a
     return if negated then mkNot eq else eq
 

@@ -425,7 +425,7 @@ def inequalitySplittingName (step : Step) : ReconstructM Expr := do
 
 /--
 `target` from a clause premise whose literals the step carried, except those
-the worker recorded as rewritten into an application of a name it introduced
+vampire recorded as rewritten into an application of a name it introduced
 -- `p(s)` for `s ≠ t`, `Q(s, t)` for `s = t` -- which is what the name unfolds
 to: each such literal is the premise's, read through the name.
 -/

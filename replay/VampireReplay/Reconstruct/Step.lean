@@ -168,7 +168,7 @@ The premise in position `i` among a step's parents, and how many times the
 step took that same premise before there.
 
 A premise can be used twice -- an inference can take a clause as both of its
-premises -- so what the worker recorded of a use is found by position rather
+premises -- so what vampire recorded of a use is found by position rather
 than by which premise it is: the uses of a premise are recorded in the order
 the step took them, and this says which of them is the one in position `i`.
 -/
@@ -191,13 +191,13 @@ def Step.useAt (step : Step) (i : Nat) : ReconstructM PremiseUse := do
 
 /--
 Where the literals of the premise in position `i` went in the conclusion, as
-the worker recorded it under the use `useAt i` reads: `none` where nothing was.
+vampire recorded it under the use `useAt i` reads: `none` where nothing was.
 -/
 def Step.placedAt (step : Step) (i : Nat) : Option Placement := do
   let (_, earlier) ← step.occurrence? i
   step.unit.placement? i earlier
 
-/-- Which literals of the premise in position `i` the step rewrote, as the worker recorded. -/
+/-- Which literals of the premise in position `i` the step rewrote, as vampire recorded. -/
 def Step.rewrittenAt (step : Step) (i : Nat) : Option (Array Bool) := do
   let (_, earlier) ← step.occurrence? i
   step.unit.rewritten? i earlier
@@ -274,9 +274,9 @@ def relateLiterals (step : Step) (position : Nat) (parent : Vampire.Unit)
     -- Dropping a literal can drop the last occurrence of a variable with it.
     let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
     let sourceParts ← source.literals.mapM (literal vars)
-    -- Where the worker recorded each literal went, which is where it goes.
+    -- Where vampire recorded each literal went, which is where it goes.
     let some placed := step.placedAt position
-      | throwError "step {step.unit.number}: the worker recorded no placement of \
+      | throwError "step {step.unit.number}: vampire recorded no placement of \
           step {parent.number}'s literals"
     -- The conclusion's literals, by the count of them: a literal can itself be
     -- a disjunction, which taking the clause apart by its shape would split.
@@ -288,7 +288,7 @@ def relateLiterals (step : Step) (position : Nat) (parent : Vampire.Unit)
         -- `t ≠ t` is.
         if let some refuted ← refuteDropped? target h then return refuted
         throwError "the literal{indentExpr (← instantiateMVars (← inferType h))}\n\
-          the worker recorded as dropped is not refutable on its own")
+          vampire recorded as dropped is not refutable on its own")
         (mkAppN premiseProof args)
 
 /--

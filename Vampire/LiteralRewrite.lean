@@ -6,7 +6,7 @@ The literal-wise simplifications: theory normalization, the three evaluations,
 ALASCA normalization, cancellation and arithmetic subterm generalization, and
 VIRAS quantifier elimination.
 
-Each rewrites a clause a literal at a time, and the worker records which
+Each rewrites a clause a literal at a time, and vampire records which
 literal of the conclusion each literal of the premise became, and which
 procedure rewrote it. Each procedure is ported (`LiteralRewrite.Interpreted`,
 `LiteralRewrite.Polynomial`, `LiteralRewrite.Viras`): the port works out what

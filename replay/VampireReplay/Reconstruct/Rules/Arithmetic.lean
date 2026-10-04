@@ -8,10 +8,10 @@ are the steps whose conclusion replay has to prove for itself. Two kinds:
 
 * The literal-wise simplifications -- evaluation, theory normalization, ALASCA
   normalization, cancellation -- rewrite each literal into one literal, or find
-  it false. The worker records which literal each became, and each rewrite is
+  it false. Vampire records which literal each became, and each rewrite is
   proved by exactly the rewrites its rule makes (`Context.literalIff`).
 * The rest -- theory axioms and ALASCA's inferences -- are certified by lemmas
-  of `Vampire.Lemmas`, instantiated at the terms the worker recorded (see
+  of `Vampire.Lemmas`, instantiated at the terms vampire recorded (see
   *Steps certified by a lemma*).
 -/
 
@@ -145,14 +145,14 @@ def strongNormalization (step : Step) : ReconstructM Expr := do
 
 /--
 A literal-wise simplification: each literal of the premise became the literal
-of the conclusion the worker recorded, by the rewrites of the procedure it
+of the conclusion vampire recorded, by the rewrites of the procedure it
 recorded, or was found false and dropped.
 
 A literal the procedure gave back as it was is the conclusion's as it stands,
 whatever the procedure would make of it: a rule applies its procedure only
 where it changes something (`tryCancel` passes over what compares no numbers,
 polynomial evaluation over a literal nothing in which evaluates). Vampire's
-test is that the result is the literal itself; the worker writes each literal
+test is that the result is the literal itself; vampire writes each literal
 once, so the premise's literal and its image being one literal on the wire is
 that test.
 
@@ -216,7 +216,7 @@ def literalwise (step : Step) : ReconstructM Expr := do
 /--
 `alasca_viras_qe`: VIRAS eliminated a variable `x` from the premise, taking a
 virtual term for it -- a term, a term and an infinitesimal, or the order's
-bottom -- in each literal it reads. The worker records the variable (as a
+bottom -- in each literal it reads. Vampire records the variable (as a
 term the step acted on) and what each premise literal became.
 
 Suppose the conclusion fails: each of its literals does. `virasRefute` finds
@@ -281,7 +281,7 @@ private def ringOf (step : Step) (a b : Expr) : ReconstructM Expr := do
 ALASCA's rules about integers -- that a term is one, and what a floor does --
 hold by facts about the integers that no procedure over an ordered field
 knows. Each is certified by a lemma of `Vampire.Lemmas`, stated the way the
-rule writes its conclusion, instantiated at the terms the worker recorded, and
+rule writes its conclusion, instantiated at the terms vampire recorded, and
 related to the step's literals by ring arithmetic (`ringEqual`) and the
 evaluation of closed facts about numerals (`Context.numerically`) alone: no
 decision procedure runs. Replay is precompiled and does not import the lemmas;
@@ -331,7 +331,7 @@ private def integerOf (fact w : Expr) : ReconstructM (Option Expr) := do
   return some (← mkAppM lemma_ #[fact, ← positive c, he])
 
 /--
-`integerOf` `j s + u`, as the worker recorded it of a premise: negated where
+`integerOf` `j s + u`, as vampire recorded it of a premise: negated where
 vampire's coefficient of `s` was negative, `j` being its absolute value.
 -/
 private def integerAsRecorded (use : PremiseUse) (fact w : Expr) : ReconstructM (Option Expr) := do
@@ -341,7 +341,7 @@ private def integerAsRecorded (use : PremiseUse) (fact w : Expr) : ReconstructM 
 
 /--
 `leaf` in each case of the step's premises: each premise holds, so one of its
-literals does. A literal the worker recorded as carried is placed where it
+literals does. A literal vampire recorded as carried is placed where it
 went, and `leaf` is given the others, one of each premise, in their order.
 -/
 private partial def premiseCases (step : Step) (premises : Array (Expr × Expr)) (target : Expr)
@@ -358,7 +358,7 @@ private partial def premiseCases (step : Step) (premises : Array (Expr × Expr))
         go (facts.push (← plainly h)) (i + 1)) proof
   go #[] 0
 
-/-- The terms the worker recorded of the step's `i`th premise, as the step used it. -/
+/-- The terms vampire recorded of the step's `i`th premise, as the step used it. -/
 private def recordedTerms (step : Step) (vars : Vars) (i : Nat) :
     ReconstructM (Option Expr × Option Expr) := do
   let some parent := step.unit.parents[i]?
@@ -375,7 +375,7 @@ rule with `isInt(⌊x⌋)` for its third premise:
     ─────────────────────────────────────────────────
     t₀' + t₁' > 0  ∨  s + t₀' = 0
 
-`Vampire.Lemmas.ifm_*` instantiated at the terms the worker recorded -- `k₀ s`
+`Vampire.Lemmas.ifm_*` instantiated at the terms vampire recorded -- `k₀ s`
 and `t₀`, `-k₁ s` and `t₁`, `u` and `j`. Each floor the lemmas state is the
 conclusion's own, found in it, so that the relation is one of terms over the
 same atoms.
@@ -425,7 +425,7 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
       if stated.isAppOfArity ``LE.le 4 then return (false, stated.appArg!)
       throwError "step {step.unit.number}: a premise's literal{indentExpr stated}\n\
         is no comparison with zero"
-    -- The floors the lemmas speak of, which the worker recorded of the
+    -- The floors the lemmas speak of, which vampire recorded of the
     -- conclusion: the floor each strengthened side's ceiling is made of.
     let floorOf (i : Nat) (wanted : Expr) : ReconstructM Expr := do
       let some (some recorded) := step.unit.introducedTerms[i]?
@@ -472,7 +472,7 @@ def integerFourierMotzkin (step : Step) : ReconstructM Expr := do
           throwError "step {step.unit.number}: the lemmas joined to no disjunction"
         let sum := joinedType.appFn!.appArg!.appArg!
         let lhs := joinedType.appArg!.appFn!.appArg!
-        -- Each disjunct is one of the two literals the worker recorded the
+        -- Each disjunct is one of the two literals vampire recorded the
         -- step built, the comparison first, up to the ring.
         let builtPart (j : Nat) : ReconstructM (Nat × Expr) := do
           let some i := step.unit.introduced[j]?
@@ -570,7 +570,7 @@ def coherenceNormalization (step : Step) : ReconstructM Expr := do
     withInto target step.unit.clauseSize? fun into => do
       premiseCases step premises target into fun facts => do
         let h := facts[0]!
-        -- The literal it built, where the worker recorded it, and which of its
+        -- The literal it built, where vampire recorded it, and which of its
         -- sides is the floor of the other.
         let some i := step.unit.introduced[0]?
           | throwError "step {step.unit.number} recorded no literal it built"
@@ -616,7 +616,7 @@ ALASCA's coherence:
     ──────────────────────────────────────
     C ∨ D ∨ L[⌊k s + t - i (j s + u)⌋ + i (j s + u)]
 
-for an integer `i`. `Vampire.Lemmas.coh_rewrite` at the terms the worker
+for an integer `i`. `Vampire.Lemmas.coh_rewrite` at the terms vampire
 recorded -- `j s + u` and `i` of the first premise, the floor rewritten of the
 second -- and the literal rewritten by it where it stands.
 -/
@@ -649,7 +649,7 @@ def coherence (step : Step) : ReconstructM Expr := do
             has no{indentExpr F}"
         let motive := Expr.lam `z α body .default
         -- The conclusion's literal is `L` with the floor rewritten, `⌊Y⌋ + i w`,
-        -- where the worker recorded it; what the floor became is read off it.
+        -- where vampire recorded it; what the floor became is read off it.
         let some k := step.unit.introduced[0]?
           | throwError "step {step.unit.number} recorded no literal it built"
         let some part := into.parts[k]?
@@ -734,7 +734,7 @@ private def axiomLemma (step : Step) : ReconstructM (Name × Array UInt32) := do
 
 /--
 A theory axiom: its lemma at the clause's variables, each disjunct the literal
-the axiom built it as, where the worker recorded that literal went. Vampire
+the axiom built it as, where vampire recorded that literal went. Vampire
 shares an equation with its sides either way round, so a disjunct is the
 conclusion's literal or it turned round, which the two say; the lemma is
 stated over the classes the numbers are instances of, and the literal with the
@@ -858,7 +858,7 @@ def fourierMotzkin (step : Step) : ReconstructM Expr := do
 /--
 ALASCA's term factoring: `k₁ s₁ + k₂ s₂ + t ⋈ 0` at the unifier, which makes
 `s₁` and `s₂` one up to arithmetic, as `(k₁ + k₂) s₁ + t ⋈ 0` -- the literal
-rewritten where it stands, which the worker recorded, and one with the
+rewritten where it stands, which vampire recorded, and one with the
 premise's up to the identities of a ring; every other literal carried.
 -/
 def termFactoring (step : Step) : ReconstructM Expr := do
@@ -916,8 +916,8 @@ def gaussianElimination (step : Step) : ReconstructM Expr := do
           mkAppOptM ``absurd #[some equation, some target, some same, some h])
 
 /--
-`h`, one of the literals a lemma concludes, at the literal `k` of `into` the
-worker recorded the inference built it as: the two one up to congruence and
+`h`, one of the literals a lemma concludes, at the literal `k` of `into`
+vampire recorded the inference built it as: the two one up to congruence and
 the identities of a ring, an equation's sides either way round, which the two
 say.
 -/
@@ -933,7 +933,7 @@ private def placeByRing (step : Step) (into : Into) (k : Nat) (h : Expr) : Recon
 
 /--
 ALASCA's floor bounds: from a literal whose selected atom is a floor, the
-bounds a floor has, in one of six shapes (`FloorBounds.hpp`), which the worker
+bounds a floor has, in one of six shapes (`FloorBounds.hpp`), which vampire
 recorded with the floor `⌊s⌋`, the premise's other term `t`, the floor's
 coefficient `k`, and the literals built. Each shape is `Vampire.Lemmas.fb_*`,
 its premise related to the premise's literal by ring arithmetic.

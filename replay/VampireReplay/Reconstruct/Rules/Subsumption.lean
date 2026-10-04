@@ -46,7 +46,7 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
     let (mainAt, mainType) ← instantiateAt mainParent mainUse vars mainProof mainStated
     let (sideAt, sideType) ← instantiateAt sideParent sideUse vars sideProof sideStated
     -- The side premise's literals at σ are the conclusion's but for the one
-    -- that is the removed literal's complement, and the worker recorded where
+    -- that is the removed literal's complement, and vampire recorded where
     -- each went: the literals placed are carried, and the one that is not is
     -- the one to close the case with.
     let sidePlaced := step.placedAt 1

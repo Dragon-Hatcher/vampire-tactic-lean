@@ -51,7 +51,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     let vars ← coverVars kept step.unit.boundVarSorts
     let (p₁, t₁) ← instantiateAt parent₁ use₁ vars proof₁ stated₁
     let (p₂, t₂) ← instantiateAt parent₂ use₂ vars proof₂ stated₂
-    -- Every literal but the resolved one carries over, to where the worker
+    -- Every literal but the resolved one carries over, to where vampire
     -- recorded it went; the resolved pair is complementary, which closes
     -- that case.
     -- Which of the two is the negative literal is the first's polarity.
@@ -129,7 +129,7 @@ def factoring (step : Step) : ReconstructM Expr := do
 
 /--
 `instantiation`: the premise at the substitution it recorded, every literal
-carried where the worker recorded it went -- as for factoring, but with no two
+carried where vampire recorded it went -- as for factoring, but with no two
 literals made one.
 -/
 def instantiation (step : Step) : ReconstructM Expr := factoring step
@@ -267,7 +267,7 @@ def equalityFactoring (step : Step) : ReconstructM Expr := do
               is not{indentExpr (mkApp (mkConst ``Not) equal)}"
           mkLambdaFVars #[hne] (into.inject 0 stated)
         -- Where it is, `uσ ≈ sσ ≈ tσ ≈ vσ` is the side equality, carried where
-        -- the worker recorded, as the premise states it.
+        -- vampire recorded, as the premise states it.
         let agree ← withLocalDeclD `h equal fun he => do
             let chain ← mkAppM ``Eq.trans #[h, he]
             let stated ← mkAppOptM ``Eq #[some α, some fLHS, some fRHS]
