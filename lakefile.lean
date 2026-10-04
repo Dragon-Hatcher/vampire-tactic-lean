@@ -16,7 +16,7 @@ def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
 /-- The revision of `vampireRepo` the tactic builds. -/
-def vampireRev : String := "178b11a681718a23cbe450d47242f8575d62cdbd"
+def vampireRev : String := "d28214b89caeb8b526ac5501f9a2110f98a27142"
 
 /--
 The submodules vampire's build needs.
@@ -136,6 +136,11 @@ Builds vampire. `cmake` handles incrementality, so this runs whenever the
 checkout it builds from has moved, and reports a trace over the resulting
 binary.
 
+Vampire is built without z3, whatever its checkout holds. Its CMake links z3
+wherever it finds one built, and AVATAR can then hand ground reasoning to it
+(`sas=z3`), whose steps replay has no way to follow. Without z3 a strategy
+asking for it warns and uses vampire's own SAT solver.
+
 Two link settings are given here rather than being vampire's defaults, both
 about how the tactic runs it -- one short process per call:
 
@@ -163,7 +168,8 @@ target «vampire-binary» pkg : FilePath := Job.async do
       "-B", cmakeDir.toString,
       s!"-DCMAKE_BUILD_TYPE={vampireBuildType}",
       s!"-DCMAKE_INTERPROCEDURAL_OPTIMIZATION={if vampireBuildType == "Release" then "ON" else "OFF"}",
-      s!"-DCMAKE_EXE_LINKER_FLAGS={linkFlags}"
+      s!"-DCMAKE_EXE_LINKER_FLAGS={linkFlags}",
+      "-DCMAKE_DISABLE_FIND_PACKAGE_Z3=TRUE"
     ]
   }
   proc {
