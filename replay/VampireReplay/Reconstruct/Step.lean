@@ -6,15 +6,6 @@ namespace Vampire.Reconstruct
 open Lean Meta
 
 /--
-Reads a step the way that step means it: polarity flipping divides the proof
-into the steps before it and the steps after it, which mean the opposite by the
-predicates it flipped.
--/
-def reading (u : Vampire.Unit) (k : ReconstructM α) : ReconstructM α :=
-  withReader (fun c =>
-    { c with flipping := c.flipped != 0 && u.number >= c.flipped }) k
-
-/--
 The Lean proposition a step asserts. A clause is implicitly universally
 quantified over its variables; a formula carries its own binders.
 
@@ -45,7 +36,7 @@ why it is taken on demand rather than handed to the rule ready-made.
 def conclusionOf (u : Vampire.Unit) : ReconstructM Expr := do
   if let some c := (← get).conclusions[u.number]? then
     return c
-  let c ← reading u (buildConclusion u)
+  let c ← buildConclusion u
   modify fun s => { s with conclusions := s.conclusions.insert u.number c }
   return c
 
@@ -282,9 +273,7 @@ def relateLiterals (step : Step) (position : Nat) (parent : Vampire.Unit)
   step.underVars fun kept target => do
     -- Dropping a literal can drop the last occurrence of a variable with it.
     let (vars, args) ← premiseVars parent (← coverVars kept step.unit.boundVarSorts)
-    -- The premise's literals are read as the premise means them: polarity
-    -- flipping divides the proof, and this step can be the line itself.
-    let sourceParts ← reading parent (source.literals.mapM (literal vars))
+    let sourceParts ← source.literals.mapM (literal vars)
     -- Where the worker recorded each literal went, which is where it goes.
     let some placed := step.placedAt position
       | throwError "step {step.unit.number}: the worker recorded no placement of \

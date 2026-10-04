@@ -57,7 +57,7 @@ def resolution (step : Step) : ReconstructM Expr := do
     -- Which of the two is the negative literal is the first's polarity.
     let some literal₁ := (parent₁.clause?.map (·.literals)).bind (·[resolved₁.toNat]?)
       | throwError "step {parent₁.number} has no literal {resolved₁}"
-    let negativeFirst := !(← literalPolarity literal₁)
+    let negativeFirst := !literal₁.polarity
     step.withInto target fun into =>
       carryPast t₁ target p₁ into (· == resolved₁.toNat)
         (fun _ h₁ => carryPast t₂ target p₂ into (· == resolved₂.toNat)
@@ -106,7 +106,7 @@ def unitResulting (step : Step) : ReconstructM Expr := do
             | throwError "no unit resolved literal {i} away"
           let some literal := mainClause.literals[i]?
             | throwError "the clause has no literal {i}"
-          closeByPolarity target h unitAt (← literalPolarity literal))
+          closeByPolarity target h unitAt literal.polarity)
         (placed := step.placedAt 0) (sourceCount := main.clauseSize?)
 
 /--

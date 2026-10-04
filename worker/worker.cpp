@@ -18,37 +18,37 @@
  * structure.
  *
  *   % SZS status <status> for problem
- *   % format: N
- *   % termination: R
- *   % rules: Count Fingerprint
- *   % polarity flip boundary: B
- *   % refutation: uK
- *   % strategy: ...
- *   % times: Strategy Setup FoundAt
+ *   % VAMPIRE format: N
+ *   % VAMPIRE termination: R
+ *   % VAMPIRE rules: Count Fingerprint
+ *   % VAMPIRE refutation: uK
+ *   % VAMPIRE strategy: ...
+ *   % VAMPIRE times: Strategy Setup FoundAt
  *   % SZS output start Refutation for problem      (with a refutation only)
- *     The header, as comments like the SZS lines, each `key: value`, before
- *     the first annotated formula. `format` is the version of this format.
- *     `termination` is vampire's termination reason, `refutation_not_found`
- *     and so on; SZS cannot tell all of them apart. `rules` are how many
- *     inference rules vampire declares and a hash of their names in order
- *     (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt), which the Lean side
- *     checks its generated copy against. `polarity flip boundary` is the
- *     number of the first step polarity flipping made, or zero. The last three
- *     are there with a refutation only: the step that is the refutation, the
- *     strategy that found it, from which alone the same run can be had again,
- *     and what that strategy ran for, what starting up and parsing took and
- *     when the proof was found, in milliseconds.
+ *     The header, as comments beside the SZS status line, each
+ *     `VAMPIRE key: value`, before the first annotated formula. The SZS
+ *     ontology standardises only the status line and the output markers, and
+ *     the header the TSTP library gives its solutions is written by its
+ *     harness rather than by the prover, so these are prefixed as vampire's
+ *     own. `format` is the version of this format. `termination` is vampire's
+ *     termination reason, `refutation_not_found` and so on; SZS cannot tell
+ *     all of them apart. `rules` are how many inference rules vampire declares
+ *     and a hash of their names in order (`VAMPIRE_RULE_FINGERPRINT`, see
+ *     CMakeLists.txt), which the Lean side checks its generated copy against.
+ *     The last three are there with a refutation only: the step that is the
+ *     refutation, the strategy that found it, from which alone the same run
+ *     can be had again, and what that strategy ran for, what starting up and
+ *     parsing took and when the proof was found, in milliseconds.
  *
  *   tff(sort_I, type, s: $tType).
  *   tff(func_I, type, f: (s1 * s2) > s, unknown, [created(C)]).
- *   tff(pred_I, type, p: (s1 * s2) > $o, unknown, [created(C), flipped,
+ *   tff(pred_I, type, p: (s1 * s2) > $o, unknown, [created(C),
  *       pure(Value,Order)]).
  *     Every sort and uninterpreted symbol, with what replay needs to know of
  *     a symbol: when it was created, counted over functions and predicates
  *     alike -- a symbol vampire introduced is made of symbols that exist
- *     already, so this is an order to bind them in; whether polarity flipping
- *     flipped a predicate, so that every step after it means the opposite by
- *     it; and the truth value pure predicate removal replaced it by, with its
+ *     already, so this is an order to bind them in; and the truth value pure
+ *     predicate removal replaced it by, with its
  *     number among the predicates found pure in the order they were found.
  *     Interpreted symbols are TPTP's own and are not declared. Numerals are
  *     written as TPTP writes them, `3` and `1/3`, except that TPTP's reals are
@@ -62,7 +62,12 @@
  *     a clause and `tff` for a formula. A clause is quantified over its
  *     variables in the order vampire collects their sorts, and its literals
  *     are in vampire's order, which the records index; `$false` is the empty
- *     clause. In a formula, `~p` is a negative literal and `~ (f)` a negation,
+ *     clause. Polarity flipping, where a strategy uses it, makes vampire mean
+ *     `~p` by `p` from then on for the predicates it picks; the steps after it
+ *     are written with those literals turned back, so every formula means
+ *     what it says in the problem's own signature and the flipping step
+ *     restates its premise. In a formula, `~p` is a negative literal and
+ *     `~ (f)` a negation,
  *     an equality's sort is that of its sides, and a name for a formula is
  *     `$$name('n')`. Steps come in the order the worker met them, from the
  *     refutation back, so a step's premises follow it.
@@ -1631,8 +1636,11 @@ public:
     : _enc(enc),
       _termText(enc.terms.size() / 4),
       _termDone(enc.terms.size() / 4, false),
-      _formulaText(enc.formulas.size() / 7),
-      _formulaDone(enc.formulas.size() / 7, false)
+      _formulaText{std::vector<std::string>(enc.formulas.size() / 7),
+                   std::vector<std::string>(enc.formulas.size() / 7)},
+      _formulaDone{std::vector<bool>(enc.formulas.size() / 7, false),
+                   std::vector<bool>(enc.formulas.size() / 7, false)},
+      _boundary(InferenceStore::instance()->polarityFlipBoundary())
   {
     for (unsigned f = 0; f < env.signature->functions(); f++)
       _functors.push_back(describeFunctor(f));
@@ -1652,16 +1660,14 @@ public:
       throw UserErrorException("unknown termination reason " + std::to_string(reason));
     std::string out;
     out += "% SZS status " + std::string(szs[reason]) + " for problem\n";
-    out += "% format: " + std::to_string(FORMAT) + "\n";
-    out += "% termination: " + std::string(reasons[reason]) + "\n";
-    out += "% rules: " + std::to_string(RULE_COUNT) + " " +
+    out += "% VAMPIRE format: " + std::to_string(FORMAT) + "\n";
+    out += "% VAMPIRE termination: " + std::string(reasons[reason]) + "\n";
+    out += "% VAMPIRE rules: " + std::to_string(RULE_COUNT) + " " +
            std::to_string(VAMPIRE_RULE_FINGERPRINT) + "\n";
-    out += "% polarity flip boundary: " +
-           std::to_string(InferenceStore::instance()->polarityFlipBoundary()) + "\n";
     if (refutation != NONE)
-      out += "% refutation: " + unitName(refutation) + "\n";
+      out += "% VAMPIRE refutation: " + unitName(refutation) + "\n";
     if (_enc.strategy != NONE)
-      out += "% strategy: " + string(_enc.strategy) + "\n% times: " +
+      out += "% VAMPIRE strategy: " + string(_enc.strategy) + "\n% VAMPIRE times: " +
              std::to_string(_enc.strategyMs) + " " + std::to_string(_enc.setupMs) + " " +
              std::to_string(_enc.foundAtMs) + "\n";
     if (refutation != NONE)
@@ -1692,8 +1698,22 @@ private:
   std::vector<Functor> _functors;
   std::vector<std::string> _termText;
   std::vector<bool> _termDone;
-  std::vector<std::string> _formulaText;
-  std::vector<bool> _formulaDone;
+  /** Each formula's text, written before polarity flipping and after it. */
+  std::vector<std::string> _formulaText[2];
+  std::vector<bool> _formulaDone[2];
+  /** The number of the first step polarity flipping made, or zero. */
+  uint32_t _boundary;
+  /**
+   * Whether the step being written is one polarity flipping has been through:
+   * one numbered from the first step it made on.
+   *
+   * Flipping replaces every literal over the predicates it picks by its
+   * complement, so that from there on vampire's `p` means what `~p` did. A
+   * step after it is written with those literals turned back, which is what
+   * vampire means by them: every formula then says what it means in the
+   * problem's own signature, and the flipping itself restates its premise.
+   */
+  bool _unflip = false;
 
   std::string string(uint32_t off) const { return std::string(_enc.strings.data() + off); }
 
@@ -1791,6 +1811,8 @@ private:
     uint32_t first = L[5 * l + 2];
     uint32_t arity = L[5 * l + 3];
     bool positive = flags & 1;
+    if (_unflip && !(flags & 2) && env.signature->getPredicate(L[5 * l])->wasFlipped())
+      positive = !positive;
     if (flags & 2)
       return term(_enc.args[first]) + (positive ? " = " : " != ") +
              term(_enc.args[first + 1]);
@@ -1809,8 +1831,8 @@ private:
 
   const std::string& formula(uint32_t f)
   {
-    if (_formulaDone[f])
-      return _formulaText[f];
+    if (_formulaDone[_unflip][f])
+      return _formulaText[_unflip][f];
     const auto& F = _enc.formulas;
     uint32_t firstSub = F[7 * f + 2];
     uint32_t numSubs = F[7 * f + 3];
@@ -1876,9 +1898,9 @@ private:
         throw UserErrorException("cannot write a formula of connective " +
                                  std::to_string(F[7 * f]));
     }
-    _formulaText[f] = std::move(out);
-    _formulaDone[f] = true;
-    return _formulaText[f];
+    _formulaText[_unflip][f] = std::move(out);
+    _formulaDone[_unflip][f] = true;
+    return _formulaText[_unflip][f];
   }
 
   /**
@@ -2031,8 +2053,6 @@ private:
       if (text.empty())
         continue;
       std::string info = "created(" + std::to_string(sym->created()) + ")";
-      if (sym->wasFlipped())
-        info += ", flipped";
       bool pureValue = false;
       unsigned pureOrder = 0;
       if (InferenceStore::instance()->purePredicate(p, pureValue, pureOrder))
@@ -2059,6 +2079,7 @@ private:
   void unit(uint32_t idx, std::string& out)
   {
     auto u = [&](unsigned off) { return _enc.units[UNIT_WIDTH * idx + off]; };
+    _unflip = _boundary != 0 && u(0) >= _boundary;
     bool isClause = u(3) & 1;
     uint32_t rule = u(1);
     const auto& names = ruleNames();
@@ -2209,10 +2230,39 @@ private:
           case congruence::GOAL_EQUALITY:
             step = "goal_equality(" + std::to_string(w(1)) + "," + optional(w(2)) + ")";
             break;
-          default:
-            step = "goal_literals(" + std::to_string(w(1)) + "," + std::to_string(w(2)) +
-                   "," + args + ")";
+          default: {
+            // The clause's `a`th literal denies its atom and its `b`th asserts
+            // it, as vampire states them. Turned back after polarity flipping
+            // (`_unflip`), the two swap roles, and each argument equality,
+            // proved from the one literal's arguments to the other's, is
+            // wanted the other way round: so many steps more, which the goal
+            // is after, as it is the run's last step and no step names it.
+            uint32_t lit = _enc.unitLits[u(4) + w(1)];
+            bool turned = _unflip && !(_enc.literals[5 * lit + 1] & 2) &&
+                          env.signature->getPredicate(_enc.literals[5 * lit])->wasFlipped();
+            if (!turned) {
+              step = "goal_literals(" + std::to_string(w(1)) + "," + std::to_string(w(2)) +
+                     "," + args + ")";
+              break;
+            }
+            if (i + 1 != u(24))
+              throw UserErrorException("congruence closure of step " + std::to_string(u(0)) +
+                                       " does not end at its goal");
+            uint32_t next = i;
+            std::string symms, swapped = "[";
+            for (uint32_t k = 0; k < w(4); k++) {
+              uint32_t arg = _enc.congruenceArgs[w(3) + k];
+              if (arg == NONE) {
+                swapped += (k ? "," : "") + std::string("none");
+                continue;
+              }
+              symms += "symm(" + std::to_string(arg) + "),";
+              swapped += (k ? "," : "") + std::to_string(next++);
+            }
+            step = symms + "goal_literals(" + std::to_string(w(2)) + "," +
+                   std::to_string(w(1)) + "," + swapped + "])";
             break;
+          }
         }
         r += (i ? "," : "") + step;
       }
@@ -2304,6 +2354,8 @@ private:
 
   void satClause(uint32_t idx, std::string& out)
   {
+    // Not a step, so not after polarity flipping: its literals are names.
+    _unflip = false;
     auto w = [&](unsigned off) { return _enc.satClauses[6 * idx + off]; };
     std::string lits;
     for (uint32_t i = 0; i < w(1); i++)
@@ -2335,6 +2387,8 @@ private:
 
   void genState(uint32_t idx, std::string& out)
   {
+    // Clausification, which is over before polarity flipping begins.
+    _unflip = false;
     auto w = [&](unsigned off) { return _enc.genStates[11 * idx + off]; };
     auto lits = [&](uint32_t first, uint32_t count) {
       std::string r = "[";

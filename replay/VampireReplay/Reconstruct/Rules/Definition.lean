@@ -327,7 +327,7 @@ def definitionUnfolding (step : Step) : ReconstructM Expr := do
               | throwError "literal has unknown predicate {l.predicate}"
             congrApplied symbol.name before args equal
         let atom ←
-          if ← literalPolarity l then pure congruence
+          if l.polarity then pure congruence
           else mkCongrArg (mkConst ``Not) congruence
         mkAppM ``Eq.mp #[atom, h])
 
@@ -378,7 +378,7 @@ private def splitNameOf (u : Vampire.Unit) : ReconstructM (String × Term) := do
   if l.isEquality then
     throwError "an inequality_splitting_name_introduction step should state a \
       predicate, got the equality {l}"
-  if ← literalPolarity l then
+  if l.polarity then
     throwError "an inequality_splitting_name_introduction step should state a \
       negative literal, got {l}"
   let some symbol := l.symbol?

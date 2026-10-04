@@ -428,11 +428,6 @@ structure Symbol where
   /-- The number the symbol is, if it is one; the worker reads it off vampire. -/
   numeral? : Option Numeral := none
   /--
-  Whether polarity flipping flipped this predicate, so that every clause after
-  it means the opposite by the predicate than the ones before it do.
-  -/
-  flipped : Bool := false
-  /--
   The truth value pure predicate removal replaced this predicate by, if it did
   -- the one that satisfies each of its occurrences, which all have one
   polarity -- and its number among the predicates found pure, in the order
@@ -581,15 +576,6 @@ structure Proof where
   private text : String
   /-- Why vampire stopped. -/
   terminationReason : TerminationReason
-  /--
-  The number of the first step polarity flipping made, or zero if it never ran.
-
-  Flipping replaces every clause of the problem over the predicates it picks by
-  their complements, which says nothing about the clauses: it says that those
-  predicates now mean the opposite of what they did. So the proof divides in
-  two here, the halves disagreeing over what those predicates mean.
-  -/
-  polarityFlipBoundary : UInt32
 deriving Inhabited
 
 /-! ## Building the tables -/
@@ -1005,7 +991,7 @@ private def declare (symbol : String) (args : Array String) (result : String)
       | some _ => bail "malformed pure"
       | none => pure none
     modify fun b => { b with predicates := b.predicates.modify i.toNat fun s =>
-      { s with created, flipped := rs.contains "flipped", pure? } }
+      { s with created, pure? } }
   else
     discard <| internFunctor { name := symbol, arity := args.size.toUInt32, created }
     modify fun b => { b with resultSorts := b.resultSorts.insert (symbol, args.size) result }
@@ -1086,14 +1072,16 @@ private def validate (units : Array UnitRec) (sats : Array SatRec) (gens : Array
 
 /--
 The header: the comment lines before the first annotated formula that read
-`key: value`, by key. The SZS lines have no such colon and are not among them.
+`VAMPIRE key: value`, by key.
 -/
 private def header (text : String) : Std.HashMap String String := Id.run do
   let mut out := {}
   for line in text.splitOn "\n" do
     unless line.startsWith "%" do
       if line.trimAscii.isEmpty then continue else break
-    match (String.ofList (line.toList.drop 1)).trimAscii.toString.splitOn ": " with
+    let comment := (String.ofList (line.toList.drop 1)).trimAscii.toString
+    unless comment.startsWith "VAMPIRE " do continue
+    match (String.ofList (comment.toList.drop "VAMPIRE ".length)).splitOn ": " with
     | key :: value@(_ :: _) => out := out.insert key (": ".intercalate value)
     | _ => pure ()
   return out
@@ -1135,8 +1123,6 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
     | "memory_limit" => pure .memoryLimit
     | "activation_limit" => pure .activationLimit
     | r => Error.fail s!"malformed proof from the worker: unknown termination reason {r}"
-  let [boundary] ← nats "polarity flip boundary"
-    | Error.fail "malformed proof from the worker: its header's `polarity flip boundary` is malformed"
   let units := all.filter (numbered ·.name "u")
   let sats := all.filter (numbered ·.name "sat_")
   let gens := all.filter (numbered ·.name "gen_")
@@ -1165,7 +1151,7 @@ private def build (text : String) (all : Array Annotated) : Except Error Proof :
     termTable := b.terms, literalTable := b.literals, formulaTable := b.formulas
     unitTable := unitRecs, satTable := satRecs, genTable := genRecs
     refutationIdx := refutation, strategyText := rs["strategy"]?, times, text
-    terminationReason := reason, polarityFlipBoundary := boundary.toUInt32 }
+    terminationReason := reason }
 
 end Tstp
 

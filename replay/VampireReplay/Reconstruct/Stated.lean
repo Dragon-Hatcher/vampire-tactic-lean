@@ -313,19 +313,6 @@ private partial def termGround (vars : Vars) (seen : IO.Ref (Std.HashMap UInt32 
 partial def term (vars : Vars) (t : Term) : ReconstructM Expr := do
   (·.1) <$> termGround vars (← IO.mkRef {}) t
 
-/--
-Whether a literal occurs positively, as the step it belongs to means it.
-
-Polarity flipping leaves a flipped predicate meaning the opposite of what it
-did, so a literal over one occurs the other way round in the steps after it.
--/
-def literalPolarity (l : Literal) : ReconstructM Bool := do
-  if (← read).flipping then
-    if let some symbol := l.symbol? then
-      if symbol.flipped then
-        return !l.polarity
-  return l.polarity
-
 /-- A literal, and whether it speaks of no variable. -/
 private def literalGround (vars : Vars) (l : Literal) :
     ReconstructM (Expr × Bool) := do
@@ -336,7 +323,7 @@ private def literalGround (vars : Vars) (l : Literal) :
     let (e, argGround) ← termGround vars seen arg
     args := args.push e
     ground := ground && argGround
-  let polarity ← literalPolarity l
+  let polarity := l.polarity
   let atom ←
     if l.isEquality then
       let some sortName := l.sort?
@@ -408,16 +395,11 @@ def withVars (sorts : Array (UInt32 × String)) (vars : Vars)
       k vars locals
   go 0 vars #[]
 
-/--
-A formula, and whether it speaks of no variable -- which, with polarity
-flipping out of play, is what makes it worth keeping.
--/
+/-- A formula, and whether it speaks of no variable -- which is what makes it worth keeping. -/
 private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Vars)
     (f : Formula) : ReconstructM (Expr × Bool) := do
-  let keeping := !(← read).flipping
-  if keeping then
-    if let some e := (← get).groundFormulas[f.index]? then
-      return (e, true)
+  if let some e := (← get).groundFormulas[f.index]? then
+    return (e, true)
   let sub (i : Nat) : ReconstructM (Expr × Bool) := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     formulaGround sorts vars g
@@ -479,7 +461,7 @@ private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Var
       pure (← namedFormula raw, false)
     | c => throwError "cannot rebuild a formula with connective {repr c}"
   let e ← shared built
-  if ground && keeping then
+  if ground then
     modify fun s => { s with groundFormulas := s.groundFormulas.insert f.index e }
   return (e, ground)
 

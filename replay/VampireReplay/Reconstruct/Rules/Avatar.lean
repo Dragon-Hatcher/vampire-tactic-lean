@@ -67,8 +67,7 @@ def component (step : Step) : ReconstructM Expr := do
     -- A negated name asserts `¬⟦n⟧`, and the name of a negative ground
     -- singleton is defined by the complement (`Splitter`), so the one literal
     -- it asserts is the clause's under a double negation where the definition
-    -- reads the complement as a negation -- as it does of a predicate polarity
-    -- flipping flipped.
+    -- reads the complement as a negation.
     let (negated, _) := splitName name
     if negated then
       if let some inner := stated.not? then

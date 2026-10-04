@@ -50,22 +50,6 @@ structure Context where
   symbols : Symbols
   proof : Proof
   /--
-  The number of the first step polarity flipping made, or zero if it never ran:
-  the steps from there on mean the opposite by the predicates it flipped.
-  -/
-  flipped : UInt32 := 0
-  /--
-  Whether the step being read is one of those polarity flipping has been
-  through.
-
-  Flipping picks a set of predicates and replaces every literal of every clause
-  over them by its complement, all at once. It says nothing, then, about the
-  clauses -- it says that those predicates now mean the opposite of what they
-  did. So a step after it is read with the polarity of a flipped predicate's
-  literals inverted, which is what makes the flipping itself say nothing.
-  -/
-  flipping : Bool := false
-  /--
   What the goal holds, for when something of a sort is needed and no instance
   says the sort is inhabited.
 
@@ -188,10 +172,9 @@ structure State where
   279,738 formulas of which 7,104 are distinct -- and what a formula free of
   variables rebuilds to does not depend on anything but which formula it is.
 
-  Only such formulas, and only where polarity flipping is not in play: a
-  quantifier binds a local whose type comes from the sorts the step recorded, a
-  name stands for whatever the proof has bound it to, and a literal over a
-  flipped predicate means the opposite after the flipping from before it.
+  Only such formulas: a quantifier binds a local whose type comes from the
+  sorts the step recorded, and a name stands for whatever the proof has bound
+  it to.
   -/
   groundFormulas : Std.HashMap UInt32 Expr := {}
   /--

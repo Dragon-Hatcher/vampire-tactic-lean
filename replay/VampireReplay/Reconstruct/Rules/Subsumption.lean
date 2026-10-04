@@ -55,7 +55,7 @@ def subsumptionResolution (step : Step) : ReconstructM Expr := do
           premise's literals went"
     let some literal := (mainParent.clause?.map (·.literals)).bind (·[resolved.toNat]?)
       | throwError "step {mainParent.number} has no literal {resolved}"
-    let removedPositive ← literalPolarity literal
+    let removedPositive := literal.polarity
     step.withInto target fun into =>
     carryPast mainType target mainAt into (· == resolved.toNat)
       (placed := step.placedAt 0) (sourceCount := mainParent.clauseSize?)

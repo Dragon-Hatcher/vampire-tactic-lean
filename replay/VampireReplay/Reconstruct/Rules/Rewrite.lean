@@ -152,7 +152,7 @@ private def literalAt (cache : TreeCache) (vars : Vars) (bindings : Std.HashMap 
       match ← interpreted symbol.name args with
       | some atom => pure atom
       | none => pure (mkAppN (← symbolExpr symbol.name) args)
-  shared (if ← literalPolarity l then atom else mkApp (mkConst ``Not) atom)
+  shared (if l.polarity then atom else mkApp (mkConst ``Not) atom)
 
 /--
 The equation a premise use points at, as an oriented rewrite: the side the

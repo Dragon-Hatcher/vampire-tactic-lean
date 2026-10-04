@@ -56,17 +56,4 @@ def condensation (step : Step) : ReconstructM Expr := do
     carryAll premiseType target premiseAt (placed := step.placedAt 0)
       (sourceCount := parent.clauseSize?) (targetCount := step.unit.clauseSize?)
 
-/--
-`polarity_flipping`: nothing, once the predicates it flipped are read as
-meaning the opposite.
-
-`Shuffling::polarityFlip` picks a set of predicates and replaces every literal
-over them, in every clause of the problem, by its complement. That says
-nothing about the clauses: it says that those predicates now mean the opposite
-of what they did. Reading the steps after it that way -- which is what the framework does --
-leaves this step stating what its premise does, up to the order shuffling put
-its literals in.
--/
-def polarityFlipping (step : Step) : ReconstructM Expr := literals step
-
 end Vampire.Reconstruct.Clause

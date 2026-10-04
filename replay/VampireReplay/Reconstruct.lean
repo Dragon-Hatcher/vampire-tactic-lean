@@ -40,7 +40,7 @@ for each step already replayed. Anything else a step's term mentions is a local
 some rule made and failed to abstract.
 -/
 private def replay (u : Vampire.Unit) (context : LocalContext) :
-    ReconstructM (Expr × Expr) := reading u do
+    ReconstructM (Expr × Expr) := do
   let some rule := u.rule?
     | throwError "step {u.number} has unknown inference rule {u.ruleIndex}"
   let premises ← u.parents.mapM fun parent => do
@@ -193,7 +193,7 @@ private def bindNaming (u : Vampire.Unit) (name : String) (arguments : Array UIn
   unless bound.size == arguments.size do
     throwError "step {u.number} named a formula over variables it does \
       not record the sorts of"
-  let definition ← reading u <| withVars bound {} fun vars locals => do
+  let definition ← withVars bound {} fun vars locals => do
     mkLambdaFVars locals (← formula sorts vars named)
   defineIntroduced name definition
 
@@ -340,7 +340,6 @@ def run (proof : Proof) (symbols : Symbols)
     (go.run { symbols, proof, givens, literalIff, literalFalse,
               literalRewritten, virasRefute, ringNormalForms,
               checkSteps, numerically
-              flipped := proof.polarityFlipBoundary
               numerals := proof.functions.foldl (init := {}) fun acc sym =>
                 match sym.numeral? with
                 | some n => acc.insert (sym.name, sym.arity.toNat) n

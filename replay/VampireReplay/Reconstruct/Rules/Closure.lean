@@ -88,17 +88,8 @@ def conflict (step : Step) : ReconstructM Expr := do
           closed := some (← mkAppOptM ``absurd
             #[some part, some (mkConst ``False), some (← proofAt proofs j),
               some (← refuting i)])
-        | .goalLiterals a b args =>
-          -- Which of the two denies its atom is read off the clause rather
-          -- than taken from the record: polarity flipping leaves a literal
-          -- meaning the opposite of what it did, and the two swap roles.
-          let some first := parts[a]? | throwError "no literal {a} in the clause"
-          let flipped := (asNegation first).isNone
-          let (negative, positive) := if flipped then (b, a) else (a, b)
+        | .goalLiterals negative positive args =>
           let equal ← proofsAt proofs args
-          let equal ← if flipped then
-              equal.mapM fun p => p.mapM fun p => mkEqSymm p
-            else pure equal
           let (name, negativeArgs) ← arguments negative
           let (_, positiveArgs) ← arguments positive
           let (_, holds) ← denied negative
