@@ -529,7 +529,8 @@ private structure UnitRec where
   satPremise : Option UInt32 := none
   namings : Array (String × Array UInt32 × UInt32) := #[]
   genClause : Option UInt32 := none
-  choices : Array (UInt32 × UInt32) := #[]
+  /-- Each conjunction's position in the premise's formula, and the argument taken. -/
+  choices : Array (Array UInt32 × UInt32) := #[]
   congruences : Array CongruenceRec := #[]
   constraints : Array Nat := #[]
   placements : Array PlacementRec := #[]
@@ -918,7 +919,7 @@ private def buildUnit (a : Annotated) : B UnitRec := do
   if let some g ← single rs "choices" then
     u := { u with choices := ← (← gtList g).mapM fun c => do
       let a ← gtArgs "choice" 2 c
-      return (← gtFormula a[0]!, ← gtU32 a[1]!) }
+      return (← (← gtList a[0]!).mapM gtU32, ← gtU32 a[1]!) }
   if let some g ← single rs "congruences" then
     u := { u with congruences := ← (← gtList g).mapM congruenceStep }
   if let some g ← single rs "constraints" then
@@ -1057,8 +1058,22 @@ private def validate (units : Array UnitRec) (sats : Array SatRec) (gens : Array
       | _ => pure ()
       for arg in c.args do
         if let some j := arg then index s!"step {u.number}'s congruence argument" j k
-    for (f, argument) in u.choices do
-      index s!"step {u.number}'s conjunct" argument.toNat formulas[f.toNat]!.subs.size
+    -- Each choice's position leads, through the premise's formula, to a
+    -- conjunction that has the argument chosen.
+    unless u.choices.isEmpty do
+      let some root := u.parents[0]?.map (units[·.toNat]!)
+        | malformed s!"step {u.number} chooses conjuncts but has no premise"
+      if root.isClause then
+        malformed s!"step {u.number} chooses conjuncts of a premise that is no formula"
+      for (path, argument) in u.choices do
+        let mut f := formulas[root.formula.toNat]!
+        for i in path do
+          let some sub := f.subs[i.toNat]?
+            | malformed s!"step {u.number} chooses a conjunct at a position its premise has not"
+          f := formulas[sub.toNat]!
+        unless f.connective == .and do
+          malformed s!"step {u.number} chooses a conjunct of something that is no conjunction"
+        index s!"step {u.number}'s conjunct" argument.toNat f.subs.size
   for s in sats do
     if let some order := s.order then
       let some origin := s.origin | malformed "a propositional clause orders the literals of no clause"
@@ -1669,14 +1684,18 @@ def namings (u : Unit) : Array (String × Array UInt32 × Formula) :=
   u.r.namings.map fun (name, args, f) => (name, args, ⟨u.proof, f⟩)
 
 /--
-Which argument of each conjunction the clausification of this clause went into.
+Which argument of each conjunction the clausification of this clause went into,
+each conjunction given by its position in the premise's formula: the indices of
+the subformulas leading to it from the root, as `Formula.subformulas` numbers
+them.
 
 The other clausifier walks a formula in negation normal form, taking every
 disjunct into the clause it is building and each conjunct into a clause of its
 own, so a clause is one path through the conjunctions and this is that path.
+A conjunction is named by where it stands rather than by which formula it is:
+two conjunctions alike are one formula here, and can be taken different ways.
 -/
-def conjunctChoices (u : Unit) : Array (Formula × UInt32) :=
-  u.r.choices.map fun (f, k) => (⟨u.proof, f⟩, k)
+def conjunctChoices (u : Unit) : Array (Array UInt32 × UInt32) := u.r.choices
 
 /--
 The reasoning behind a congruence-closure conflict, the last step of it being

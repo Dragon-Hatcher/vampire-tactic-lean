@@ -92,8 +92,13 @@
  *                              to name formula `F`, and the variables it was
  *                              applied to
  *       gen_clause(gen_I)      the generalised clause a clause came out of
- *       choices([choice(F, K)])  which argument of each conjunction the old
- *                              clausifier took the clause into
+ *       choices([choice([I], K)])  which argument of each conjunction the
+ *                              old clausifier took the clause into, the
+ *                              conjunction given by its position in the
+ *                              premise's formula: the path of subformula
+ *                              indices to it from the root. By position, not
+ *                              by restating it, since two conjunctions alike
+ *                              can be taken different ways
  *       congruences([...])     the reasoning behind a congruence-closure
  *                              conflict, step by step: input(L) the equality
  *                              literal `L` denies; congruence($fot(a),
@@ -1895,6 +1900,53 @@ private:
     return scope.empty() ? body : "scoped([" + scope + "]," + body + ")";
   }
 
+  /**
+   * The subformulas of @b f, in the order the formula tables give them: a
+   * junction's arguments, an implication's two sides, a negation's or a
+   * quantifier's body.
+   */
+  static std::vector<Formula*> subformulasOf(Formula* f)
+  {
+    std::vector<Formula*> out;
+    switch (f->connective()) {
+      case AND:
+      case OR:
+        for (const FormulaList* it = f->args(); it; it = it->tail())
+          out.push_back(it->head());
+        break;
+      case IMP:
+      case IFF:
+      case XOR:
+        out.push_back(f->left());
+        out.push_back(f->right());
+        break;
+      case NOT:
+        out.push_back(f->uarg());
+        break;
+      case FORALL:
+      case EXISTS:
+        out.push_back(f->qarg());
+        break;
+      default:
+        break;
+    }
+    return out;
+  }
+
+  /** Every position at which @b target stands in @b f, as paths of subformula indices. */
+  static void positionsOf(Formula* f, Formula* target, std::vector<unsigned>& path,
+                          std::vector<std::vector<unsigned>>& found)
+  {
+    if (f == target)
+      found.push_back(path);
+    std::vector<Formula*> subs = subformulasOf(f);
+    for (unsigned i = 0; i < subs.size(); i++) {
+      path.push_back(i);
+      positionsOf(subs[i], target, path, found);
+      path.pop_back();
+    }
+  }
+
   std::string varSortList(uint32_t first, uint32_t count) const
   {
     std::string out = "[";
@@ -2096,11 +2148,34 @@ private:
     if (u(20) != NONE)
       record("gen_clause(gen_" + std::to_string(u(20)) + ")");
     if (u(22) != 0) {
+      // Each conjunction by where it stands in the premise's formula, which
+      // is what `CNF::clausify` walked: two conjunctions alike are still two.
+      if (u(7) == 0 || _enc.units[UNIT_WIDTH * _enc.parents[u(6)] + 3] & 1)
+        throw UserErrorException("clausification step " + std::to_string(u(0)) +
+                                 " records conjunct choices but has no premise formula");
+      Formula* premise =
+        _enc.formulaPtrs[_enc.units[UNIT_WIDTH * _enc.parents[u(6)] + 4]];
       std::string r = "choices([";
-      for (uint32_t i = 0; i < u(22); i++)
-        r += (i ? "," : "") + std::string("choice(") +
-             recordFormula(_enc.choices[2 * (u(21) + i)]) + "," +
-             std::to_string(_enc.choices[2 * (u(21) + i) + 1]) + ")";
+      bool first = true;
+      for (uint32_t i = 0; i < u(22); i++) {
+        Formula* conjunction = _enc.formulaPtrs[_enc.choices[2 * (u(21) + i)]];
+        std::vector<std::vector<unsigned>> found;
+        std::vector<unsigned> path;
+        positionsOf(premise, conjunction, path, found);
+        if (found.empty())
+          throw UserErrorException("clausification step " + std::to_string(u(0)) +
+                                   " chose a conjunct of a conjunction its premise does not have");
+        // Vampire can share one subformula at several positions, and the
+        // choice is then the same at each.
+        for (const auto& at : found) {
+          std::string positions;
+          for (size_t k = 0; k < at.size(); k++)
+            positions += (k ? "," : "") + std::to_string(at[k]);
+          r += (first ? "" : ",") + std::string("choice([") + positions + "]," +
+               std::to_string(_enc.choices[2 * (u(21) + i) + 1]) + ")";
+          first = false;
+        }
+      }
       record(r + "])");
     }
     if (u(24) != 0) {
