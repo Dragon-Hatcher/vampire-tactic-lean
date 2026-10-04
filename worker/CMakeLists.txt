@@ -99,6 +99,8 @@ endif()
 string(JOIN "," RULE_NAMES_JOINED ${RULE_NAMES})
 string(SHA256 RULE_HASH "${RULE_NAMES_JOINED}")
 string(SUBSTRING ${RULE_HASH} 0 8 RULE_FINGERPRINT)
+# And the rules' names, which the proof names each step's rule by.
 target_compile_definitions(vampire-worker PRIVATE
   VAMPIRE_RULE_FINGERPRINT=0x${RULE_FINGERPRINT}u
-  VAMPIRE_RULE_COUNT=${RULE_COUNT}u)
+  VAMPIRE_RULE_COUNT=${RULE_COUNT}u
+  VAMPIRE_RULE_NAMES="${RULE_NAMES_JOINED}")

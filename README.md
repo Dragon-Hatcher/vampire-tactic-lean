@@ -206,13 +206,14 @@ built worker is made of and what each piece is under.
   certified by, and `norm_num`'s numeral evaluation), and the syntax.
 - `replay/` — a package of its own holding the replay, and `spawn.c`, which
   starts the worker without copying the address space: `Translate.lean` goes to
-  TPTP, `Wire.lean` decodes what the prover wrote, and `Reconstruct/` replays
+  TPTP, `Wire.lean` reads the TSTP the prover wrote, and `Reconstruct/` replays
   it, one module per family of inference rules. Separate so that it can be
   precompiled and so run as native code rather than in the interpreter, which
   is worth about three times the replay; that is possible only because none of
   it imports Mathlib, what needs Mathlib being handed in rather than called.
 - `worker/` — the C++ program that runs one proof attempt and writes the
-  derivation out in a flat encoding.
+  derivation out as TSTP, with what the fork records of each step in its
+  useful information.
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
   from SMT-LIB, each with the original beside its Lean statement. Development
   only; not needed to use the tactic.

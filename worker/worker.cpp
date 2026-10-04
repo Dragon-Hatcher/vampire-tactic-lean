@@ -1,281 +1,168 @@
 /*
- * One vampire proof attempt, encoded for the Lean side.
+ * One vampire proof attempt, written out for the Lean side.
  *
  * Usage: vampire-worker <problem.p> <out-file> [name=value ...]
  *
  * The problem is read as TPTP, saturation runs once, and the refutation (if
- * any) is written to <out-file> in the flat format described below. Vampire's
- * own chatter is left on stdout/stderr for diagnostics, which is why the
- * encoding goes to a file rather than a pipe.
+ * any) is written to <out-file> as TSTP, in the form described below. Vampire's
+ * own chatter is left on stdout/stderr for diagnostics, which is why the proof
+ * goes to a file rather than a pipe.
  *
- * Every field is a little-endian uint32 unless stated otherwise. Pointers
- * become indices, so the encoding is position-independent and preserves
- * vampire's term sharing. `NONE` (0xFFFFFFFF) marks an absent index.
+ * The file is a sequence of TPTP annotated formulas. Everything vampire's own
+ * proof would say is said the TSTP way; what the fork records beyond that --
+ * how each step used its premises, where each literal went, and the rest of
+ * `InferenceStore` -- goes into each step's useful information, as general
+ * terms. Terms and formulas inside those are written `$fot(t)` and `$tff(f)`.
+ * Nothing refers to anything by position in the file, so it can be read by
+ * any TPTP tool, and the Lean side recovers vampire's sharing of terms by
+ * structure.
  *
- *   header    50 words, see `write`:
- *               0  `MAGIC`, then 1 `VERSION`
- *               2  vampire's termination reason
- *               3  1 if there is a refutation, 0 if not
- *               4  the refutation's unit index, `NONE` when there is none
- *               5 to 31  how many records each section from `functions` to
- *                  `congruenceArgs` holds, in the order they are written
- *              32  how many bytes `strings` holds, and 33 `proofText`, both
- *                  before padding
- *              34  how many inference rules vampire declares
- *              35  the number of the first step polarity flipping made, or
- *                  zero if it never ran
- *              36  the strategy the proof was found by, a string offset, or
- *                  `NONE` when there is no proof: the same run can be had
- *                  again from that alone
- *              37  what that strategy ran for, 38 what starting up and parsing
- *                  took and 39 when the proof was found, in milliseconds
- *              40  a hash of the inference rules' names in order
- *                  (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt); with word
- *                  34 it is what the Lean side checks its generated copy
- *                  against
- *              41  how many records `placements` holds, and 42
- *                  `placementEntries`
- *              43  how many words `literalFactors` holds, and 44
- *                  `constraintLits`
- *              45  how many words `satOrder` holds, 46 how many pairs
- *                  `introducedLits`, 47 how many words `genPlacements`, 48
- *                  how many `created` and 49 how many `introducedTerms`
- *             The sections follow in the order below.
- *   functions {nameOff, arity, numeral, numeratorOff, denominatorOff}
- *                                       -- indexed by a term's functor
- *             `numeral` says what number the symbol is, if it is one: 0 = none,
- *             1/2/3 = an integer, rational or real numeral, and 5/6/7 the same
- *             for ALASCA's multiplication by that numeral, which takes one
- *             argument. The value is `numerator / denominator`, each written
- *             out in decimal, and `NONE` where the symbol is no numeral
- *   predicates{nameOff, arity, flags}   -- indexed by a literal's predicate
- *             flags: 1 = polarity flipping flipped this predicate, so that
- *             every clause after it means the opposite by the predicate than
- *             the ones before it do; 2 = pure predicate removal replaced it by
- *             a truth value, 4 set where that value is true, and its number
- *             among the predicates found pure, in the order they were found,
- *             from bit 8
- *   sorts     {nameOff}                 -- vampire's type constructors
- *   terms     {tag, value, firstArg, arity}   tag: 0 = variable, 1 = functor
- *   args      term indices, shared by terms and literals
- *   literals  {predicate, flags, firstArg, arity, sort}
- *             flags: 1 = positive, 2 = equality. `sort` is the sort of an
- *             equality's arguments and `NONE` otherwise; a clause `X = Y`
- *             offers no other way to recover it.
- *   formulas  {connective, literal, firstSub, numSubs, firstVar, numVars, name}
- *             `name` is the string offset of a named subformula -- a
- *             definition vampire introduced while clausifying -- and `NONE`
- *             otherwise
- *   subs      formula indices
- *   vars      variable numbers of quantified formulas
- *   units     {number, rule, inputType, flags, payload, numLits,
- *              firstParent, numParents, firstVarSort, numVarSorts,
- *              firstSkolem, numSkolems, name, firstUse, numUses,
- *              firstSplit, numSplits, satPremise, firstNaming, numNamings,
- *              genState, firstChoice, numChoices, firstCongruence,
- *              numCongruences, numBoundSorts, firstConstraint,
- *              numConstraints, firstPlacement, numPlacements,
- *              splittingName, firstFactor, numFactors, procedure, site,
- *              firstIntroduced, numIntroduced, variant, introducedSymbol,
- *              firstIntroducedTerm, numIntroducedTerms}
- *             `firstConstraint` and `numConstraints` are the entries of
- *             `constraintLits` that say which of a clause's literals are the
- *             disequalities an abstracting unifier left behind: what it could
- *             not unify it defers into literals the inference puts into its
- *             conclusion, and the step is sound because the conclusion failing
- *             makes each of those pairs equal. Where the inference put them
- *             says nothing by the time the clause is written out -- literal
- *             selection permutes it in place -- so each is found by which
- *             literal it is.
- *             `genState` is the generalised clause a clause came out of, and
- *             the choices are the conjuncts its clausification went into.
- *             `firstFactor` and `numFactors` are, for a literal-wise
- *             simplification that scaled a literal -- ALASCA normalization
- *             divides a comparison by the gcd of its coefficients -- one entry
- *             of `literalFactors` per literal of its premise; `NONE` and zero
- *             where nothing was scaled.
- *             `procedure` is, for a literal-wise simplification, which
- *             procedure rewrote it (`InferenceStore::LiteralProcedure`):
- *             evaluation is whichever of three evaluators the options chose,
- *             and they rewrite a literal differently. `NONE` otherwise.
- *             `firstIntroduced` and `numIntroduced` are the entries of
- *             `introducedLits` for the literals the inference built rather
- *             than carried -- a theory axiom's -- in the order it built them,
- *             each the index of the conclusion's literal it is and of the
- *             literal of the first premise it was made of, or `NONE`, and
- *             `variant` which of the clauses of different shapes a rule
- *             builds this one is (`InferenceStore::recordIntroduced`).
- *             `introducedSymbol` is the name of the first symbol vampire
- *             recorded the unit to introduce, `NONE` for none.
- *             `firstIntroducedTerm` and `numIntroducedTerms` are the entries
- *             of `introducedTerms` for the terms the inference built that
- *             replay is told of (`InferenceStore::Introduced::terms`).
- *             `site` is the string offset of where in vampire the inference
- *             was made, `file:line` relative to vampire's source directory,
- *             and `NONE` where it is not known: one rule is made in several
- *             places, which do not all do the same, and replay counts which
- *             of them the steps it certifies came from.
- *             `splittingName` is, for a general splitting component or what
- *             is left of the clause split, which of its literals is the name
- *             the splitting introduced (asserted in the one, denied in the
- *             other), and `NONE` for anything else: the name is a fresh
- *             predicate like any other vampire introduces, so nothing in the
- *             clause tells it apart from them.
- *             `satPremise` is the propositional clause a step derived by SAT
- *             solving stands on, and `NONE` for anything else.
- *             `name` is the string offset of the name the input gave this
- *             formula, and `NONE` for anything vampire derived. It says which
- *             hypothesis an `input` step restates, so replay need not search
- *             for one that matches.
- *             flags: 1 = clause. A clause's payload is its first literal
- *             index, a formula's payload is its formula index.
- *   unitLits  literal indices
- *   parents   unit indices
- *   varSorts  {variable, sort} pairs, giving the sorts a unit's free
- *             variables take -- a clause is implicitly universally quantified
- *             over them, so rebuilding it needs their sorts. The
- *             `numBoundSorts` pairs after a unit's own `numVarSorts` are the
- *             variables that occur only in what its uses bound its premises'
- *             variables to: a unifier's image can mention a variable that
- *             neither the premise nor the conclusion has, and reading that
- *             term back needs its sort as much as any other. They are kept
- *             apart because a unit's own variables are the quantifier prefix
- *             its conclusion is rebuilt with, and these are not part of it
- *   skolems   {variable, term} pairs: the existential variable a skolemisation
- *             step replaced, and the term it became. Skolemisation works on
- *             NNF rather than prenex input and a skolem takes only the
- *             universals it depends on, so the term is recorded as vampire
- *             built it rather than re-derived
- *   splits    string offsets of the names a clause holds under: splitting
- *             asserts a component's name and works on with the clause under
- *             that assumption, so what such a clause says is that its literals
- *             follow from the names it is written against
- *   satClauses{firstLit, numLits, firstPremise, numPremises, origin,
- *              firstOrder}: a clause of the propositional problem splitting
- *             hands to a SAT solver.
- *             `origin` is the unit this clause came from, for one that is a
- *             first-order clause's propositional shadow, and `NONE` for one
- *             the solver derived -- whose premises are then the clauses it was
- *             derived from, in the order the solver used them, each of which
- *             holds all but one of its literals falsified by the ones before
- *   satLits   string offsets of a propositional clause's literals, each the
- *             name of a component or its negation
- *   satPremises indices into `satClauses`
- *   namings   {nameOff, firstArg, numArgs, formula}: a predicate
- *             clausification introduced to name a subformula, the variables it
- *             was applied to, and the formula it names. The clauses saying
- *             what the name means come out of the same clausification rather
- *             than being stated on their own, so nothing in the proof says
- *             what the name stands for
- *   namingArgs variable numbers, the arguments of a naming
- *   genStates {parent, position, firstLit, numLits, firstReplacement,
- *              numReplacements, firstBinding, numBindings, how,
- *              firstPlacement, numPlacements}: one state of one of
- *             clausification's generalised clauses -- a disjunction of signed
- *             subformulas, together with what the variables it quantifies have
- *             been bound to. `parent` is the state this one was reached from
- *             and `position` the position replaced in it, both `NONE` for a
- *             clause clausification started from. Which conjunct a clause came
- *             from, which way round an equivalence was taken and what a
- *             quantifier was skolemised at are all here, and would otherwise
- *             have to be searched for
- *             `how` says how the state was reached (`InferenceStore::gen*`):
- *             0 = a clause clausification started from, 1 = a position
- *             replaced by `replacement`, 2 = a position rewritten in place,
- *             3 = one rewritten in place by a name
- *   genLits   {formula, sign} pairs, the signed subformulas of a generalised
- *             clause and of what replaced a position in one
- *   choices   {formula, argument} pairs: which argument of each conjunction
- *             the clausification of a clause went into. The other clausifier
- *             walks a formula in negation normal form, taking every disjunct
- *             into the clause it is building and each conjunct into a clause of
- *             its own, so a clause is one path through the conjunctions and
- *             this is that path
- *   uses      {premise, literal, term, flags, firstBinding, numBindings,
- *              other, factor}: how a generated clause used one of its
- *             premises. `premise` is that premise's number, `literal` the
- *             index of the literal the
- *             inference acted on or `NONE`, and `term` the index of the term it
- *             acted on within that literal or `NONE` -- a rewriting inference
- *             singles out a subterm rather than a whole literal. A generating
- *             inference discards the unifier it computes, so without this a
- *             reconstruction would have to recover it by matching the
- *             conclusion against the premises.
- *             flags: 1 = the term was rewritten throughout the premise rather
- *             than only in that literal, which is what simultaneous
- *             superposition does; 2, 4 and 8 = the virtual term VIRAS
- *             substituted for the variable it eliminated is plus an
- *             infinitesimal, plus infinity, minus infinity, and its term is
- *             `other`. `other` is a second term of the premise the inference
- *             acted on, or `NONE`: what an arithmetic equation `k s + t = 0`
- *             rewrote `s` to, `-t/k`, which is no side of it; the atom an
- *             inequality factoring unified `term` with; for an equality
- *             factoring, the other side of the equation `term` is one side
- *             of; or, for VIRAS, the virtual term's term. Like `term`, it is stated in the premise's
- *             variables. `factor` is the numeral the inference scaled the
- *             use's term by, `k` of `k s + t = 0` (`PremiseUse::factor`), or
- *             `NONE`
- *   bindings  {variable, term} pairs: what the unifier bound each of a
- *             premise's variables to
- *   congruences {kind, a, b, firstArg, numArgs}: one step of the reasoning
- *             behind a congruence-closure conflict, which is stated as an
- *             axiom and says only that its literals cannot all be false.
- *             kind 0 = the equality the clause's `a`th literal denies,
- *             1 = `f(as) = f(bs)` from `congruenceArgs`, one step for each
- *             pair of arguments and `NONE` where they are the same term, `a`
- *             and `b` being the two terms; 2 = steps `a` then `b`; 3 = step
- *             `a` the other way round; 4 = the clause's `a`th literal is the
- *             equality step `b` proves; 5 = the clause's `a`th and `b`th
- *             literals are one atom under both signs, `congruenceArgs` saying
- *             their arguments are equal. The last step of a unit's run is one
- *             of the last two kinds
- *   congruenceArgs indices into `congruences`
- *   placements {position, use, firstEntry, numEntries}: where the literals of
- *             one premise went. `position` is the premise's place among the
- *             unit's parents and `use` which of the uses recorded against it,
- *             counting from zero, or zero where none was. Each entry is the
- *             index of the conclusion's literal a premise literal became under
- *             the use's substitution, the top bit set where it became that
- *             literal with its equation turned round, the next where the
- *             inference rewrote it into that literal (`recordRewritten`) rather
- *             than carried it, and `NONE` where it
- *             became none of them -- resolved away, say. Vampire shares its
- *             literals, so this is pointer equality after substituting, and
- *             replay places each literal rather than looking for it. For an
- *             AVATAR split clause, the entries of a component's definition are
- *             for the component's literals, under the renaming recorded
- *             against it, and index the clause being split
- *   placementEntries words, the entries of `placements`. For a
- *             literal-wise simplification -- evaluation, theory normalization,
- *             ALASCA normalization, cancellation -- the entries for its
- *             premise are instead what the rule recorded each literal became,
- *             which it rewrote rather than carried, `NONE` for one it found
- *             false and dropped
- *   literalFactors string offsets of rationals, `n` or `n/d`: the number the
- *             difference of a comparison's sides is its normal form's term
- *             times, see `InferenceStore::LiteralImage`
- *   constraintLits literal positions within their unit's clause, the entries
- *             of a unit's constraints
- *   satOrder  for the shadow of a first-order clause, from `firstOrder` (`NONE`
- *             for any other), the index of the propositional literal each of
- *             the clause's literals became, one per literal of the clause:
- *             the shadow's literals are sorted, and the names say which is
- *             which only through their definitions
- *   introducedLits {literal, source} pairs, the entries of a unit's
- *             `firstIntroduced` and `numIntroduced`
- *   genPlacements where each literal a step pushed went in the clause it
- *             made, in the order it pushed them, bit 31 set where the push
- *             stored `~f` at a sign as `f` at the other (see `GenClauseState`)
- *   introducedTerms term indices, or `NONE` where the inference built no
- *             term there, in the conclusion's variables
- *   created   when each function symbol and then each predicate symbol was
- *             created, counted over both: a symbol vampire introduced is made
- *             of symbols that exist already, so this is an order to bind them in
- *   strings   NUL-terminated names, padded to a 4-byte boundary
- *   proofText vampire's own rendering of the proof, padded likewise
+ *   % SZS status <status> for problem
+ *   % SZS output start Refutation for problem      (with a refutation only)
+ *
+ *   tff(vampire_info, unknown, $true, unknown, [format(N), termination(R),
+ *       rules(Count,Fingerprint), polarity_flip_boundary(B), refutation(uK),
+ *       strategy('...'), times(Strategy,Setup,FoundAt)])
+ *     `termination` is vampire's termination reason, `refutation_not_found`
+ *     and so on; SZS cannot tell all of them apart. `rules` are how many
+ *     inference rules vampire declares and a hash of their names in order
+ *     (`VAMPIRE_RULE_FINGERPRINT`, see CMakeLists.txt), which the Lean side
+ *     checks its generated copy against. `polarity_flip_boundary` is the
+ *     number of the first step polarity flipping made, or zero. The last three
+ *     are there with a refutation only: the step that is the refutation, the
+ *     strategy that found it, from which alone the same run can be had again,
+ *     and what that strategy ran for, what starting up and parsing took and
+ *     when the proof was found, in milliseconds.
+ *
+ *   tff(sort_I, type, s: $tType).
+ *   tff(func_I, type, f: (s1 * s2) > s, unknown, [created(C)]).
+ *   tff(pred_I, type, p: (s1 * s2) > $o, unknown, [created(C), flipped,
+ *       pure(Value,Order)]).
+ *     Every sort and uninterpreted symbol, with what replay needs to know of
+ *     a symbol: when it was created, counted over functions and predicates
+ *     alike -- a symbol vampire introduced is made of symbols that exist
+ *     already, so this is an order to bind them in; whether polarity flipping
+ *     flipped a predicate, so that every step after it means the opposite by
+ *     it; and the truth value pure predicate removal replaced it by, with its
+ *     number among the predicates found pure in the order they were found.
+ *     Interpreted symbols are TPTP's own and are not declared. Numerals are
+ *     written as TPTP writes them, `3` and `1/3`, except that TPTP's reals are
+ *     decimals, so a real is `$to_real(1/3)`, which is also how vampire names
+ *     it. ALASCA's multiplication by a numeral `k` is `$$lin_mul(k, t)`. A
+ *     symbol whose type is not first-order over atomic sorts is left out.
+ *
+ *   tcf(uN, Role, ! [X0: s0, X1: s1] : (L1 | L2), Source, [Records]).
+ *   tff(uN, Role, Formula, Source, [Records]).
+ *     One step of the derivation, `N` being vampire's number for it; `tcf` for
+ *     a clause and `tff` for a formula. A clause is quantified over its
+ *     variables in the order vampire collects their sorts, and its literals
+ *     are in vampire's order, which the records index; `$false` is the empty
+ *     clause. In a formula, `~p` is a negative literal and `~ (f)` a negation,
+ *     an equality's sort is that of its sides, and a name for a formula is
+ *     `$$name('n')`. Steps come in the order the worker met them, from the
+ *     refutation back, so a step's premises follow it.
+ *     The source is `file('problem.p', name)` for an input formula, naming the
+ *     hypothesis it restates, and `inference(rule, [], [premises])` otherwise,
+ *     `rule` being the name of the `InferenceRule` enumerator in lower case.
+ *     The records, each there only where it says something:
+ *       var_sorts([v(V,s)])    a formula's variables' sorts
+ *       bound_sorts([v(V,s)])  the sorts of variables that occur only in what
+ *                              the uses bound premises' variables to: a
+ *                              unifier's image can mention a variable that
+ *                              neither the premise nor the conclusion has
+ *       input_name(n)          the input name of a step that is not an input
+ *       skolems([skolem(V,$fot(t))])  each existential variable a
+ *                              skolemisation replaced, and the term it became
+ *       uses([use(P, Lit, Term, Flags, [bind(V,$fot(t))], Other, Factor)])
+ *                              how the step used premise number `P`: the
+ *                              literal it acted on and the term within it,
+ *                              each `none` where there was none, flags (1 =
+ *                              the term was rewritten throughout the premise;
+ *                              2, 4, 8 = VIRAS's virtual term is plus an
+ *                              infinitesimal, plus infinity, minus infinity;
+ *                              16 = the premise states the term negated),
+ *                              what the unifier bound each of the premise's
+ *                              variables to, a second term it acted on and
+ *                              the numeral it scaled the term by
+ *                              (`InferenceStore::PremiseUse`)
+ *       splits(['n'])          the names a clause holds under
+ *       sat_premise(sat_I)     the propositional clause a step derived by SAT
+ *                              solving stands on
+ *       namings([naming(p, [V], F)])  a predicate clausification introduced
+ *                              to name formula `F`, and the variables it was
+ *                              applied to
+ *       gen_clause(gen_I)      the generalised clause a clause came out of
+ *       choices([choice(F, K)])  which argument of each conjunction the old
+ *                              clausifier took the clause into
+ *       congruences([...])     the reasoning behind a congruence-closure
+ *                              conflict, step by step: input(L) the equality
+ *                              literal `L` denies; congruence($fot(a),
+ *                              $fot(b), [S]) `a = b` from a step per pair of
+ *                              arguments, `none` where they are the same term;
+ *                              trans(S1,S2); symm(S); goal_equality(L, S)
+ *                              literal `L` is the equality step `S` proves;
+ *                              goal_literals(L1, L2, [S]) literals `L1` and
+ *                              `L2` are one atom under both signs. Steps are
+ *                              numbered within the step's run
+ *       constraints([L])       which literals are the disequalities an
+ *                              abstracting unifier left behind
+ *       placements([placement(K, U, [E])])  where the literals of the `K`th
+ *                              premise went under the `U`th use recorded
+ *                              against it: for each, the conclusion's literal
+ *                              it became, `turned(E)` with its equation turned
+ *                              round, `rewritten(E)` where the inference
+ *                              rewrote it into that literal rather than
+ *                              carried it, and `none` where it became none.
+ *                              For a literal-wise simplification, what the
+ *                              rule recorded each literal became; for an
+ *                              AVATAR split clause, the components' literals
+ *                              under each renaming, into the clause split
+ *       literal_factors([Q])   per premise literal of a literal-wise
+ *                              simplification that scaled one, the rational
+ *                              its sides' difference is its image's times
+ *       procedure(N)           which procedure rewrote a literal-wise
+ *                              simplification (`InferenceStore::LiteralProcedure`)
+ *       splitting_name(L)      the literal of a general splitting step that is
+ *                              the name it introduced
+ *       site('file:line')      where in vampire the inference was made
+ *       introduced([lit(L, S)])  the literals the inference built rather than
+ *                              carried, in the order it built them, each with
+ *                              the literal of the first premise it was made of
+ *                              or `none`
+ *       variant(N)             which of the shapes its rule builds this one is
+ *       introduced_symbol(f)   the first symbol vampire recorded it to
+ *                              introduce
+ *       introduced_terms([T])  terms the inference built that replay is told
+ *                              of, `$fot(t)` or `none`
+ *     Literals are indexed by their place in the clause as written. A formula
+ *     in a record stands on its own, so its free variables' sorts come with
+ *     it: `scoped([v(V,s)], $tff(F))`.
+ *
+ *   cnf(sat_I, plain, ($$name('n') | ~$$name('m')), Source, [order([K])]).
+ *     A clause of the propositional problem splitting hands to a SAT solver.
+ *     The source is `inference(sat_resolution, [], [sat_J, ...])` for one the
+ *     solver derived, from premises in the order it used them, each of which
+ *     holds all but one of its literals falsified by the ones before;
+ *     `inference(sat_conversion, [], [uN])` for a first-order clause's
+ *     propositional shadow, with `order` saying which of the shadow's literals
+ *     each of the clause's became, since the shadow sorts them; and `unknown`
+ *     for any other.
+ *
+ *   tff(gen_I, unknown, $true, unknown, [gen_state(Parent, Position, How,
+ *       [pos(F) | neg(F)], [Replacement], [bind(V,$fot(t))], [Placement])]).
+ *     One state of one of clausification's generalised clauses: a disjunction
+ *     of signed subformulas, together with what the variables it quantifies
+ *     have been bound to. `Parent` is the state it was reached from and
+ *     `Position` the position replaced in it, both `none` for a clause
+ *     clausification started from; `How` (`InferenceStore::gen*`) is 0 for a
+ *     clause started from, 1 for a position replaced by the replacement, 2 for
+ *     one rewritten in place and 3 for one rewritten in place by a name; and
+ *     each placement is where a literal the step pushed went, `turned(K)`
+ *     where the push stored `~f` at a sign as `f` at the other.
  */
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -287,7 +174,6 @@
 #include <string>
 #include <system_error>
 #include <tuple>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -327,8 +213,8 @@ using namespace Saturation;
 
 namespace {
 
-const uint32_t MAGIC = 0x504D4156;  // "VAMP"
-const uint32_t VERSION = 38;
+/** The version of the format described above, which the Lean side checks. */
+const uint32_t FORMAT = 1;
 /** Words per unit record. */
 const uint32_t UNIT_WIDTH = 41;
 const uint32_t NONE = 0xFFFFFFFFu;
@@ -692,14 +578,17 @@ static bool componentLiterals(Formula* definition, std::vector<Literal*>& lits)
 }
 
 struct Encoder {
-  std::vector<uint32_t> functions, predicates, sorts, terms, args, literals,
+  std::vector<uint32_t> sorts, terms, args, literals,
       formulas, subs, vars, units, unitLits, parents, varSorts, skolems, uses,
       bindings, splits, satClauses, satLits, satPremises, satOrder, namings, namingArgs,
       genStates, genLits, choices, congruences, congruenceArgs, placements,
       placementEntries, literalFactors, constraintLits, introducedLits,
-      genPlacements, created, introducedTerms;
+      genPlacements, introducedTerms;
+  /** The sort of each entry of `vars`, as `sorts` numbers them. */
+  std::vector<uint32_t> varSortsOfVars;
+  /** The formula each entry of `formulas` was made of. */
+  std::vector<Formula*> formulaPtrs;
   std::string strings;
-  std::string proofText;
   /** The strategy this proof was found by, as `strategy` reads it. */
   uint32_t strategy = NONE;
   /**
@@ -747,69 +636,6 @@ struct Encoder {
     strings.append(s);
     strings.push_back('\0');
     return off;
-  }
-
-  void encodeSignature()
-  {
-    for (unsigned i = 0; i < env.signature->functions(); i++) {
-      Signature::Symbol* sym = env.signature->getFunction(i);
-      functions.push_back(addString(sym->name()));
-      functions.push_back(sym->arity());
-      encodeNumeral(i, sym);
-      created.push_back(sym->created());
-    }
-    for (unsigned i = 0; i < env.signature->predicates(); i++) {
-      Signature::Symbol* sym = env.signature->getPredicate(i);
-      predicates.push_back(addString(sym->name()));
-      predicates.push_back(sym->arity());
-      bool pureValue = false;
-      unsigned pureOrder = 0;
-      bool pure = InferenceStore::instance()->purePredicate(i, pureValue, pureOrder);
-      predicates.push_back((sym->wasFlipped() ? 1 : 0) | (pure ? 2 : 0)
-        | (pure && pureValue ? 4 : 0) | (pure ? pureOrder << 8 : 0));
-    }
-    for (unsigned i = 0; i < env.signature->predicates(); i++)
-      created.push_back(env.signature->getPredicate(i)->created());
-  }
-
-  /** A number, as `numeral`, `numeratorOff` and `denominatorOff` say it. */
-  template <class Number>
-  void pushNumber(uint32_t kind, Number const& n)
-  {
-    std::ostringstream num, den;
-    if constexpr (std::is_same<Number, IntegerConstantType>::value) {
-      num << n;
-      den << 1;
-    } else {
-      num << n.numerator();
-      den << n.denominator();
-    }
-    functions.push_back(kind);
-    functions.push_back(addString(num.str()));
-    functions.push_back(addString(den.str()));
-  }
-
-  /**
-   * What number a function symbol is, so that replay reads it rather than
-   * parsing it out of how the symbol is printed.
-   */
-  void encodeNumeral(unsigned functor, Signature::Symbol* sym)
-  {
-    if (sym->integerConstant())
-      return pushNumber(1, sym->integerValue());
-    if (sym->rationalConstant())
-      return pushNumber(2, sym->rationalValue());
-    if (sym->realConstant())
-      return pushNumber(3, sym->realValue());
-    if (auto n = env.signature->tryLinMul<IntegerConstantType>(functor))
-      return pushNumber(5, *n);
-    if (auto n = env.signature->tryLinMul<RationalConstantType>(functor))
-      return pushNumber(6, *n);
-    if (auto n = env.signature->tryLinMul<RealConstantType>(functor))
-      return pushNumber(7, *n);
-    functions.push_back(0);
-    functions.push_back(NONE);
-    functions.push_back(NONE);
   }
 
   /**
@@ -916,11 +742,13 @@ struct Encoder {
     uint32_t idx = static_cast<uint32_t>(formulas.size() / 7);
     formulas.resize(formulas.size() + 7, 0);
     formulaSeen.emplace(f, idx);
+    formulaPtrs.push_back(f);
 
     uint32_t literal = NONE;
     uint32_t name = NONE;
     std::vector<uint32_t> subIdxs;
     std::vector<uint32_t> varNums;
+    std::vector<uint32_t> varSortIdxs;
 
     switch (f->connective()) {
       case LITERAL:
@@ -942,8 +770,10 @@ struct Encoder {
         break;
       case FORALL:
       case EXISTS:
-        for (const VSList* it = f->vars(); it; it = it->tail())
+        for (const VSList* it = f->vars(); it; it = it->tail()) {
           varNums.push_back(it->head().first);
+          varSortIdxs.push_back(encodeSort(it->head().second));
+        }
         subIdxs.push_back(encodeFormula(f->qarg()));
         break;
       case NAME:
@@ -960,6 +790,8 @@ struct Encoder {
     uint32_t firstVar = static_cast<uint32_t>(vars.size());
     for (uint32_t v : varNums)
       vars.push_back(v);
+    for (uint32_t sort : varSortIdxs)
+      varSortsOfVars.push_back(sort);
 
     formulas[7 * idx + 0] = static_cast<uint32_t>(f->connective());
     formulas[7 * idx + 1] = literal;
@@ -1721,132 +1553,741 @@ struct Encoder {
   }
 };
 
-void putWord(std::string& buf, uint32_t w)
+/** Whether @b s is a TPTP lower word, which is written without quotes. */
+bool isLowerWord(const std::string& s)
 {
-  char bytes[4] = {static_cast<char>(w & 0xFF),
-                   static_cast<char>((w >> 8) & 0xFF),
-                   static_cast<char>((w >> 16) & 0xFF),
-                   static_cast<char>((w >> 24) & 0xFF)};
-  buf.append(bytes, 4);
+  if (s.empty() || s[0] < 'a' || s[0] > 'z')
+    return false;
+  return std::all_of(s.begin(), s.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+  });
 }
 
-void putWords(std::string& buf, const std::vector<uint32_t>& ws)
+/** Whether @b s is a TPTP defined or system word: `$sum`, `$$name`. */
+bool isDollarWord(const std::string& s)
 {
-  for (uint32_t w : ws)
-    putWord(buf, w);
+  size_t dollars = s.compare(0, 2, "$$") == 0 ? 2 : s.compare(0, 1, "$") == 0 ? 1 : 0;
+  return dollars != 0 && isLowerWord(s.substr(dollars));
 }
 
-void putBlob(std::string& buf, const std::string& blob)
+/** @b s as a TPTP single-quoted atom. */
+std::string quoted(const std::string& s)
 {
-  buf.append(blob);
-  while (buf.size() % 4 != 0)
-    buf.push_back('\0');
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\\' || c == '\'')
+      out.push_back('\\');
+    out.push_back(c);
+  }
+  out.push_back('\'');
+  return out;
 }
 
-void write(const std::string& path, const Encoder& enc, uint32_t reason,
-           uint32_t refutation)
+/** @b s as an atom of a general term: a lower word, or else quoted. */
+std::string atom(const std::string& s) { return isLowerWord(s) ? s : quoted(s); }
+
+/** @b s as a symbol of a formula, where `$sum` and `$$name` stand as they are. */
+std::string symbol(const std::string& s)
 {
-  std::string buf;
-  putWord(buf, MAGIC);
-  putWord(buf, VERSION);
-  putWord(buf, reason);
-  putWord(buf, refutation == NONE ? 0 : 1);
-  putWord(buf, refutation);
-  putWord(buf, static_cast<uint32_t>(enc.functions.size() / 5));
-  putWord(buf, static_cast<uint32_t>(enc.predicates.size() / 3));
-  putWord(buf, static_cast<uint32_t>(enc.sorts.size()));
-  putWord(buf, static_cast<uint32_t>(enc.terms.size() / 4));
-  putWord(buf, static_cast<uint32_t>(enc.args.size()));
-  putWord(buf, static_cast<uint32_t>(enc.literals.size() / 5));
-  putWord(buf, static_cast<uint32_t>(enc.formulas.size() / 7));
-  putWord(buf, static_cast<uint32_t>(enc.subs.size()));
-  putWord(buf, static_cast<uint32_t>(enc.vars.size()));
-  putWord(buf, static_cast<uint32_t>(enc.units.size() / UNIT_WIDTH));
-  putWord(buf, static_cast<uint32_t>(enc.unitLits.size()));
-  putWord(buf, static_cast<uint32_t>(enc.parents.size()));
-  putWord(buf, static_cast<uint32_t>(enc.varSorts.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.skolems.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.splits.size()));
-  putWord(buf, static_cast<uint32_t>(enc.satClauses.size() / 6));
-  putWord(buf, static_cast<uint32_t>(enc.satLits.size()));
-  putWord(buf, static_cast<uint32_t>(enc.satPremises.size()));
-  putWord(buf, static_cast<uint32_t>(enc.namings.size() / 4));
-  putWord(buf, static_cast<uint32_t>(enc.namingArgs.size()));
-  putWord(buf, static_cast<uint32_t>(enc.genStates.size() / 11));
-  putWord(buf, static_cast<uint32_t>(enc.genLits.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.choices.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.uses.size() / 8));
-  putWord(buf, static_cast<uint32_t>(enc.bindings.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.congruences.size() / 5));
-  putWord(buf, static_cast<uint32_t>(enc.congruenceArgs.size()));
-  putWord(buf, static_cast<uint32_t>(enc.strings.size()));
-  putWord(buf, static_cast<uint32_t>(enc.proofText.size()));
-  // Lets the Lean side notice that its generated `InferenceRule` is stale.
-  putWord(buf, RULE_COUNT);
-  putWord(buf, InferenceStore::instance()->polarityFlipBoundary());
-  putWord(buf, enc.strategy);
-  putWord(buf, enc.strategyMs);
-  putWord(buf, enc.setupMs);
-  putWord(buf, enc.foundAtMs);
-  // The count above notices a rule added or removed, and this hash notices
-  // two rules that traded places, which would otherwise decode as each other.
-  putWord(buf, VAMPIRE_RULE_FINGERPRINT);
-  putWord(buf, static_cast<uint32_t>(enc.placements.size() / 4));
-  putWord(buf, static_cast<uint32_t>(enc.placementEntries.size()));
-  putWord(buf, static_cast<uint32_t>(enc.literalFactors.size()));
-  putWord(buf, static_cast<uint32_t>(enc.constraintLits.size()));
-  putWord(buf, static_cast<uint32_t>(enc.satOrder.size()));
-  putWord(buf, static_cast<uint32_t>(enc.introducedLits.size() / 2));
-  putWord(buf, static_cast<uint32_t>(enc.genPlacements.size()));
-  putWord(buf, static_cast<uint32_t>(enc.created.size()));
-  putWord(buf, static_cast<uint32_t>(enc.introducedTerms.size()));
+  return isLowerWord(s) || isDollarWord(s) ? s : quoted(s);
+}
 
-  putWords(buf, enc.functions);
-  putWords(buf, enc.predicates);
-  putWords(buf, enc.sorts);
-  putWords(buf, enc.terms);
-  putWords(buf, enc.args);
-  putWords(buf, enc.literals);
-  putWords(buf, enc.formulas);
-  putWords(buf, enc.subs);
-  putWords(buf, enc.vars);
-  putWords(buf, enc.units);
-  putWords(buf, enc.unitLits);
-  putWords(buf, enc.parents);
-  putWords(buf, enc.varSorts);
-  putWords(buf, enc.skolems);
-  putWords(buf, enc.splits);
-  putWords(buf, enc.satClauses);
-  putWords(buf, enc.satLits);
-  putWords(buf, enc.satPremises);
-  putWords(buf, enc.namings);
-  putWords(buf, enc.namingArgs);
-  putWords(buf, enc.genStates);
-  putWords(buf, enc.genLits);
-  putWords(buf, enc.choices);
-  putWords(buf, enc.uses);
-  putWords(buf, enc.bindings);
-  putWords(buf, enc.congruences);
-  putWords(buf, enc.congruenceArgs);
-  putWords(buf, enc.placements);
-  putWords(buf, enc.placementEntries);
-  putWords(buf, enc.literalFactors);
-  putWords(buf, enc.constraintLits);
-  putWords(buf, enc.satOrder);
-  putWords(buf, enc.introducedLits);
-  putWords(buf, enc.genPlacements);
-  putWords(buf, enc.created);
-  putWords(buf, enc.introducedTerms);
-  putBlob(buf, enc.strings);
-  putBlob(buf, enc.proofText);
+/** The names `InferenceRule`'s enumerators are written by, in order, lower-cased. */
+const std::vector<std::string>& ruleNames()
+{
+  static std::vector<std::string> names = [] {
+    std::vector<std::string> out;
+    std::string name;
+    for (const char* c = VAMPIRE_RULE_NAMES;; c++) {
+      if (*c == ',' || *c == '\0') {
+        out.push_back(name);
+        name.clear();
+        if (*c == '\0')
+          break;
+      } else {
+        name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*c))));
+      }
+    }
+    return out;
+  }();
+  return names;
+}
 
-  // Written aside and renamed so that a half-written file is never visible:
-  // in portfolio mode the process doing this can be killed at any moment.
+/** The TSTP rendering of what an `Encoder` collected; see the top of this file. */
+class TstpWriter {
+public:
+  explicit TstpWriter(const Encoder& enc)
+    : _enc(enc),
+      _termText(enc.terms.size() / 4),
+      _termDone(enc.terms.size() / 4, false),
+      _formulaText(enc.formulas.size() / 7),
+      _formulaDone(enc.formulas.size() / 7, false)
+  {
+    for (unsigned f = 0; f < env.signature->functions(); f++)
+      _functors.push_back(describeFunctor(f));
+  }
+
+  std::string write(uint32_t reason, uint32_t refutation)
+  {
+    static const char* const reasons[] = {
+      "refutation", "satisfiable", "refutation_not_found", "inappropriate",
+      "unknown", "time_limit", "instruction_limit", "memory_limit",
+      "activation_limit"};
+    static const char* const szs[] = {
+      "Unsatisfiable", "Satisfiable", "GaveUp", "Inappropriate", "Unknown",
+      "Timeout", "ResourceOut", "MemoryOut", "ResourceOut"};
+    const size_t numReasons = sizeof(reasons) / sizeof(reasons[0]);
+    if (reason >= numReasons)
+      throw UserErrorException("unknown termination reason " + std::to_string(reason));
+    std::string out;
+    out += "% SZS status " + std::string(szs[reason]) + " for problem\n";
+    if (refutation != NONE)
+      out += "% SZS output start Refutation for problem\n";
+
+    out += "tff(vampire_info, unknown, $true, unknown, [format(" +
+      std::to_string(FORMAT) + "), termination(" + reasons[reason] + "), rules(" +
+      std::to_string(RULE_COUNT) + "," + std::to_string(VAMPIRE_RULE_FINGERPRINT) +
+      "), polarity_flip_boundary(" +
+      std::to_string(InferenceStore::instance()->polarityFlipBoundary()) + ")";
+    if (refutation != NONE)
+      out += ", refutation(" + unitName(refutation) + ")";
+    if (_enc.strategy != NONE)
+      out += ", strategy(" + quoted(string(_enc.strategy)) + "), times(" +
+        std::to_string(_enc.strategyMs) + "," + std::to_string(_enc.setupMs) + "," +
+        std::to_string(_enc.foundAtMs) + ")";
+    out += "]).\n";
+
+    declarations(out);
+    for (uint32_t i = 0; i < _enc.units.size() / UNIT_WIDTH; i++)
+      unit(i, out);
+    for (uint32_t i = 0; i < _enc.satClauses.size() / 6; i++)
+      satClause(i, out);
+    for (uint32_t i = 0; i < _enc.genStates.size() / 11; i++)
+      genState(i, out);
+
+    if (refutation != NONE)
+      out += "% SZS output end Refutation for problem\n";
+    return out;
+  }
+
+private:
+  /** How a function symbol is written. */
+  struct Functor {
+    std::string text;
+    /** ALASCA's multiplication by `text`, written `$$lin_mul(text, t)`. */
+    bool linMul = false;
+  };
+
+  const Encoder& _enc;
+  std::vector<Functor> _functors;
+  std::vector<std::string> _termText;
+  std::vector<bool> _termDone;
+  std::vector<std::string> _formulaText;
+  std::vector<bool> _formulaDone;
+
+  std::string string(uint32_t off) const { return std::string(_enc.strings.data() + off); }
+
+  std::string unitName(uint32_t idx) const
+  {
+    return "u" + std::to_string(_enc.units[UNIT_WIDTH * idx]);
+  }
+
+  static std::string optional(uint32_t v) { return v == NONE ? "none" : std::to_string(v); }
+
+  /**
+   * A numeral as TPTP writes one of its sort: `3`, `1/3`, and, since TPTP's
+   * reals are decimals, `$to_real(1/3)`, which is also how vampire names it.
+   */
+  static Functor describeFunctor(unsigned f)
+  {
+    Signature::Symbol* sym = env.signature->getFunction(f);
+    auto integer = [](IntegerConstantType const& n) {
+      std::ostringstream o;
+      o << n;
+      return o.str();
+    };
+    auto rational = [](auto const& n) {
+      std::ostringstream o;
+      o << n.numerator() << "/" << n.denominator();
+      return o.str();
+    };
+    if (sym->integerConstant())
+      return {integer(sym->integerValue())};
+    if (sym->rationalConstant())
+      return {rational(sym->rationalValue())};
+    if (sym->realConstant())
+      return {"$to_real(" + rational(sym->realValue()) + ")"};
+    if (auto n = env.signature->tryLinMul<IntegerConstantType>(f))
+      return {integer(*n), true};
+    if (auto n = env.signature->tryLinMul<RationalConstantType>(f))
+      return {rational(*n), true};
+    if (auto n = env.signature->tryLinMul<RealConstantType>(f))
+      return {"$to_real(" + rational(*n) + ")", true};
+    return {symbol(sym->name())};
+  }
+
+  /** An atomic sort's name, or empty for a sort this format cannot write. */
+  static std::string sortName(TermList sort)
+  {
+    if (!sort.isTerm() || sort.term()->arity() != 0)
+      return "";
+    return env.signature->typeConName(sort.term()->functor());
+  }
+
+  std::string sortText(uint32_t sortIdx) const { return symbol(string(_enc.sorts[sortIdx])); }
+
+  std::string sortAtom(uint32_t sortIdx) const { return atom(string(_enc.sorts[sortIdx])); }
+
+  const std::string& term(uint32_t t)
+  {
+    if (_termDone[t])
+      return _termText[t];
+    const auto& T = _enc.terms;
+    std::string out;
+    if (T[4 * t] == 0) {
+      out = "X" + std::to_string(T[4 * t + 1]);
+    } else {
+      const Functor& f = _functors[T[4 * t + 1]];
+      uint32_t first = T[4 * t + 2];
+      uint32_t arity = T[4 * t + 3];
+      if (f.linMul) {
+        out = "$$lin_mul(" + f.text + "," + term(_enc.args[first]) + ")";
+      } else {
+        out = f.text;
+        if (arity != 0) {
+          out += "(";
+          for (uint32_t i = 0; i < arity; i++) {
+            if (i)
+              out += ",";
+            out += term(_enc.args[first + i]);
+          }
+          out += ")";
+        }
+      }
+    }
+    _termText[t] = std::move(out);
+    _termDone[t] = true;
+    return _termText[t];
+  }
+
+  std::string fot(uint32_t t) { return "$fot(" + term(t) + ")"; }
+
+  std::string optionalTerm(uint32_t t) { return t == NONE ? "none" : fot(t); }
+
+  std::string literal(uint32_t l)
+  {
+    const auto& L = _enc.literals;
+    uint32_t flags = L[5 * l + 1];
+    uint32_t first = L[5 * l + 2];
+    uint32_t arity = L[5 * l + 3];
+    bool positive = flags & 1;
+    if (flags & 2)
+      return term(_enc.args[first]) + (positive ? " = " : " != ") +
+             term(_enc.args[first + 1]);
+    std::string out = symbol(env.signature->getPredicate(L[5 * l])->name());
+    if (arity != 0) {
+      out += "(";
+      for (uint32_t i = 0; i < arity; i++) {
+        if (i)
+          out += ",";
+        out += term(_enc.args[first + i]);
+      }
+      out += ")";
+    }
+    return positive ? out : "~" + out;
+  }
+
+  const std::string& formula(uint32_t f)
+  {
+    if (_formulaDone[f])
+      return _formulaText[f];
+    const auto& F = _enc.formulas;
+    uint32_t firstSub = F[7 * f + 2];
+    uint32_t numSubs = F[7 * f + 3];
+    auto sub = [&](uint32_t i) -> const std::string& {
+      return formula(_enc.subs[firstSub + i]);
+    };
+    std::string out;
+    switch (F[7 * f]) {
+      case LITERAL:
+        out = literal(F[7 * f + 1]);
+        break;
+      case AND:
+      case OR:
+        if (numSubs < 2)
+          throw UserErrorException("cannot write a junction of " +
+                                   std::to_string(numSubs) + " formulas");
+        out = "(";
+        for (uint32_t i = 0; i < numSubs; i++) {
+          if (i)
+            out += F[7 * f] == AND ? " & " : " | ";
+          out += sub(i);
+        }
+        out += ")";
+        break;
+      case IMP:
+      case IFF:
+      case XOR:
+        out = "(" + sub(0) + (F[7 * f] == IMP ? " => " : F[7 * f] == IFF ? " <=> " : " <~> ") +
+              sub(1) + ")";
+        break;
+      case NOT:
+        out = "~ (" + sub(0) + ")";
+        break;
+      case FORALL:
+      case EXISTS: {
+        uint32_t firstVar = F[7 * f + 4];
+        uint32_t numVars = F[7 * f + 5];
+        out = F[7 * f] == FORALL ? "! [" : "? [";
+        for (uint32_t i = 0; i < numVars; i++) {
+          if (i)
+            out += ", ";
+          out += "X" + std::to_string(_enc.vars[firstVar + i]) + ": " +
+                 sortText(_enc.varSortsOfVars[firstVar + i]);
+        }
+        out += "] : (" + sub(0) + ")";
+        break;
+      }
+      case TRUE:
+        out = "$true";
+        break;
+      case FALSE:
+        out = "$false";
+        break;
+      case NAME:
+        out = "$$name(" + atom(string(F[7 * f + 6])) + ")";
+        break;
+      case BOOL_TERM:
+        out = "$$bool_term";
+        break;
+      default:
+        out = "$$noconn";
+        break;
+    }
+    _formulaText[f] = std::move(out);
+    _formulaDone[f] = true;
+    return _formulaText[f];
+  }
+
+  /**
+   * A formula of a record, which stands on its own and so may have variables
+   * free -- a subformula of what was clausified -- together with their sorts.
+   */
+  std::string recordFormula(uint32_t f)
+  {
+    DHMap<unsigned, TermList, FnvHash, IdentityHash> sorts;
+    SortHelper::collectVariableSorts(_enc.formulaPtrs[f], sorts);
+    std::string scope;
+    DHMap<unsigned, TermList, FnvHash, IdentityHash>::Iterator it(sorts);
+    while (it.hasNext()) {
+      unsigned var;
+      TermList sort;
+      it.next(var, sort);
+      std::string name = sortName(sort);
+      if (name.empty())
+        throw UserErrorException("cannot write the sort " + sort.toString() +
+                                 ": only atomic sorts are supported");
+      scope += (scope.empty() ? "" : ",") + std::string("v(") + std::to_string(var) +
+               "," + atom(name) + ")";
+    }
+    std::string body = "$tff(" + formula(f) + ")";
+    return scope.empty() ? body : "scoped([" + scope + "]," + body + ")";
+  }
+
+  std::string varSortList(uint32_t first, uint32_t count) const
+  {
+    std::string out = "[";
+    for (uint32_t i = 0; i < count; i++) {
+      if (i)
+        out += ",";
+      out += "v(" + std::to_string(_enc.varSorts[2 * (first + i)]) + "," +
+             sortAtom(_enc.varSorts[2 * (first + i) + 1]) + ")";
+    }
+    return out + "]";
+  }
+
+  std::string bindingList(uint32_t first, uint32_t count)
+  {
+    std::string out = "[";
+    for (uint32_t i = 0; i < count; i++) {
+      if (i)
+        out += ",";
+      out += "bind(" + std::to_string(_enc.bindings[2 * (first + i)]) + "," +
+             fot(_enc.bindings[2 * (first + i) + 1]) + ")";
+    }
+    return out + "]";
+  }
+
+  static std::string typeText(OperatorType* type, unsigned arity, const std::string& result)
+  {
+    if (arity == 0)
+      return result;
+    std::string args;
+    for (unsigned i = 0; i < arity; i++) {
+      std::string name = sortName(type->arg(i));
+      if (name.empty())
+        return "";
+      args += (i ? " * " : "") + symbol(name);
+    }
+    return (arity == 1 ? args : "(" + args + ")") + " > " + result;
+  }
+
+  /**
+   * The sorts and uninterpreted symbols, as TFF type declarations: TPTP's own
+   * sorts, numerals and operations it declares itself. A symbol whose type
+   * this format cannot write is left out, and fails to read where it is used.
+   */
+  void declarations(std::string& out)
+  {
+    for (unsigned i = 0; i < env.signature->typeCons(); i++) {
+      std::string name = env.signature->typeConName(i);
+      if (name.empty() || name[0] == '$' || env.signature->getTypeCon(i)->arity() != 0)
+        continue;
+      out += "tff(sort_" + std::to_string(i) + ", type, " + symbol(name) + ": $tType).\n";
+    }
+    for (unsigned f = 0; f < env.signature->functions(); f++) {
+      Signature::Symbol* sym = env.signature->getFunction(f);
+      if (sym->interpreted() || sym->linMul() || sym->name().empty() || sym->name()[0] == '$')
+        continue;
+      OperatorType* type = sym->type();
+      if (type->numTypeArguments() != 0)
+        continue;
+      std::string result = sortName(type->result());
+      if (result.empty())
+        continue;
+      std::string text = typeText(type, sym->arity(), symbol(result));
+      if (text.empty())
+        continue;
+      out += "tff(func_" + std::to_string(f) + ", type, " + symbol(sym->name()) + ": " +
+             text + ", unknown, [created(" + std::to_string(sym->created()) + ")]).\n";
+    }
+    for (unsigned p = 1; p < env.signature->predicates(); p++) {
+      Signature::Symbol* sym = env.signature->getPredicate(p);
+      if (sym->interpreted() || sym->name().empty() || sym->name()[0] == '$')
+        continue;
+      OperatorType* type = sym->type();
+      if (type->numTypeArguments() != 0)
+        continue;
+      std::string text = typeText(type, sym->arity(), "$o");
+      if (text.empty())
+        continue;
+      std::string info = "created(" + std::to_string(sym->created()) + ")";
+      if (sym->wasFlipped())
+        info += ", flipped";
+      bool pureValue = false;
+      unsigned pureOrder = 0;
+      if (InferenceStore::instance()->purePredicate(p, pureValue, pureOrder))
+        info += std::string(", pure(") + (pureValue ? "true" : "false") + "," +
+                std::to_string(pureOrder) + ")";
+      out += "tff(pred_" + std::to_string(p) + ", type, " + symbol(sym->name()) + ": " +
+             text + ", unknown, [" + info + "]).\n";
+    }
+  }
+
+  /** A placement entry: the literal's place, and how it got there. */
+  static std::string placed(uint32_t entry)
+  {
+    if (entry == NONE)
+      return "none";
+    std::string out = std::to_string(entry & ~(PLACED_TURNED | PLACED_REWRITTEN));
+    if (entry & PLACED_TURNED)
+      out = "turned(" + out + ")";
+    if (entry & PLACED_REWRITTEN)
+      out = "rewritten(" + out + ")";
+    return out;
+  }
+
+  void unit(uint32_t idx, std::string& out)
+  {
+    auto u = [&](unsigned off) { return _enc.units[UNIT_WIDTH * idx + off]; };
+    bool isClause = u(3) & 1;
+    uint32_t rule = u(1);
+    const auto& names = ruleNames();
+    if (rule >= names.size())
+      throw UserErrorException("unit " + std::to_string(u(0)) + " has unknown rule " +
+                               std::to_string(rule));
+    std::vector<std::string> records;
+    auto record = [&](const std::string& r) { records.push_back(r); };
+
+    // The statement. A clause is universally quantified over its variables,
+    // which are written in the order `varSorts` gives them.
+    std::string statement;
+    if (isClause) {
+      uint32_t numLits = u(5);
+      if (numLits == 0) {
+        statement = "$false";
+      } else {
+        std::string lits;
+        for (uint32_t i = 0; i < numLits; i++)
+          lits += (i ? " | " : "") + literal(_enc.unitLits[u(4) + i]);
+        statement = "(" + lits + ")";
+      }
+      if (u(9) != 0) {
+        std::string prefix = "! [";
+        for (uint32_t i = 0; i < u(9); i++) {
+          uint32_t at = 2 * (u(8) + i);
+          prefix += (i ? ", " : "") + std::string("X") + std::to_string(_enc.varSorts[at]) +
+                    ": " + sortText(_enc.varSorts[at + 1]);
+        }
+        statement = prefix + "] : " + statement;
+      }
+    } else {
+      statement = formula(u(4));
+      if (u(9) != 0)
+        record("var_sorts(" + varSortList(u(8), u(9)) + ")");
+    }
+    if (u(25) != 0)
+      record("bound_sorts(" + varSortList(u(8) + u(9), u(25)) + ")");
+
+    // Where it came from: an input formula by its name, as TSTP has it, and
+    // anything else by its rule and premises.
+    std::string parents;
+    for (uint32_t i = 0; i < u(7); i++)
+      parents += (i ? "," : "") + unitName(_enc.parents[u(6) + i]);
+    std::string source;
+    if (rule == toNumber(InferenceRule::INPUT) && u(7) == 0 && u(12) != NONE) {
+      source = "file('problem.p'," + atom(string(u(12))) + ")";
+    } else {
+      source = "inference(" + names[rule] + ",[],[" + parents + "])";
+      if (u(12) != NONE)
+        record("input_name(" + atom(string(u(12))) + ")");
+    }
+
+    if (u(11) != 0) {
+      std::string r = "skolems([";
+      for (uint32_t i = 0; i < u(11); i++)
+        r += (i ? "," : "") + std::string("skolem(") +
+             std::to_string(_enc.skolems[2 * (u(10) + i)]) + "," +
+             fot(_enc.skolems[2 * (u(10) + i) + 1]) + ")";
+      record(r + "])");
+    }
+    if (u(14) != 0) {
+      std::string r = "uses([";
+      for (uint32_t i = 0; i < u(14); i++) {
+        auto w = [&](unsigned off) { return _enc.uses[8 * (u(13) + i) + off]; };
+        r += (i ? "," : "") + std::string("use(") + std::to_string(w(0)) + "," +
+             optional(w(1)) + "," + optionalTerm(w(2)) + "," + std::to_string(w(3)) + "," +
+             bindingList(w(4), w(5)) + "," + optionalTerm(w(6)) + "," + optionalTerm(w(7)) +
+             ")";
+      }
+      record(r + "])");
+    }
+    if (u(16) != 0) {
+      std::string r = "splits([";
+      for (uint32_t i = 0; i < u(16); i++)
+        r += (i ? "," : "") + atom(string(_enc.splits[u(15) + i]));
+      record(r + "])");
+    }
+    if (u(17) != NONE)
+      record("sat_premise(sat_" + std::to_string(u(17)) + ")");
+    if (u(19) != 0) {
+      std::string r = "namings([";
+      for (uint32_t i = 0; i < u(19); i++) {
+        auto w = [&](unsigned off) { return _enc.namings[4 * (u(18) + i) + off]; };
+        std::string args;
+        for (uint32_t k = 0; k < w(2); k++)
+          args += (k ? "," : "") + std::to_string(_enc.namingArgs[w(1) + k]);
+        r += (i ? "," : "") + std::string("naming(") + atom(string(w(0))) + ",[" + args +
+             "]," + recordFormula(w(3)) + ")";
+      }
+      record(r + "])");
+    }
+    if (u(20) != NONE)
+      record("gen_clause(gen_" + std::to_string(u(20)) + ")");
+    if (u(22) != 0) {
+      std::string r = "choices([";
+      for (uint32_t i = 0; i < u(22); i++)
+        r += (i ? "," : "") + std::string("choice(") +
+             recordFormula(_enc.choices[2 * (u(21) + i)]) + "," +
+             std::to_string(_enc.choices[2 * (u(21) + i) + 1]) + ")";
+      record(r + "])");
+    }
+    if (u(24) != 0) {
+      std::string r = "congruences([";
+      for (uint32_t i = 0; i < u(24); i++) {
+        auto w = [&](unsigned off) { return _enc.congruences[5 * (u(23) + i) + off]; };
+        std::string args = "[";
+        for (uint32_t k = 0; k < w(4); k++)
+          args += (k ? "," : "") + optional(_enc.congruenceArgs[w(3) + k]);
+        args += "]";
+        std::string step;
+        switch (w(0)) {
+          case congruence::INPUT:
+            step = "input(" + std::to_string(w(1)) + ")";
+            break;
+          case congruence::CONGRUENCE:
+            step = "congruence(" + fot(w(1)) + "," + fot(w(2)) + "," + args + ")";
+            break;
+          case congruence::TRANS:
+            step = "trans(" + std::to_string(w(1)) + "," + std::to_string(w(2)) + ")";
+            break;
+          case congruence::SYMM:
+            step = "symm(" + std::to_string(w(1)) + ")";
+            break;
+          case congruence::GOAL_EQUALITY:
+            step = "goal_equality(" + std::to_string(w(1)) + "," + optional(w(2)) + ")";
+            break;
+          default:
+            step = "goal_literals(" + std::to_string(w(1)) + "," + std::to_string(w(2)) +
+                   "," + args + ")";
+            break;
+        }
+        r += (i ? "," : "") + step;
+      }
+      record(r + "])");
+    }
+    if (u(27) != 0) {
+      std::string r = "constraints([";
+      for (uint32_t i = 0; i < u(27); i++)
+        r += (i ? "," : "") + std::to_string(_enc.constraintLits[u(26) + i]);
+      record(r + "])");
+    }
+    if (u(29) != 0) {
+      std::string r = "placements([";
+      for (uint32_t i = 0; i < u(29); i++) {
+        auto w = [&](unsigned off) { return _enc.placements[4 * (u(28) + i) + off]; };
+        std::string entries;
+        for (uint32_t k = 0; k < w(3); k++)
+          entries += (k ? "," : "") + placed(_enc.placementEntries[w(2) + k]);
+        r += (i ? "," : "") + std::string("placement(") + std::to_string(w(0)) + "," +
+             std::to_string(w(1)) + ",[" + entries + "])";
+      }
+      record(r + "])");
+    }
+    if (u(30) != NONE)
+      record("splitting_name(" + std::to_string(u(30)) + ")");
+    if (u(32) != 0) {
+      std::string r = "literal_factors([";
+      for (uint32_t i = 0; i < u(32); i++)
+        r += (i ? "," : "") + string(_enc.literalFactors[u(31) + i]);
+      record(r + "])");
+    }
+    if (u(33) != NONE)
+      record("procedure(" + std::to_string(u(33)) + ")");
+    if (u(34) != NONE)
+      record("site(" + quoted(string(u(34))) + ")");
+    if (u(36) != 0) {
+      std::string r = "introduced([";
+      for (uint32_t i = 0; i < u(36); i++)
+        r += (i ? "," : "") + std::string("lit(") +
+             std::to_string(_enc.introducedLits[2 * (u(35) + i)]) + "," +
+             optional(_enc.introducedLits[2 * (u(35) + i) + 1]) + ")";
+      record(r + "])");
+    }
+    if (u(37) != 0)
+      record("variant(" + std::to_string(u(37)) + ")");
+    if (u(38) != NONE)
+      record("introduced_symbol(" + atom(string(u(38))) + ")");
+    if (u(40) != 0) {
+      std::string r = "introduced_terms([";
+      for (uint32_t i = 0; i < u(40); i++)
+        r += (i ? "," : "") + optionalTerm(_enc.introducedTerms[u(39) + i]);
+      record(r + "])");
+    }
+
+    out += std::string(isClause ? "tcf(" : "tff(") + unitName(idx) + ", " +
+           role(idx) + ", " + statement + ", " + source;
+    if (!records.empty()) {
+      out += ", [";
+      for (size_t i = 0; i < records.size(); i++)
+        out += (i ? ", " : "") + records[i];
+      out += "]";
+    }
+    out += ").\n";
+  }
+
+  std::string role(uint32_t idx) const
+  {
+    if (_enc.units[UNIT_WIDTH * idx + 1] != toNumber(InferenceRule::INPUT))
+      return "plain";
+    switch (static_cast<UnitInputType>(_enc.units[UNIT_WIDTH * idx + 2])) {
+      case UnitInputType::ASSUMPTION:
+        return "hypothesis";
+      case UnitInputType::CONJECTURE:
+        return "conjecture";
+      case UnitInputType::NEGATED_CONJECTURE:
+        return "negated_conjecture";
+      default:
+        return "axiom";
+    }
+  }
+
+  /** A propositional literal: a component's name, or its negation. */
+  static std::string satLiteral(const std::string& name)
+  {
+    if (!name.empty() && name[0] == '~')
+      return "~$$name(" + atom(name.substr(1)) + ")";
+    return "$$name(" + atom(name) + ")";
+  }
+
+  void satClause(uint32_t idx, std::string& out)
+  {
+    auto w = [&](unsigned off) { return _enc.satClauses[6 * idx + off]; };
+    std::string lits;
+    for (uint32_t i = 0; i < w(1); i++)
+      lits += (i ? " | " : "") + satLiteral(string(_enc.satLits[w(0) + i]));
+    std::string statement = w(1) == 0 ? "$false" : "(" + lits + ")";
+    std::string source = "unknown";
+    if (w(3) != 0) {
+      std::string premises;
+      for (uint32_t i = 0; i < w(3); i++)
+        premises += (i ? "," : "") + std::string("sat_") +
+                    std::to_string(_enc.satPremises[w(2) + i]);
+      source = "inference(sat_resolution,[],[" + premises + "])";
+    } else if (w(4) != NONE) {
+      source = "inference(sat_conversion,[],[" + unitName(w(4)) + "])";
+    }
+    out += "cnf(sat_" + std::to_string(idx) + ", plain, " + statement + ", " + source;
+    if (w(5) != NONE) {
+      // One entry per literal of the clause it is the shadow of.
+      uint32_t origin = w(4);
+      uint32_t count = _enc.units[UNIT_WIDTH * origin + 3] & 1
+        ? _enc.units[UNIT_WIDTH * origin + 5] : 0;
+      std::string order;
+      for (uint32_t i = 0; i < count; i++)
+        order += (i ? "," : "") + std::to_string(_enc.satOrder[w(5) + i]);
+      out += ", [order([" + order + "])]";
+    }
+    out += ").\n";
+  }
+
+  void genState(uint32_t idx, std::string& out)
+  {
+    auto w = [&](unsigned off) { return _enc.genStates[11 * idx + off]; };
+    auto lits = [&](uint32_t first, uint32_t count) {
+      std::string r = "[";
+      for (uint32_t i = 0; i < count; i++)
+        r += (i ? "," : "") + std::string(_enc.genLits[2 * (first + i) + 1] ? "pos(" : "neg(") +
+             recordFormula(_enc.genLits[2 * (first + i)]) + ")";
+      return r + "]";
+    };
+    std::string placements = "[";
+    for (uint32_t i = 0; i < w(10); i++) {
+      uint32_t placed = _enc.genPlacements[w(9) + i];
+      std::string at = std::to_string(placed & 0x7FFFFFFFu);
+      placements += (i ? "," : "") + (placed & 0x80000000u ? "turned(" + at + ")" : at);
+    }
+    placements += "]";
+    out += "tff(gen_" + std::to_string(idx) + ", unknown, $true, unknown, [gen_state(" +
+           (w(0) == NONE ? std::string("none") : "gen_" + std::to_string(w(0))) + "," +
+           optional(w(1)) + "," + std::to_string(w(8)) + "," + lits(w(2), w(3)) + "," +
+           lits(w(4), w(5)) + "," + bindingList(w(6), w(7)) + "," + placements + ")]).\n";
+  }
+};
+
+/**
+ * Writes @b text to @b path, aside and then renamed so that a half-written
+ * file is never visible: in portfolio mode the process doing this can be
+ * killed at any moment.
+ */
+void writeFile(const std::string& path, const std::string& text)
+{
   std::string partial = path + ".part";
   std::ofstream out(partial, std::ios::binary | std::ios::trunc);
   if (!out)
     throw UserErrorException("cannot open output file " + partial);
-  out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+  out.write(text.data(), static_cast<std::streamsize>(text.size()));
   out.close();
   if (!out) {
     std::remove(partial.c_str());
@@ -1904,7 +2345,6 @@ std::string slicePath(pid_t slice)
 void emitProofTo(const std::string& path)
 {
   Encoder enc;
-  enc.encodeSignature();
   uint32_t refutation = NONE;
   if (Unit* r = env.statistics->refutation) {
     refutation = enc.encodeUnit(r);
@@ -1921,12 +2361,9 @@ void emitProofTo(const std::string& path)
     long found = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - g_startedAt).count();
     enc.foundAtMs = found < 0 ? 0 : static_cast<uint32_t>(found);
-    std::ostringstream proof;
-    InferenceStore::instance()->outputProof(proof, r);
-    enc.proofText = proof.str();
   }
-  write(path, enc,
-        static_cast<uint32_t>(env.statistics->terminationReason), refutation);
+  writeFile(path, TstpWriter(enc).write(
+    static_cast<uint32_t>(env.statistics->terminationReason), refutation));
 }
 
 void emitProof() { emitProofTo(g_outPath); }

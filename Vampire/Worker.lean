@@ -211,7 +211,7 @@ def prove (problem : String) (cfg : Config := {})
   if let some why := cfg.refused? then throw (IO.userError why)
   IO.FS.withTempDir fun dir => do
     let problemFile := dir / "problem.p"
-    let outFile := dir / "proof.bin"
+    let outFile := dir / "proof.tstp"
     IO.FS.writeFile problemFile problem
     -- The worker changes into the problem's directory itself before reading
     -- it, because vampire writes the path it was given into the proof and a
@@ -234,7 +234,7 @@ def prove (problem : String) (cfg : Config := {})
     unless ← outFile.pathExists do
       return .error ⟨s!"{workerName} produced no result \
         (exit code {exitCode})\n{diagnostics}"⟩
-    match Proof.ofByteArray (← IO.FS.readBinFile outFile) with
+    match Proof.ofTstp (← IO.FS.readBinFile outFile) with
     | .error e => return .error e
     | .ok proof => return .ok (proof, diagnostics)
 
