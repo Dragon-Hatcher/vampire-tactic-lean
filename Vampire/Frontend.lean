@@ -169,7 +169,7 @@ def usedHypotheses (proof : Proof) : Array Nat := Id.run do
     todo := todo.pop
     if seen.contains u.number then continue
     seen := seen.insert u.number
-    if let some .input := u.rule? then
+    if u.rule == .input then
       if let some i := (u.name?.map (toString <| ·.drop 1)).bind String.toNat? then
         used := used.push i
     todo := todo ++ u.parents
@@ -255,10 +255,9 @@ private def suggestStrategyThreshold : Nat := 100
 /--
 What the search spent other than on the winning strategy's own run: starting
 vampire, parsing the problem, and the strategies the winning one won against.
-Naming the strategy saves the last of these, and vampire does not say how the
-rest divides, so this is at most a few milliseconds more than what naming it
-saves -- what starting vampire and parsing the problem take. `none` when there
-is no proof to have found, or vampire did not say what the winner ran for.
+Naming the strategy saves the last of these, which is all but a few
+milliseconds of it. `none` when there is no proof, or vampire did not say what
+the winner ran for.
 -/
 private def otherThanWinnerTime (query : Query) : Option Nat := do
   let winner ← query.proof.strategyTime?
@@ -363,10 +362,10 @@ private def recordCoverage (proof : Proof) (outcome : Reconstruct.Outcome) :
     todo := todo.pop
     if seen.contains u.number then continue
     seen := seen.insert u.number
-    let name := (u.rule?.map (·.name)).getD s!"rule{u.ruleIndex}"
+    let name := u.rule.name
     let status := if outcome.unimplemented.contains name then "admitted" else "replayed"
-    -- The site column is kept for `bench/coverage.py`; vampire no longer says
-    -- where it made an inference.
+    -- The proof does not say where in vampire a step was made, so the site
+    -- column `bench/coverage.py` reads is `?`.
     lines := lines ++ s!"{name}\t?\t{status}\t{file}\n"
     todo := todo ++ u.parents
   let handle ← IO.FS.Handle.mk path .append

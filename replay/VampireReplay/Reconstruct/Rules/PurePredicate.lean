@@ -78,7 +78,7 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
   let unchanged : ReconstructM (Kept × Expr) := do
     return (.prop stated, ← implication stated fun h => pure h)
   let children : ReconstructM (Array Expr) := f.subformulas.mapM (formula sorts vars)
-  match ← connectiveOf f with
+  match f.connective with
   | .literal =>
     let some l := f.literal? | throwError "an atom without a literal"
     let some value := replaced l | unchanged
@@ -117,7 +117,7 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
         return (.prop r, ← implication stated fun h => implication g' fun x => pure (mkApp h (mkApp p x)))
       return (.prop r, ← implication r fun h => implication inner fun x => pure (mkApp h (mkApp p x)))
   | .and | .or =>
-    let isAnd := (← connectiveOf f) matches .and
+    let isAnd := f.connective matches .and
     let connective : Connective := if isAnd then .and else .or
     let (fn, unit) := if isAnd then (``And, ``True) else (``Or, ``False)
     let subs := f.subformulas
@@ -256,7 +256,7 @@ private partial def purged (replaced : Literal → Option Bool) (sorts : Array (
           under an equivalence"
     unchanged
   | .«forall» | .«exists» =>
-    let isForall := (← connectiveOf f) matches .«forall»
+    let isForall := f.connective matches .«forall»
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
     let bound := boundSorts sorts f.boundVars
     withVars bound vars fun inner xs => do

@@ -5,7 +5,7 @@ Binary resolution.
 
 `BinaryResolution::generateClause` unifies a literal of one premise with the
 complement of a literal of the other, then builds the rest of both premises
-under that unifier and discards it. The fork records it, along with which
+under that unifier and discards it. Vampire records it, along with which
 literal each premise contributed, so replay instantiates both premises at what
 was recorded: it neither unifies anything nor matches the conclusion back
 against its premises.

@@ -3,7 +3,7 @@ import Lake
 open Lake DSL System
 
 /-!
-The part of the tactic that is its own code: decoding what the prover wrote,
+The part of the tactic that is its own code: reading what the prover wrote,
 rebuilding terms, and replaying the inference rules.
 
 It is a package of its own so that it can be precompiled, which is worth a
@@ -33,11 +33,11 @@ extern_lib vampireSpawn pkg := do
 @[default_target]
 lean_lib VampireReplay where
   roots := #[
-    `VampireReplay.InferenceRule, `VampireReplay.Wire,
+    `VampireReplay.InferenceRule, `VampireReplay.Tstp,
     `VampireReplay.Translate, `VampireReplay.Reconstruct,
     `VampireReplay.Spawn]
   globs := #[
-    .one `VampireReplay.InferenceRule, .one `VampireReplay.Wire,
+    .one `VampireReplay.InferenceRule, .one `VampireReplay.Tstp,
     .one `VampireReplay.Translate,
     .one `VampireReplay.Spawn,
     .andSubmodules `VampireReplay.Reconstruct]

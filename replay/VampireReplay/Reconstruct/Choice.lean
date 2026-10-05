@@ -189,7 +189,7 @@ partial def registerSkolems (sorts : Array (UInt32 × String))
     ReconstructM PUnit := do
   let bound (f : Formula) : Array (UInt32 × String) :=
     boundSorts sorts f.boundVars
-  match ← connectiveOf f with
+  match f.connective with
   | .«exists» =>
     let some body := f.subformulas[0]? | throwError "quantifier without a body"
     let block := bound f

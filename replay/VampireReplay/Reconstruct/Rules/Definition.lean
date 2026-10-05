@@ -22,7 +22,7 @@ quantified over the variables of what it defines.
 private def stripForalls (f : Formula) : ReconstructM Formula := do
   let mut f := f
   repeat
-    unless (← connectiveOf f) matches .«forall» do break
+    unless f.connective matches .«forall» do break
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
     f := body
   return f
@@ -89,7 +89,7 @@ component as `~name`.
 private def registerAvatarDefinition (u : Vampire.Unit) : ReconstructM PUnit := do
   let some f := u.formula?
     | throwError "an avatar_definition step should state a formula"
-  let connective ← connectiveOf f
+  let connective := f.connective
   unless connective matches .iff do
     throwError "an avatar_definition step should state an equivalence, \
       got {repr connective}"
@@ -116,7 +116,7 @@ private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit 
     -- The definition is quantified over the free variables of what it names.
     let f ← stripForalls f
     let (name, body) ←
-      match ← connectiveOf f with
+      match f.connective with
       | .iff =>
         let #[lhs, rhs] := f.subformulas
           | throwError "equivalence with {f.subformulas.size} sides"
@@ -124,7 +124,7 @@ private def registerPredicateDefinition (u : Vampire.Unit) : ReconstructM PUnit 
       | .or =>
         let some negated := f.subformulas[0]?
           | throwError "a naming definition should start with its own name"
-        unless (← connectiveOf negated) matches .not do
+        unless negated.connective matches .not do
           throwError "a naming definition should start with its negated name"
         let some name := negated.subformulas[0]?
           | throwError "negation without a subformula"
@@ -348,7 +348,7 @@ def unusedDefinitionRemoval (step : Step) : ReconstructM Expr := do
   -- equivalence, under the same quantifier: which way round it kept is whether
   -- it begins with the equivalence's left side.
   let underQuantifier (f : Formula) : ReconstructM (Nat × Formula) := do
-    unless (← connectiveOf f) matches .«forall» do return (0, f)
+    unless f.connective matches .«forall» do return (0, f)
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
     return (f.boundVars.size, body)
   let (bound, equivalence) ← underQuantifier definition
@@ -449,7 +449,7 @@ def inequalitySplitting (step : Step) : ReconstructM Expr := do
   -- Which premise is the clause is read off the rules rather than off the
   -- order they came in: the others are the names the split introduced.
   let some i := step.unit.parents.findIdx? fun p =>
-      p.rule? != some .inequalitySplittingNameIntroduction
+      p.rule != .inequalitySplittingNameIntroduction
     | throwError "inequality splitting without a clause to split"
   let some parent := step.unit.parents[i]?
     | throwError "inequality splitting without a clause to split"
@@ -479,12 +479,11 @@ name introduced elsewhere, which vampire created before it and so is bound
 first (`bindIntroduced`).
 -/
 def register (u : Vampire.Unit) : ReconstructM PUnit := do
-  match u.rule? with
-  | some .functionDefinition => registerFunctionDefinition u
-  | some .avatarDefinition => registerAvatarDefinition u
-  | some .predicateDefinition | some .equalityProxyDefinition =>
-    registerPredicateDefinition u
-  | some .inequalitySplittingNameIntroduction => registerInequalitySplitting u
+  match u.rule with
+  | .functionDefinition => registerFunctionDefinition u
+  | .avatarDefinition => registerAvatarDefinition u
+  | .predicateDefinition | .equalityProxyDefinition => registerPredicateDefinition u
+  | .inequalitySplittingNameIntroduction => registerInequalitySplitting u
   | _ => return
 
 /--

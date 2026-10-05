@@ -128,14 +128,14 @@ partial def simplify (sorts : Array (UInt32 × String)) (vars : Vars) (f : Formu
   let sub (i : Nat) : ReconstructM Formula := do
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     return g
-  let connective ← connectiveOf f
+  let connective := f.connective
   match connective with
   -- A truth value is what it is, and a literal has nothing in it to absorb.
   -- (`innerSimplify` descends into an unshared literal's arguments, which is
   -- where a FOOL formula hides a boolean term; nothing in this fragment has
   -- one, and a step that simplified inside one would be caught by the check
   -- that what was proved is what the step claims.)
-  | .literal | .«true» | .«false» | .boolTerm =>
+  | .literal | .«true» | .«false» =>
     let given ← Reconstruct.formula sorts vars f
     return (given, given, none)
   | .not =>

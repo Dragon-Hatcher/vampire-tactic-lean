@@ -23,7 +23,7 @@ open Lean Meta
 
 /--
 Justifies a step. Every rule vampire can emit has a case, so a rule added to
-the fork will not compile until it is accounted for; the ones with no
+vampire will not compile until it is accounted for; the ones with no
 implementation yet fall to `unimplemented`, which admits the conclusion only
 under `+admit`, and the ones that cannot arise to `unreachable`.
 
@@ -152,6 +152,7 @@ def ofRule (step : Step) : ReconstructM Expr :=
   | .alascaVariableElimination => unreachable step "vampire adds the rule only with VIRAS off, which the tactic refuses (`Config.refused?`)"
   | .interpretedSimplification => unreachable step "only the theory instantiation vampire compiles with Z3 makes it, and the bundled vampire is built without Z3"
   | .distinctEqualityRemoval => unreachable step "it removes equalities between constants declared distinct, and the translation declares none"
+  | .distinctExpansion => unreachable step "it expands `$distinct`, which the translation writes none of"
   | .thaLeftIdentity => unreachable step "its adding function, `addLeftIdentity`, is never called"
   | .thaInverseAssoc => unreachable step "its adding function, `addRightInverse`, is never called"
   | .thaPlusOneGreater => unreachable step "its adding function, `addPlusOneGreater`, is never called"

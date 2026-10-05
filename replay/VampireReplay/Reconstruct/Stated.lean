@@ -4,12 +4,6 @@ namespace Vampire.Reconstruct
 
 open Lean Meta
 
-/-- A formula's top-level connective. -/
-def connectiveOf (f : Formula) : ReconstructM Connective :=
-  match f.connective with
-  | .ok c => return c
-  | .error e => throwError "{e}"
-
 /-- The local standing for each of a step's variables. -/
 abbrev Vars := Std.HashMap UInt32 Expr
 
@@ -228,8 +222,8 @@ def interpreted (name : String) (args : Array Expr) :
     if (← inferType a).isConstOf ``Int then return some a
     return some (← mkAppM `Int.floor #[a])
   | _ =>
-    -- A numeral, whose value vampire wrote from its signature as TPTP writes
-    -- numbers, rather than leaving it to be parsed out of the symbol's name.
+    -- A numeral, whose value is read from the number the proof writes rather
+    -- than parsed out of the symbol's name.
     let some n := (← read).numerals[(name, args.size)]? | return none
     let numeralAt (τ : Expr) : ReconstructM Expr := do
       if n.denominator == 1 then return ← wholeNumeral τ n.numerator
@@ -428,7 +422,7 @@ private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Var
       bind locals body
     return (built, false)
   let (built, ground) ← do
-    match ← connectiveOf f with
+    match f.connective with
     | .literal =>
       let some l := f.literal? | throwError "atom without a literal"
       literalGround vars l
@@ -459,7 +453,6 @@ private partial def formulaGround (sorts : Array (UInt32 × String)) (vars : Var
       -- settled by which formula this is.
       let some raw := f.name? | throwError "named formula without a name"
       pure (← namedFormula raw, false)
-    | c => throwError "cannot rebuild a formula with connective {repr c}"
   let e ← shared built
   if ground then
     modify fun s => { s with groundFormulas := s.groundFormulas.insert f.index e }

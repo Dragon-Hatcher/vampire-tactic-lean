@@ -45,11 +45,11 @@ vampire gave it makes the conclusion rebuild to the same term.
 -/
 partial def walk (sorts : Array (UInt32 × String)) (skolems : Std.HashMap UInt32 Term)
     (vars : Vars) (premise conclusion : Formula) : ReconstructM (Expr × Expr) := do
-  match ← connectiveOf premise with
+  match premise.connective with
   | .and => junctionCongr ``And ``True ``and_congr
   | .or => junctionCongr ``Or ``False ``or_congr
   | .«forall» =>
-    unless (← connectiveOf conclusion) matches .«forall» do
+    unless conclusion.connective matches .«forall» do
       throwError "skolemisation should keep a universal quantifier"
     let some premiseBody := premise.subformulas[0]?
       | throwError "quantifier without a body"
@@ -80,7 +80,7 @@ where
 
   /-- An n-ary junction, congruent argument by argument. -/
   junctionCongr (fn unit lemma : Name) : ReconstructM (Expr × Expr) := do
-    unless (← connectiveOf conclusion) matches .and | .or do
+    unless conclusion.connective matches .and | .or do
       throwError "skolemisation should keep a junction"
     unless premise.subformulas.size == conclusion.subformulas.size do
       throwError "skolemisation changed a junction's size"

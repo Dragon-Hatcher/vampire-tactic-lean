@@ -15,7 +15,7 @@ Nothing here is substituted but the side premise: the conclusion keeps the main
 premise's variables.
 
 σ is a satisfying assignment of a SAT problem, which the solver forgets as soon
-as it is reused, so the fork reads it out of the model and records it.
+as it is reused, so vampire reads it out of the model and records it.
 -/
 
 namespace Vampire.Reconstruct.Subsumption

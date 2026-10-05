@@ -152,9 +152,9 @@ A literal the procedure gave back as it was is the conclusion's as it stands,
 whatever the procedure would make of it: a rule applies its procedure only
 where it changes something (`tryCancel` passes over what compares no numbers,
 polynomial evaluation over a literal nothing in which evaluates). Vampire's
-test is that the result is the literal itself; vampire writes each literal
-once, so the premise's literal and its image being one literal on the wire is
-that test.
+test is that the result is the literal itself; literals are interned as
+vampire shares them, so the premise's literal and its image being one literal
+in the proof is that test.
 
 Before clausification the step states a formula, and its atoms are rewritten
 where they stand, which is a congruence down to them; only theory

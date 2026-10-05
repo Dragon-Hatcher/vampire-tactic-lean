@@ -24,18 +24,6 @@ of one term are one term here, as they were in vampire.
 
 namespace Vampire
 
-/-- Absent index. -/
-def none32 : UInt32 := 0xFFFFFFFF
-
-/--
-A placement entry's flags, as the proof writes them (`turned(E)`,
-`rewritten(E)`): the literal became its place turned round, or rewritten
-into it; the rest of the word is the place.
--/
-private def placedTurned : UInt32 := 0x80000000
-private def placedRewritten : UInt32 := 0x40000000
-private def placedIndex : UInt32 := 0x3FFFFFFF
-
 /-- The version of the format vampire writes (`FORMAT` in `Kernel/TPTPProofExtra.cpp`). -/
 private def formatVersion : Nat := 2
 
@@ -77,7 +65,7 @@ def TerminationReason.describe : TerminationReason → String
 
 inductive Connective where
   | literal | and | or | imp | iff | xor | not
-  | «forall» | «exists» | boolTerm | «false» | «true» | name | noconn
+  | «forall» | «exists» | «false» | «true» | name
 deriving Inhabited, Repr, BEq, DecidableEq, Hashable
 
 /--
@@ -286,10 +274,17 @@ private def number : M String := do
     while isDigit (← peek) do advance
   slice start (← get)
 
+/-- The number `name` is `pre` followed by, if it is: `f12` after `f` as `12`. -/
+private def numberAfter? (pre name : String) : Option Nat :=
+  if name.startsWith pre then (String.ofList (name.toList.drop pre.length)).toNat? else none
+
+/-- Whether `name` is `pre` followed by digits. -/
+private def numbered (name pre : String) : Bool := (numberAfter? pre name).isSome
+
 /-- `X12` as `12`. -/
 private def varNumber (w : String) : M UInt32 := do
-  match (String.ofList (w.toList.drop 1)).toNat? with
-  | some n => if w.startsWith "X" then return n.toUInt32 else throw s!"unexpected variable {w}"
+  match numberAfter? "X" w with
+  | some n => return n.toUInt32
   | none => throw s!"unexpected variable {w}"
 
 /-- Comma-separated `item`s, up to `close`. -/
@@ -460,10 +455,6 @@ private def stateBody : M Body := do
   expect ")"
   return .disjuncts vars items
 
-/-- Whether `name` is `prefix` followed by digits. -/
-private def numbered (name pre : String) : Bool :=
-  name.startsWith pre && (String.ofList (name.toList.drop pre.length)).toNat?.isSome
-
 private def annotated : M Annotated := do
   let language ← word
   expect "("
@@ -580,35 +571,46 @@ private instance : Hashable FormulaRec where
 
 private structure UseRec where
   premise : UInt32
-  literal : Option UInt32
-  term : Option UInt32
-  flags : UInt32
-  bindings : Array (UInt32 × UInt32)
-  other : Option UInt32
-  factor : Option UInt32
+  literal : Option UInt32 := none
+  term : Option UInt32 := none
+  rewritesWholePremise : Bool := false
+  virtualEpsilon : Bool := false
+  virtualInfinity : Option Bool := none
+  negated : Bool := false
+  bindings : Array (UInt32 × UInt32) := #[]
+  other : Option UInt32 := none
+  factor : Option UInt32 := none
+deriving Inhabited
+
+/-- A congruence step, as `Congruence` has it but with its terms as indices. -/
+private inductive CongruenceRec where
+  | input (literal : Nat)
+  | congruence (lhs rhs : UInt32) (args : Array (Option Nat))
+  | trans (first second : Nat)
+  | symm (step : Nat)
+  | goalEquality (literal : Nat) (step : Option Nat)
+  | goalLiterals (negative positive : Nat) (args : Array (Option Nat))
 deriving Inhabited
 
 /--
-A congruence step as vampire numbers its kinds: `a` and `b` are terms for a
-congruence (kind 1), and literals or earlier steps otherwise, `none32` where
-absent.
+Where a premise's literal went (`turned(E)`, `rewritten(E)`): the conclusion's
+literal it became, and whether turned round or rewritten into it.
 -/
-private structure CongruenceRec where
-  kind : Nat
-  a : UInt32 := none32
-  b : UInt32 := none32
-  args : Array (Option Nat) := #[]
+private structure Placed where
+  index : Nat
+  turned : Bool := false
+  rewritten : Bool := false
 deriving Inhabited
 
 private structure PlacementRec where
   position : Nat
   use : Nat
-  entries : Array UInt32
+  entries : Array (Option Placed)
 deriving Inhabited
 
 private structure UnitRec where
   number : UInt32
-  rule : UInt32
+  rule : InferenceRule
   isClause : Bool
   literals : Array UInt32 := #[]
   formula : UInt32 := 0
@@ -654,7 +656,7 @@ private structure SatRec where
 deriving Inhabited
 
 /--
-A decoded proof: the tables vampire's TSTP was read into, and what the run
+A proof: the tables vampire's TSTP was read into, and what the run
 said of itself. Everything the accessors read is here, so a proof is
 independent of the process that produced it.
 -/
@@ -892,8 +894,8 @@ private def gtWord : GT → B String
 
 /-- A variable, `X12`, as its number. -/
 private def gtVar : GT → B UInt32
-  | .word w => match (String.ofList (w.toList.drop 1)).toNat? with
-    | some n => if w.startsWith "X" then pure n.toUInt32 else bail s!"expected a variable, not {w}"
+  | .word w => match numberAfter? "X" w with
+    | some n => pure n.toUInt32
     | none => bail s!"expected a variable, not {w}"
   | _ => bail "expected a variable"
 
@@ -928,27 +930,26 @@ private def gtFormula : GT → B UInt32
   | .app "scoped" #[vars, .tff f] => do internFormula (bindSorts {} (← gtVarSorts vars)) f
   | _ => bail "expected a formula"
 
-/-- A placement entry, in the form `Unit.placementEntries?` reads. -/
-private partial def gtPlaced : GT → B UInt32
-  | .word "none" => pure none32
-  | .app "turned" #[g] => do return (← gtPlaced g) ||| placedTurned
-  | .app "rewritten" #[g] => do return (← gtPlaced g) ||| placedRewritten
-  | g => gtU32 g
+/-- A placement entry. -/
+private partial def gtPlaced : GT → B (Option Placed)
+  | .word "none" => pure none
+  | .app "turned" #[g] => do return (← gtPlaced g).map ({ · with turned := true })
+  | .app "rewritten" #[g] => do return (← gtPlaced g).map ({ · with rewritten := true })
+  | g => do return some { index := ← gtNat g }
 
 /-- A term written as a general term, as `skolemize` writes the term it names. -/
 private partial def gtAsTerm : GT → B Tm
   | .word w => do
-    if w.startsWith "X" && (String.ofList (w.toList.drop 1)).toNat?.isSome then
-      return .var (← gtVar (.word w))
+    if let some n := numberAfter? "X" w then return .var n.toUInt32
     return .app w #[]
   | .num text => pure (.num text)
   | .app f args => do return .app f (← args.mapM gtAsTerm)
   | _ => bail "expected a term"
 
 /-- The rule a step names, by the name a TPTP proof writes it by. -/
-private def ruleNamed (step name : String) : B UInt32 := do
+private def ruleNamed (step name : String) : B InferenceRule := do
   match InferenceRule.ofTptpName? name with
-  | some rule => pure (InferenceRule.all.idxOf rule).toUInt32
+  | some rule => pure rule
   | none => throw ⟨s!"step {step} names the inference rule {name}, which \
       replay/VampireReplay/InferenceRule.lean does not have; rerun \
       scripts/gen-inference-rules.py"⟩
@@ -960,35 +961,34 @@ private def resolve (names : Std.HashMap String UInt32) (what name : String) : B
   | none => bail s!"{what} {name} is not in the proof"
 
 private def congruenceStep : GT → B CongruenceRec
-  | .app "input" #[a] => do return { kind := 0, a := ← gtU32 a }
+  | .app "input" #[a] => do return .input (← gtNat a)
   | .app "congruence" #[a, b, args] => do
-    return { kind := 1, a := ← gtTerm a, b := ← gtTerm b, args := ← (← gtList args).mapM gtOptNat }
-  | .app "trans" #[a, b] => do return { kind := 2, a := ← gtU32 a, b := ← gtU32 b }
-  | .app "symm" #[a] => do return { kind := 3, a := ← gtU32 a }
-  | .app "goal_equality" #[a, b] => do
-    return { kind := 4, a := ← gtU32 a, b := ((← gtOptNat b).map (·.toUInt32)).getD none32 }
+    return .congruence (← gtTerm a) (← gtTerm b) (← (← gtList args).mapM gtOptNat)
+  | .app "trans" #[a, b] => do return .trans (← gtNat a) (← gtNat b)
+  | .app "symm" #[a] => do return .symm (← gtNat a)
+  | .app "goal_equality" #[a, b] => do return .goalEquality (← gtNat a) (← gtOptNat b)
   | .app "goal_literals" #[a, b, args] => do
-    return { kind := 5, a := ← gtU32 a, b := ← gtU32 b, args := ← (← gtList args).mapM gtOptNat }
+    return .goalLiterals (← gtNat a) (← gtNat b) (← (← gtList args).mapM gtOptNat)
   | _ => bail "unknown congruence step"
 
 /-- One premise use (`use(...)`, or `use` with nothing in it), and its placement. -/
-private def gtUse (premise : UInt32) (g : GT) : B (UseRec × Option (Array UInt32)) := do
+private def gtUse (premise : UInt32) (g : GT) : B (UseRec × Option (Array (Option Placed))) := do
   let items := match g with
     | .app "use" items => items
     | _ => #[]
-  let mut use : UseRec := { premise, literal := none, term := none, flags := 0, bindings := #[],
-                            other := none, factor := none }
+  let mut use : UseRec := { premise }
   let mut placed := none
   for item in items do
     match item with
     | .app "literal" #[l] => use := { use with literal := some (← gtU32 l) }
     | .app "term" #[t] => use := { use with term := some (← gtTerm t) }
     | .app "bind" _ => use := { use with bindings := use.bindings.push (← gtBinding item) }
-    | .word "rewrites_whole_premise" => use := { use with flags := use.flags ||| 1 }
-    | .app "virtual" #[.word "epsilon"] => use := { use with flags := use.flags ||| 2 }
-    | .app "virtual" #[.word "plus_infinity"] => use := { use with flags := use.flags ||| 4 }
-    | .app "virtual" #[.word "minus_infinity"] => use := { use with flags := use.flags ||| 8 }
-    | .word "negated" => use := { use with flags := use.flags ||| 16 }
+    | .word "rewrites_whole_premise" => use := { use with rewritesWholePremise := true }
+    | .app "virtual" #[.word "epsilon"] => use := { use with virtualEpsilon := true }
+    | .app "virtual" #[.word "plus_infinity"] => use := { use with virtualInfinity := some true }
+    | .app "virtual" #[.word "minus_infinity"] =>
+      unless use.virtualInfinity == some true do use := { use with virtualInfinity := some false }
+    | .word "negated" => use := { use with negated := true }
     | .app "other" #[t] => use := { use with other := some (← gtTerm t) }
     | .app "factor" #[t] => use := { use with factor := some (← gtTerm t) }
     | .app "placed" #[entries] => placed := some (← (← gtList entries).mapM gtPlaced)
@@ -1014,7 +1014,7 @@ private def buildParents (step : String) (parents : Array GT) :
       | .colon (.word name) details => pure (name, ← gtList details)
       | _ => bail s!"step {step} has a malformed premise"
     let i ← resolve units "the premise" name
-    let some number := (String.ofList (name.toList.drop 1)).toNat?
+    let some number := numberAfter? "f" name
       | bail s!"unexpected step name {name}"
     let number := number.toUInt32
     out := out.push i
@@ -1052,13 +1052,13 @@ private def single (rs : Std.HashMap String (Array GT)) (key : String) : B (Opti
   | none => pure none
 
 private def buildUnit (a : Annotated) : B UnitRec := do
-  let some number := (String.ofList (a.name.toList.drop 1)).toNat?
+  let some number := numberAfter? "f" a.name
     | bail s!"unexpected step name {a.name}"
   -- The rule, the premises, and the information the source and the
   -- annotation hold between them.
   let (rule, parents, uses, placements, name, info) ← match a.source with
-    | some (.app "file" #[_, n]) => pure (0, #[], #[], #[], some (← gtWord n), a.info)
-    | some (.app "file" #[_]) => pure (0, #[], #[], #[], none, a.info)
+    | some (.app "file" #[_, n]) => pure (.input, #[], #[], #[], some (← gtWord n), a.info)
+    | some (.app "file" #[_]) => pure (.input, #[], #[], #[], none, a.info)
     | some (.app "introduced" #[.word _, .list items, .list #[]]) => do
       let some (GT.word r) := items[0]? | bail s!"step {a.name} names no rule"
       pure (← ruleNamed a.name r, #[], #[], #[], none, items.extract 1 items.size ++ a.info)
@@ -1297,27 +1297,28 @@ private def validate (units : Array UnitRec) (sats : Array SatRec) (gens : Array
     -- which is the step's first premise.
     unless u.placements.isEmpty do
       let into ←
-        if InferenceRule.ofNat? u.rule.toNat == some .avatarSplitClause then
+        if u.rule == .avatarSplitClause then
           match u.parents[0]? with
           | some p => pure units[p.toNat]!.literals.size
           | none => do malformed s!"split clause {u.number} has no premises"; pure 0
         else pure n
       for p in u.placements do
         for e in p.entries do
-          if e != none32 then index s!"step {u.number}'s placed literal" (e &&& placedIndex).toNat into
+          if let some e := e then index s!"step {u.number}'s placed literal" e.index into
     for h : k in [0:u.congruences.size] do
       let c := u.congruences[k]
-      let literal (i : UInt32) := index s!"step {u.number}'s congruence literal" i.toNat n
-      let earlier (i : UInt32) := index s!"step {u.number}'s congruence step" i.toNat k
-      match c.kind with
-      | 0 => literal c.a
-      | 2 => do earlier c.a; earlier c.b
-      | 3 => earlier c.a
-      | 4 => do literal c.a; if c.b != none32 then earlier c.b
-      | 5 => do literal c.a; literal c.b
-      | _ => pure ()
-      for arg in c.args do
-        if let some j := arg then index s!"step {u.number}'s congruence argument" j k
+      let literal (i : Nat) := index s!"step {u.number}'s congruence literal" i n
+      let earlier (i : Nat) := index s!"step {u.number}'s congruence step" i k
+      let arguments (args : Array (Option Nat)) : Except Error PUnit := do
+        for arg in args do
+          if let some j := arg then index s!"step {u.number}'s congruence argument" j k
+      match c with
+      | .input l => literal l
+      | .congruence _ _ args => arguments args
+      | .trans a b => do earlier a; earlier b
+      | .symm a => earlier a
+      | .goalEquality l s => do literal l; if let some s := s then earlier s
+      | .goalLiterals a b args => do literal a; literal b; arguments args
     -- Each choice's position leads, through the premise's formula, to a
     -- conjunction that has the argument chosen.
     unless u.choices.isEmpty do
@@ -1561,13 +1562,8 @@ def strategy? (p : Proof) : Option String := p.strategyText
 
 /--
 How long the strategy that found the proof ran for on the clock, in
-milliseconds, and `none` when there is no proof or vampire did not say --
+milliseconds, and `none` when there is no proof or vampire did not say, which
 it does where it counts beats.
-
-The schedule is worked through one strategy at a time, so what the search
-took beyond this went on starting vampire, parsing the problem and the
-strategies that did not find the proof -- the last of which naming this one
-saves.
 -/
 def strategyTime? (p : Proof) : Option Nat :=
   if p.strategyText.isNone then none else p.strategyMs
@@ -1668,8 +1664,11 @@ inductive Congruence where
   | trans (first second : Nat)
   /-- A step, the other way round. -/
   | symm (step : Nat)
-  /-- The clause's `literal`th literal is the equality `step` proves. -/
-  | goalEquality (literal step : Nat)
+  /--
+  The clause's `literal`th literal is the equality `step` proves; `none` only
+  where its sides are one term.
+  -/
+  | goalEquality (literal : Nat) (step : Option Nat)
   /-- The clause's two literals are one atom under both signs. -/
   | goalLiterals (negative positive : Nat) (args : Array (Option Nat))
 
@@ -1867,7 +1866,7 @@ namespace Formula
 def index (f : Formula) : UInt32 := f.idx
 
 /-- The formula's top-level connective. -/
-def connective (f : Formula) : Except Error Connective := pure f.r.connective
+def connective (f : Formula) : Connective := f.r.connective
 
 /-- The atom, when the connective is `literal`. -/
 def literal? (f : Formula) : Option Literal := f.r.literal.map (⟨f.proof, ·⟩)
@@ -1907,9 +1906,7 @@ protected partial def render (f : Formula) : String :=
   | .xor => binary "<~>"
   | .«forall» => quantified "!"
   | .«exists» => quantified "?"
-  | .boolTerm => "<bool term>"
   | .name => "<name>"
-  | .noconn => "<noconn>"
 
 instance : ToString Formula := ⟨Formula.render⟩
 
@@ -1919,9 +1916,6 @@ namespace Unit
 
 /-- Vampire's number for this step, as it appears in the proof text. -/
 def number (u : Unit) : UInt32 := u.r.number
-
-/-- The inference rule, as vampire numbers it. -/
-def ruleIndex (u : Unit) : UInt32 := u.r.rule
 
 /-- Whether this step is a clause rather than a formula. -/
 def isClause (u : Unit) : Bool := u.r.isClause
@@ -1941,7 +1935,7 @@ def formula? (u : Unit) : Option Formula :=
   if u.isClause then none else some ⟨u.proof, u.r.formula⟩
 
 /-- The rule this step was derived by. -/
-def rule? (u : Unit) : Option InferenceRule := InferenceRule.ofNat? u.r.rule.toNat
+def rule (u : Unit) : InferenceRule := u.r.rule
 
 /--
 The sorts of the step's free variables. A clause is implicitly universally
@@ -2055,20 +2049,17 @@ def conjunctChoices (u : Unit) : Array (Array UInt32 × UInt32) := u.r.choices
 The reasoning behind a congruence-closure conflict, the last step of it being
 the literal the reasoning settles.
 -/
-def congruences (u : Unit) : Except Error (Array Congruence) :=
-  u.r.congruences.mapM fun c =>
-    match c.kind with
-    | 0 => pure (.input c.a.toNat)
-    | 1 => pure (.congruence ⟨u.proof, c.a⟩ ⟨u.proof, c.b⟩ c.args)
-    | 2 => pure (.trans c.a.toNat c.b.toNat)
-    | 3 => pure (.symm c.a.toNat)
-    | 4 => pure (.goalEquality c.a.toNat c.b.toNat)
-    | 5 => pure (.goalLiterals c.a.toNat c.b.toNat c.args)
-    | kind => Error.fail s!"unknown congruence step kind {kind}"
+def congruences (u : Unit) : Array Congruence :=
+  u.r.congruences.map fun
+    | .input l => .input l
+    | .congruence a b args => .congruence ⟨u.proof, a⟩ ⟨u.proof, b⟩ args
+    | .trans a b => .trans a b
+    | .symm a => .symm a
+    | .goalEquality l s => .goalEquality l s
+    | .goalLiterals a b args => .goalLiterals a b args
 
-/-- The raw entries of `placement?`. -/
-def placementEntries? (u : Unit) (position : Nat) (use : Nat := 0) :
-    Option (Array UInt32) :=
+private def placementEntries? (u : Unit) (position : Nat) (use : Nat) :
+    Option (Array (Option Placed)) :=
   (u.r.placements.find? fun p => p.position == position && p.use == use).map (·.entries)
 
 /--
@@ -2083,17 +2074,14 @@ so a literal is placed rather than looked for.
 -/
 def placement? (u : Unit) (position : Nat) (use : Nat := 0) :
     Option (Array (Option (Nat × Bool))) :=
-  (u.placementEntries? position use).map (·.map fun entry =>
-    if entry == none32 then none
-    else some ((entry &&& placedIndex).toNat, entry &&& placedTurned != 0))
+  (u.placementEntries? position use).map (·.map (·.map fun e => (e.index, e.turned)))
 
 /--
 Which of the literals of the premise in `position` the inference rewrote into
 the literal it was placed at (`recordRewritten`), rather than carried there.
 -/
 def rewritten? (u : Unit) (position : Nat) (use : Nat := 0) : Option (Array Bool) :=
-  (u.placementEntries? position use).map (·.map fun entry =>
-    entry != none32 && entry &&& placedRewritten != 0)
+  (u.placementEntries? position use).map (·.map fun e => e.any (·.rewritten))
 
 /--
 For a literal-wise simplification that scaled a literal, one number per
@@ -2131,15 +2119,13 @@ def satPremise? (u : Unit) : Option SatClause := u.r.satPremise.map (⟨u.proof,
 def premiseUses (u : Unit) : Array PremiseUse :=
   let p := u.proof
   u.r.uses.map fun use =>
-    let flags : UInt32 := use.flags
     { premise := use.premise
       literal := use.literal
       term := use.term.map (⟨p, ·⟩)
-      rewritesWholePremise := flags &&& 1 != 0
-      virtualEpsilon := flags &&& 2 != 0
-      virtualInfinity := if flags &&& 4 != 0 then some true
-        else if flags &&& 8 != 0 then some false else none
-      negated := flags &&& 16 != 0
+      rewritesWholePremise := use.rewritesWholePremise
+      virtualEpsilon := use.virtualEpsilon
+      virtualInfinity := use.virtualInfinity
+      negated := use.negated
       bindings := use.bindings.map fun (v, t) => (v, ⟨p, t⟩)
       other := use.other.map (⟨p, ·⟩)
       factor := use.factor.map (⟨p, ·⟩) }

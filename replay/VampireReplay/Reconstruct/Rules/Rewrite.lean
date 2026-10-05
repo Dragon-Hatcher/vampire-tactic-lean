@@ -16,7 +16,7 @@ as `s = -t/k`.
 Which subterm of which literal, which side of the equation, and the
 substitution: none of it survives the inference -- vampire's own proof checker
 calls working out afterwards which way a demodulator was used "very hard" and
-guesses -- so the fork records it.
+guesses -- so vampire records it.
 -/
 
 namespace Vampire.Reconstruct.Rewrite

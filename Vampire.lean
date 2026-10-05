@@ -1,4 +1,4 @@
-import VampireReplay.Wire
+import VampireReplay.Tstp
 import Vampire.Run
 import VampireReplay.Translate
 import Vampire.Preprocess

@@ -26,9 +26,9 @@ Gives back what the process exited with, or 128 plus the signal that stopped
 it, which is the shell's convention. The output goes to files rather than
 pipes so that nothing here has to pump them while the process runs.
 
-The process starts in `cwd`; this one's working directory is left alone. The
-change of directory happens before the output files are opened and `exe` is
-looked up, so those are best given as absolute paths.
+The process starts in `cwd`, this one's working directory being left alone.
+The output files are opened and `exe` looked up from `cwd`, so those are best
+given as absolute paths.
 -/
 @[extern "vampire_spawn"]
 opaque spawn (exe : String) (args : Array String) (cwd : String)

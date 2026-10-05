@@ -1,12 +1,11 @@
 The Lean code in this repository is under the MIT licence in `LICENSE`. What it
 builds and runs is not, and this file says what.
 
-This package builds and runs Vampire, unmodified from the revision it pins.
-Vampire's licence is a BSD 3-Clause licence; anyone who *distributes* a binary
-of it has to carry Vampire's copyright notice and
-disclaimer with it, and may not use the names of Vampire's authors to endorse
-what they distribute. This repository does not distribute one -- it is built
-where it is used.
+This package builds and runs Vampire. Vampire's licence is a BSD 3-Clause
+licence; anyone who *distributes* a binary of it has to carry Vampire's
+copyright notice and disclaimer with it, and may not use the names of Vampire's
+authors to endorse what they distribute. This repository does not distribute
+one -- it is built where it is used.
 
     Vampire — https://github.com/vprover/vampire
     Built from https://github.com/Dragon-Hatcher/vampire-tactic-vampire, a fork

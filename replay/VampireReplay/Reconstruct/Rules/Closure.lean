@@ -25,11 +25,7 @@ the reasoning settles is contradicted by its own.
 def conflict (step : Step) : ReconstructM Expr := do
   let some clause := step.unit.clause?
     | throwError "a congruence-closure conflict is not a clause"
-  let recorded ←
-    match step.unit.congruences with
-    | .ok steps => pure steps
-    | .error e => throwError "step {step.unit.number}: cannot read the recorded \
-        congruence closure: {e}"
+  let recorded := step.unit.congruences
   if recorded.isEmpty then
     throwError "step {step.unit.number}: no congruence closure was recorded for \
       this conflict"
@@ -85,6 +81,7 @@ def conflict (step : Step) : ReconstructM Expr := do
         | .symm i => proofs := proofs.push (← mkEqSymm (← proofAt proofs i))
         | .goalEquality i j =>
           let some part := parts[i]? | throwError "no literal {i} in the clause"
+          let some j := j | throwError "literal {i} is proved by no congruence step"
           closed := some (← mkAppOptM ``absurd
             #[some part, some (mkConst ``False), some (← proofAt proofs j),
               some (← refuting i)])

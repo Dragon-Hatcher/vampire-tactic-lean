@@ -61,11 +61,11 @@ LEAN_EXPORT lean_obj_res vampire_spawn(b_lean_obj_arg exe, b_lean_obj_arg args,
     return vampire_spawn_error("spawning vampire", rc);
   }
   int flags = O_WRONLY | O_CREAT | O_TRUNC;
-  /* The output files are opened, as `exe` is found, after the change of
-     directory: the caller passes absolute paths. */
-  /* The `_np` form, which macOS has had since 10.15 and glibc since 2.29;
-     macOS 26 deprecates it for a POSIX `posix_spawn_file_actions_addchdir`
-     that older systems lack. */
+  /* Into `cwd` first, so that the output files are opened, and `exe` found,
+     from there: the caller passes absolute paths. The `_np` form is the one
+     macOS has had since 10.15 and glibc since 2.29; macOS 26 deprecates it
+     for POSIX's `posix_spawn_file_actions_addchdir`, which older systems
+     lack. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   rc = posix_spawn_file_actions_addchdir_np(&actions, lean_string_cstr(cwd));

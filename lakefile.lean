@@ -15,14 +15,14 @@ require vampireReplay from "replay"
 def vampireRepo : String :=
   "https://github.com/Dragon-Hatcher/vampire-tactic-vampire.git"
 
-/-- The revision of `vampireRepo` the tactic builds. -/
-def vampireRev : String := "d28214b89caeb8b526ac5501f9a2110f98a27142"
+/-- The revision of `vampireRepo` the tactic builds and runs. -/
+def vampireRev : String := "095ddfe21425d44e25564a12a35359c71ed5df69"
 
 /--
 The submodules vampire's build needs.
 
-`z3` is not among them: vampire uses z3 only if it finds one already built, and
-it is the bulk of the repository.
+`z3` is not among them: vampire is built without it (`vampire-binary`), and it
+is the bulk of the repository.
 -/
 def vampireSubmodules : Array String := #["cadical"]
 
@@ -138,21 +138,18 @@ binary.
 
 Vampire is built without z3, whatever its checkout holds. Its CMake links z3
 wherever it finds one built, and AVATAR can then hand ground reasoning to it
-(`sas=z3`), whose steps replay has no way to follow. Without z3 a strategy
-asking for it warns and uses vampire's own SAT solver.
+(`sas=z3`), whose steps replay cannot follow. Without z3 a strategy asking for
+it warns and uses vampire's own SAT solver.
 
-Two link settings are given here rather than being vampire's defaults, both
-about how the tactic runs it -- one short process per call:
+Two link settings suit how the tactic runs it, one short process per call:
 
-- Nothing links against vampire or loads it, so it exports nothing. A C++
-  executable otherwise exports its thousands of weak definitions, and dyld
-  looks each one up in the export trie on every launch: more than half of
-  vampire's start-up, about 4ms of 7ms on an M-series Mac. On Linux an
-  executable exports nothing unless asked to.
-- Link-time optimization: vampire's hot paths call small functions defined in
-  other files (ordering, substitution, the beat counter), which only the
-  linker can inline. About 4% off a search, the same search, and nothing off
-  what it finds.
+- On macOS it exports nothing. A C++ executable otherwise exports its
+  thousands of weak definitions, which dyld looks up on every launch, and that
+  is most of vampire's start-up. On Linux an executable exports nothing unless
+  asked to.
+- Link-time optimization in a release build, so that the small functions of
+  other files that vampire's hot paths call (ordering, substitution, the beat
+  counter) are inlined. It does not change what a search finds.
 -/
 target «vampire-binary» pkg : FilePath := Job.async do
   let vampireDir ← vampireSourceDir pkg

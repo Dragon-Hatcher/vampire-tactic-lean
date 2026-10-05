@@ -1,6 +1,6 @@
 import Lean.Util.Path
 import VampireReplay.Spawn
-import VampireReplay.Wire
+import VampireReplay.Tstp
 
 namespace Vampire
 

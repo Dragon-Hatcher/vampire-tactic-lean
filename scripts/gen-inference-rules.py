@@ -122,24 +122,10 @@ def main() -> int:
         "",
         "namespace InferenceRule",
         "",
-        "/-- The rules, indexed as vampire numbers them. -/",
-        "def all : Array InferenceRule :=",
-        "  #[" + ", ".join("." + camel(n) for n in names) + "]",
-        "",
         "/-- Vampire's own name for a rule. -/",
         "def name : InferenceRule → String",
     ]
     out += [f"  | .{camel(n)} => \"{n.lower()}\"" for n in names]
-    out += [
-        "",
-        "/--",
-        "The name a TPTP proof writes the rule by, vampire's name for it with `_`",
-        "for its spaces; `none` for the markers that bound the rules' ranges.",
-        "-/",
-        "def tptpName? : InferenceRule → Option String",
-    ]
-    out += [f"  | .{camel(n)} => " + (f"some \"{tptp[n]}\"" if n in tptp else "none")
-            for n in names]
     out += [
         "",
         "/-- The rule a TPTP proof names. -/",
@@ -150,9 +136,6 @@ def main() -> int:
         "  | _ => none",
         "",
         "instance : ToString InferenceRule := ⟨name⟩",
-        "",
-        "/-- The rule vampire numbers `i`. -/",
-        "def ofNat? (i : Nat) : Option InferenceRule := all[i]?",
         "",
         "end InferenceRule",
         "",

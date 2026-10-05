@@ -41,8 +41,7 @@ some rule made and failed to abstract.
 -/
 private def replay (u : Vampire.Unit) (context : LocalContext) :
     ReconstructM (Expr × Expr) := do
-  let some rule := u.rule?
-    | throwError "step {u.number} has unknown inference rule {u.ruleIndex}"
+  let rule := u.rule
   let premises ← u.parents.mapM fun parent => do
     let some proof := (← get).proofs[parent.number]?
       | throwError "step {u.number} was reached before step {parent.number}, \
@@ -133,7 +132,7 @@ private partial def replayAll (steps : Array Vampire.Unit) (i : Nat)
       return closed
   let started ← IO.monoMsNow
   let (value, stated) ← replay u (← getLCtx)
-  trace[vampire.timing] "step {(u.rule?.map (·.name)).getD "?"} took \
+  trace[vampire.timing] "step {u.rule.name} took \
     {(← IO.monoMsNow) - started}ms"
   withLetDecl (Name.mkSimple s!"s{u.number}") stated value fun s => do
     modify fun st => { st with proofs := st.proofs.insert u.number s }
@@ -202,8 +201,8 @@ Where the existentials a unit's skolems came from are written down: its own
 formula, unless a skolemisation step transformed a formula into it.
 -/
 private def skolemSource (u : Vampire.Unit) : Option (Vampire.Unit × Formula) :=
-  match u.rule? with
-  | some .skolemize => do
+  match u.rule with
+  | .skolemize => do
     let parent ← u.parents[0]?
     return (parent, ← parent.formula?)
   | _ => do return (u, ← u.formula?)
@@ -230,12 +229,12 @@ private def introductionsOf (proof : Proof) (goal : Symbols) :
   -- Clausification steps several of its clauses share, each bound once.
   let mut steps : Std.HashSet UInt32 := {}
   for u in proof.units do
-    if (u.rule?.map Definition.introducesName).getD false then
+    if Definition.introducesName u.rule then
       introductions := introductions.push
         { created := latest (unitSymbols u), unit := u, bind := Definition.register u
           -- An avatar definition names a component by no symbol.
-          introduces := u.rule? != some .avatarDefinition }
-    if u.rule? == some .generalSplittingComponent then
+          introduces := u.rule != .avatarDefinition }
+    if u.rule == .generalSplittingComponent then
       introductions := introductions.push
         { created := latest (unitSymbols u), introduces := true, unit := u
           bind := Splitting.register u }
@@ -295,7 +294,7 @@ private def bindIntroduced : ReconstructM PUnit := do
       introduction.bind
     catch e =>
       let u := introduction.unit
-      throwError "binding what step {u.number} ({(u.rule?.map (·.name)).getD "?"}) \
+      throwError "binding what step {u.number} ({u.rule.name}) \
         introduces: {e.toMessageData}"
 
 /--

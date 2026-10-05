@@ -165,10 +165,9 @@ the proof vampire found had 292 steps
 Most of the search is usually spent on the failed strategies. Naming the
 successful one skips them, and the tactic reports the saving when it suggests
 the strategy. Here, naming it took the search from 1807ms to 248ms. "Everything
-else" is what the search spent outside the successful strategy: starting
-Vampire, parsing the problem and the failed strategies, which Vampire does not
-divide up; the first two are a few milliseconds, and naming the strategy does
-not save them.
+else" is starting Vampire, parsing the problem and the failed strategies, which
+Vampire does not divide up; all but a few milliseconds of it is the failed
+strategies.
 
 Sharing the term's subterms and checking it in the kernel happen after the
 tactic returns, so they are not in that total; `set_option profiler true`
@@ -206,13 +205,13 @@ what each piece is under.
   certified by, and `norm_num`'s numeral evaluation), and the syntax.
 - `replay/` — a package of its own holding the replay, and `spawn.c`, which
   starts Vampire without copying the address space: `Translate.lean` goes to
-  TPTP, `Wire.lean` reads what Vampire printed -- the TSTP proof
-  `--proof tptp --proof_extra full` writes, which Vampire's
-  `Kernel/TPTPProofExtra.hpp` describes -- and `Reconstruct/` replays
-  it, one module per family of inference rules. Separate so that it can be
-  precompiled and so run as native code rather than in the interpreter, which
-  is worth about three times the replay; that is possible only because none of
-  it imports Mathlib, what needs Mathlib being handed in rather than called.
+  TPTP, `Tstp.lean` reads the TSTP proof Vampire prints with
+  `--proof tptp --proof_extra full` (described in Vampire's
+  `Kernel/TPTPProofExtra.hpp`), and `Reconstruct/` replays it, one module per
+  family of inference rules. Separate so that it can be precompiled and so run
+  as native code rather than in the interpreter, which is worth about three
+  times the replay; that is possible only because none of it imports Mathlib,
+  what needs Mathlib being handed in rather than called.
 - `problems/` — 400 problems the replay is tested against: 300 from TPTP and 100
   from SMT-LIB, each with the original beside its Lean statement. Development
   only; not needed to use the tactic.

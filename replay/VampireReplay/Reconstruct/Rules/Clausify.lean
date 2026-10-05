@@ -15,7 +15,7 @@ nothing but literals is left, each clause is written out.
 Every one of those replacements holds on its own, so replay follows them, one
 recorded step at a time. Which conjunct a clause came from, which way round an
 equivalence was taken, and what a quantifier was skolemised at are not searched
-for: the fork records them.
+for: vampire records them.
 -/
 
 namespace Vampire.Reconstruct.Clausify
@@ -159,7 +159,7 @@ private def subformulaParts (sorts : Array (UInt32 × String)) (vars : Vars)
     let some inner := e.not?
       | throwError "expected a negation, got{indentExpr e}"
     return inner
-  match ← connectiveOf g with
+  match g.connective with
   | .and => countedParts ``And (← body) subs.size
   | .or => countedParts ``Or (← body) subs.size
   | .iff => sides (← body)
@@ -220,7 +220,7 @@ private def genPartsFrom (sorts : Array (UInt32 × String)) (vars : Vars)
   -- What the step put there is made of the parts of what it replaced, taken
   -- apart rather than built again.
   let subParts? ← do
-    match ← connectiveOf g with
+    match g.connective with
     | .«forall» | .«exists» | .name | .literal => pure none
     | _ => pure (some (← subformulaParts sorts vars g sign part))
   let statementOf (l : Formula × Bool) : ReconstructM Expr := do
@@ -378,7 +378,7 @@ private partial def replaced (r : Replay) (c p : GenClause) (position : Nat)
   let replacement := c.replacement
   -- What the step put there, refuted.
   let against ← (Array.range replacement.size).mapM refuteReplacement
-  let connective ← connectiveOf g
+  let connective := g.connective
   -- A name, a let's contents or a term's truth put in place of what stood
   -- there says what it said.
   if c.how == .named || (c.how == .replaced && !(connective matches .«forall» | .«exists»)) then
@@ -562,7 +562,7 @@ def skolemsOfStep (sorts : Array (UInt32 × String)) (c : GenClause) :
   let some position := c.position? | return #[]
   let some (replaced, sign) := parent.literals[position.toNat]?
     | throwError "a clausification step replaced a position that is not there"
-  unless skolemises (← connectiveOf replaced) sign do return #[]
+  unless skolemises replaced.connective sign do return #[]
   let occurrence := Std.HashMap.ofList c.bindings.toList
   return (boundOf sorts replaced).filterMap fun (v, _) =>
     occurrence[v]?.map (v, ·)
@@ -581,7 +581,7 @@ def registerStep (sorts : Array (UInt32 × String))
   let some position := c.position? | return
   let some (replaced, sign) := parent.literals[position.toNat]?
     | throwError "a clausification step replaced a position that is not there"
-  unless skolemises (← connectiveOf replaced) sign do return
+  unless skolemises replaced.connective sign do return
   let bound := boundOf sorts replaced
   -- The same variable is skolemised once for each occurrence of the quantifier
   -- that calls for it, and to a symbol of its own each time, so which symbol
@@ -729,7 +729,7 @@ private partial def descend (sorts : Array (UInt32 × String))
     unless stated == part do
       throwError "literal {k} of the clause is{indentExpr part}\nnot{indentExpr stated}"
     return into.inject k h
-  match ← connectiveOf f with
+  match f.connective with
   | .«forall» =>
     let some body := f.subformulas[0]? | throwError "a quantifier without a body"
     -- Instantiate rather than bind: the clause has its own binders already.
@@ -768,7 +768,7 @@ private partial def descend (sorts : Array (UInt32 × String))
     -- A disjunction of literals is the clause itself, up to the order its
     -- literals are in, and is carried into it following the shape of both.
     let literals ← f.subformulas.allM fun g => do
-      return !((← connectiveOf g) matches .«forall» | .and | .or | .«false»)
+      return !(g.connective matches .«forall» | .and | .or | .«false»)
     if literals then
       return ← withLocalDeclD `h stated fun h => do
         mkLambdaFVars #[h] (← elimGiven parts (motive? := some target) (fun i hi => do

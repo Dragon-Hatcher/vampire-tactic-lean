@@ -1,6 +1,6 @@
 import Lean
 import VampireReplay.Translate
-import VampireReplay.Wire
+import VampireReplay.Tstp
 
 namespace Vampire.Reconstruct
 

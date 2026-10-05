@@ -1,8 +1,9 @@
 import Vampire
 
 /-!
-Vampire and the decoder, without the tactic: each problem is handed to
-vampire as TPTP and has to come back refuted, with a proof that decodes.
+Vampire and the reader of its proofs, without the tactic: each problem is
+handed to vampire as TPTP and has to come back refuted, with a proof that can
+be read.
 
 The problems are found beside this file rather than in whatever directory the
 test happens to run from.

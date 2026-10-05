@@ -129,7 +129,7 @@ where
     let some g := f.subformulas[i]? | throwError "formula is missing a subformula"
     return g
   let normalizePart := normalize walked expand sorts
-  match ← connectiveOf f with
+  match f.connective with
   | .literal =>
     let given ← Reconstruct.formula sorts vars f
     let source := sourceOf given
@@ -159,7 +159,7 @@ where
       return (source, mkConst ``True,
         some (← mkAppM ``iff_of_eq #[mkConst ``not_false_eq_true]))
   | .and | .or =>
-    let isAnd := (← connectiveOf f) matches .and
+    let isAnd := f.connective matches .and
     let parts ← f.subformulas.mapM (normalizePart vars · polarity)
     let results := parts.map (·.2.1)
     let givens := parts.map (givenOf · polarity)
@@ -206,7 +206,7 @@ where
         ← iffTrans? (some (← mkAppOptM ``Classical.not_imp #[some left, some right]))
           (← congr2? ``and_congr partL.1 partR.1 partL.2.2 partR.2.2))
   | .iff | .xor =>
-    let isIff := (← connectiveOf f) matches .iff
+    let isIff := f.connective matches .iff
     -- Both sides are normalised at positive polarity whichever normalisation
     -- this is, and what they say as given is read off that.
     let (left, resultL, proofL) ← normalizePart vars (← sub 0) true
@@ -274,7 +274,7 @@ where
       return (source, result,
         ← iffTrans? (some (← mkAppOptM ``Classical.not_not #[some inner])) proof)
   | .«forall» | .«exists» =>
-    let isForall := (← connectiveOf f) matches .«forall»
+    let isForall := f.connective matches .«forall»
     let body ← sub 0
     let bound := boundSorts sorts f.boundVars
     quantified walked expand sorts body polarity isForall bound.toList vars

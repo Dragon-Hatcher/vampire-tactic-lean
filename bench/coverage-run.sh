@@ -6,8 +6,8 @@ set -u
 cd "$(dirname "$0")/.."
 log=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$1"); : > "$log"
 export VAMPIRE_COVERAGE="$log"
-# Vampire no longer says where in its source it made each inference, so every
-# step's site is `?` and `bench/coverage.py` can count only by rule.
+# The proof does not say where in vampire's source each step was made, so
+# every site in the log is `?` and `bench/coverage.py` can count only by rule.
 lake build 2>&1 | grep -E "error|Build completed" | head -3
 for f in test/*.lean; do
   m=$(basename "$f" .lean)

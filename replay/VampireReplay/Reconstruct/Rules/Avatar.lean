@@ -26,10 +26,10 @@ variables its leading universal quantifier binds.
 private def definedComponent (definition : Formula) :
     ReconstructM (Option (Formula × Array UInt32)) := do
   let some component := (← definition.subformulas.findSomeM? fun g => do
-      return if (← connectiveOf g) matches .name then none else some g)
+      return if g.connective matches .name then none else some g)
     | return none
   let bound :=
-    if (← connectiveOf component) matches .«forall» then component.boundVars else #[]
+    if component.connective matches .«forall» then component.boundVars else #[]
   return some (component, bound)
 
 /--
@@ -97,7 +97,7 @@ def contradictionClause (step : Step) : ReconstructM Expr := do
   -- formula of its own, so which disjunct is which name's is the name it has.
   let some f := step.unit.formula?
     | throwError "an avatar_contradiction_clause step should state a formula"
-  let disjuncts := if (← connectiveOf f) matches .or then f.subformulas else #[f]
+  let disjuncts := if f.connective matches .or then f.subformulas else #[f]
   let names ← disjuncts.mapM fun g => do
     let some n := g.name?
       | throwError "a disjunct of an avatar_contradiction_clause is no name"
@@ -289,7 +289,7 @@ private def satClause (states : Stated)
       -- conversion, and vampire wrote down which is which.
       let order ← match origin.formula?, c.originOrder? with
         | some f, _ => do
-          let connective ← connectiveOf f
+          let connective := f.connective
           let disjuncts := match connective with
             | .or => f.subformulas
             | .«false» => #[]
@@ -348,7 +348,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
   -- The disjuncts are names, which the formula gives as they were written, so
   -- each can be told from the definition it belongs to.
   let disjuncts ←
-    (if (← connectiveOf stated) matches .or then stated.subformulas else #[stated]).mapM
+    (if stated.connective matches .or then stated.subformulas else #[stated]).mapM
       fun g => do
         let some name := g.name?
           | throwError "an avatar split clause states {g}, which is not a name"
@@ -364,7 +364,7 @@ def splitClause (step : Step) : ReconstructM Expr := do
     let some definition := premise.formula?
       | continue
     let some name := (← definition.subformulas.findSomeM? fun g => do
-        return if (← connectiveOf g) matches .name then g.name? else none)
+        return if g.connective matches .name then g.name? else none)
       | continue
     let uses := step.unit.premiseUses.filter (·.premise == premise.number)
     if uses.isEmpty then
@@ -446,13 +446,13 @@ def splitClause (step : Step) : ReconstructM Expr := do
           pure #[← namedFormula name]
         else
           let component ←
-            if (← connectiveOf quantified) matches .«forall» then
+            if quantified.connective matches .«forall» then
               let some inner := quantified.subformulas[0]?
                 | throwError "a quantifier without a body"
               pure inner
             else pure quantified
           let literals :=
-            if (← connectiveOf component) matches .or then component.subformulas
+            if component.connective matches .or then component.subformulas
             else #[component]
           literals.mapM (Reconstruct.formula definition.varSorts componentVars)
       -- Injected by the count of the component's literals, which can
