@@ -341,36 +341,6 @@ private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α 
     {query.proof.terminationReason.describe}. Try passing more hypotheses\
     {timeout}{mono}.{pinned}{hint}"
 
-/--
-With `VAMPIRE_COVERAGE` set to a path, the steps of a replayed refutation are
-appended to it, one a line: the rule, where in vampire the inference was made
-(`file:line`), whether replay certified it or admitted it as `sorry`, and
-where the call was (`file:line`). `bench/coverage.py` reads it.
--/
-private def recordCoverage (proof : Proof) (outcome : Reconstruct.Outcome) :
-    TacticM _root_.Unit := do
-  let some path ← IO.getEnv "VAMPIRE_COVERAGE" | return
-  if path.isEmpty then return
-  let some root := proof.refutation? | return
-  let pos := (← getFileMap).toPosition ((← getRef).getPos?.getD 0)
-  let file := s!"{← getFileName}:{pos.line}"
-  let mut seen : Std.HashSet UInt32 := {}
-  let mut todo := #[root]
-  let mut lines := ""
-  while h : todo.size > 0 do
-    let u := todo.back
-    todo := todo.pop
-    if seen.contains u.number then continue
-    seen := seen.insert u.number
-    let name := u.rule.name
-    let status := if outcome.unimplemented.contains name then "admitted" else "replayed"
-    -- The proof does not say where in vampire a step was made, so the site
-    -- column `bench/coverage.py` reads is `?`.
-    lines := lines ++ s!"{name}\t?\t{status}\t{file}\n"
-    todo := todo ++ u.parents
-  let handle ← IO.FS.Handle.mk path .append
-  handle.putStr lines
-
 /-- Replays the refutation, and what that took in milliseconds. -/
 private def replayQuery (cfg : TacticConfig) (query : Query) :
     TacticM (Reconstruct.Outcome × Nat) := do
@@ -389,7 +359,6 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
   trace[vampire.timing] "replay took {replay}ms"
   let some outcome := outcome
     | throwError "vampire reported a refutation but produced no proof"
-  recordCoverage query.proof outcome
   if ← isTracingEnabledFor `vampire then
     let (_, (seen, applied)) :=
       (subterms (← instantiateMVars outcome.proof)).run ({}, {})
