@@ -73,6 +73,14 @@ private def forced : Array (String × String) :=
   #[("si", "off"), ("gs", "off"), ("bsd", "off")]
 
 /--
+Option values no strategy of the schedule may have; a strategy that has one is
+skipped. Finite model building (`sa=fmb`) refutes a problem by finding that it
+has no model of any size, which no step of its proof records.
+-/
+private def forbidden : Array (String × String) :=
+  #[("sa", "fmb")]
+
+/--
 The options replay needs at vampire's defaults: their names, long and short,
 and the default. No strategy of the schedules changes them, and an option given
 to change one is refused (`refused?`)
@@ -129,21 +137,24 @@ def toArgs (cfg : Config) : Array String :=
       ("schedule", cfg.schedule), ("heartbeats", toString cfg.heartbeats),
       ("wall_limit", toString cfg.wallLimit), ("cores", toString cfg.cores)]
     ++ (if cfg.strategy.isEmpty then #[] else #[("strategy", cfg.strategy)])
-    ++ (if forced.isEmpty then #[] else #[("forced_options", String.intercalate ":" forced.toList)])
-    ++ cfg.options.filter (!isForced ·.1)
+    ++ #[("forced_options", merged isForced Config.forced),
+         ("forbidden_options", merged isForbidden Config.forbidden)]
+    ++ cfg.options.filter (fun (n, _) => !isForced n && !isForbidden n)
     ++ #[("proof", "tptp"), ("proof_extra", "full")]
   pairs.flatMap fun (n, v) => #[s!"--{n}", v]
 where
   isForced (name : String) : Bool := name == "forced_options" || name == "fo"
+  isForbidden (name : String) : Bool := name == "forbidden_options"
   /--
-  What a user forced, then what replay needs forced (`Config.forced`). Vampire
-  takes one `forced_options`, the last given, so the two are merged rather than
-  passed one after the other: passed after, the user's would replace these, and
-  a proof could then use what replay cannot follow. Theirs go first, so that
-  these hold whatever they say.
+  What a user gave of a `name=value:…` option, then what replay needs
+  (`Config.forced`, `Config.forbidden`). Vampire takes the last of each option
+  given, so the two are merged rather than passed one after the other, which
+  would let the user's replace replay's. Theirs go first, so that replay's
+  hold whatever they say.
   -/
-  forced : Array String :=
-    (cfg.options.filter (isForced ·.1)).map (·.2) ++ Config.forced.map fun (n, v) => s!"{n}={v}"
+  merged (isOption : String → Bool) (needed : Array (String × String)) : String :=
+    let given := (cfg.options.filter (isOption ·.1)).map (·.2)
+    ":".intercalate (given ++ needed.map (fun ((n, v) : String × String) => s!"{n}={v}")).toList
 
 end Config
 
