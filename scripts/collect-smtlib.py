@@ -52,6 +52,8 @@ Three things come from outside this repository and are named by environment vari
                same. Its own header imports lean-smt, which this project does not
                depend on, so the header is rewritten here.
 """
+from __future__ import annotations
+
 import argparse, os, random, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 

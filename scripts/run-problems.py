@@ -15,6 +15,8 @@ Output is one line per problem -- `ok`, or the first error `lean` reported -- an
 summary. The tactic itself starts Vampire as a separate process, so the default
 width leaves a core spare.
 """
+from __future__ import annotations
+
 import argparse, concurrent.futures as cf, os, subprocess, sys, time
 from pathlib import Path
 

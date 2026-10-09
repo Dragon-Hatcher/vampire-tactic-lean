@@ -28,6 +28,8 @@ Three things come from outside this repository and are named by environment vari
                the same converter as the corpus these problems are compared against
                keeps the statements the same.
 """
+from __future__ import annotations
+
 import argparse, os, random, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
