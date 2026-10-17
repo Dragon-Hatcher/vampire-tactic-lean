@@ -197,8 +197,13 @@ and has to be the same TPTP symbol or sort.
 def sameAs (named : Std.HashMap Expr String) (e : Expr) : MetaM (Option String) := do
   let fn := e.getAppFn
   unless fn.isConst || fn.isFVar do return none
+  -- Only ways that differ by instance arguments alone can be the same thing.
+  let instanceFree (x : Expr) : MetaM (Array (Option Expr)) := x.getAppArgs.mapM fun a => do
+    return if (← isClass? (← inferType a)).isSome then none else some a
+  let mine ← instanceFree e
   for (e', name) in named do
     if e'.getAppFn == fn && e'.getAppNumArgs == e.getAppNumArgs then
+      unless (← instanceFree e') == mine do continue
       if ← withNewMCtxDepth <| withTransparency .instances <| isDefEq e e' then
         return some name
   return none
@@ -468,11 +473,11 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
       return .var name
     let some name ← symbolName e (← fvarId.getType)
       | throwNotFirstOrderSymbol e e
-    return .app name #[]
+    constant e name
   | .const .. =>
     let some name ← symbolName e (← inferType e)
       | throwNotFirstOrderSymbol e e
-    return .app name #[]
+    constant e name
   | .app .. =>
     let fn := e.getAppFn
     unless fn.isConst || fn.isFVar do
@@ -496,6 +501,17 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
   | .mdata _ e => translateTerm e
   | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it is not a constant, \
       a local or an application of one"
+where
+  /--
+  A symbol standing on its own, which a first-order term can only be if it
+  takes no arguments: a function used as a value -- `Function.Injective f` --
+  is higher-order.
+  -/
+  constant (e : Expr) (name : String) : TranslateM Tm := do
+    unless (← get).arities[name]? == some 0 do
+      throwError "cannot translate{indentExpr e}\nto TPTP: it takes \
+        {((← get).arities[name]?).getD 0} arguments as a TPTP symbol, and is applied to none"
+    return .app name #[]
 
 /-- Translates a Lean proposition into a TPTP formula. -/
 partial def translateFormula (e : Expr) : TranslateM Fm := do

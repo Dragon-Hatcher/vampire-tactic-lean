@@ -2,6 +2,7 @@ import Mathlib.Algebra.Group.Defs
 import Mathlib.Tactic.NormNum.OfScientific
 import Vampire.Arith
 import VampireReplay.Monomorphize
+import VampireReplay.Canonicalize
 
 /-!
 Preprocessing: the goal reduced to `False` and a set of facts to refute, each
@@ -255,55 +256,12 @@ def instantiateProps : Step := fun goal facts => goal.withContext do
     let some proof ← propInstances f.proof | return f
     return { f with proof, type := ← instantiateMVars (← inferType proof) })
 
-/-- The way of writing each constant at its parameters met so far, by the constant. -/
-private abbrev Canonical := StateRefT (Std.HashMap Expr (Array Expr) ×
-  Std.HashMap Expr (Array Bool)) MetaM
-
 /--
-`e` with each constant applied at parameters (`Vampire.parameters`) written the
-way it was first met: the same type or instance reached by another path is the
-same thing to the prover, and has to be stated the same way to replay too.
--/
-private def canonicalized (e : Expr) : Canonical Expr := do
-  -- The locals `transform` opens binders as are no locals of the goal's, and a
-  -- key mentioning one is a term under a binder, not a constant instance.
-  let base ← getLCtx
-  Meta.transform e (post := fun e => do
-    let fn := e.getAppFn
-    unless e.isApp && (fn.isConst || fn.isFVar) do return .continue
-    let positions ← match (← get).2[fn]? with
-      | some p => pure p
-      | none => do
-        let p ← try parameters (← inferType fn) catch _ => pure #[]
-        modify fun (r, c) => (r, c.insert fn p)
-        pure p
-    let args := e.getAppArgs
-    let mut k := 0
-    while k < args.size && (positions[k]?.getD false) do k := k + 1
-    if k == 0 then return .continue
-    let key := mkAppN fn (args.extract 0 k)
-    if key.hasLooseBVars || key.hasExprMVar || key.hasAnyFVar (!base.contains ·) then
-      return .continue
-    let known := ((← get).1[fn]?).getD #[]
-    for r in known do
-      if r == key then return .continue
-      if r.getAppNumArgs == key.getAppNumArgs then
-        if ← withNewMCtxDepth <| withTransparency .instances <| isDefEq r key then
-          return .done (mkAppN r (args.extract k args.size))
-    modify fun (r, c) => (r.insert fn (known.push key), c)
-    return .continue)
-
-/--
-Each fact with every constant at its parameters written one way (`canonicalized`).
-What a fact says changes only up to definitional unfolding of instances, so its
-proof proves what it says now as it did before.
+Each fact with every constant at its parameters written one way
+(`Vampire.Canonicalize.canonicalize`), as a step.
 -/
 def canonicalize : Step := fun goal facts => goal.withContext do
-  let (facts, _) ← (facts.mapM fun (f : Fact) => do
-    let type ← canonicalized f.type
-    if type == f.type then return f
-    return { f with type, proof := ← mkExpectedTypeHint f.proof type }).run ({}, {})
-  return (goal, facts)
+  return (goal, ← Canonicalize.canonicalize facts)
 
 /-- Monomorphization (`Vampire.Monomorphize.monomorphize`), as a step. -/
 def monomorphize : Step := fun goal facts => goal.withContext do
