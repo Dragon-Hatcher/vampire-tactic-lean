@@ -674,6 +674,10 @@ structure Proof where
   private strategyText : Option String
   /-- What the strategy that won ran for on the clock, in milliseconds. -/
   private strategyMs : Option Nat
+  /-- When the schedule began, in milliseconds after vampire started. -/
+  private scheduleMs : Option Nat
+  /-- When the schedule found the proof, in milliseconds after vampire started. -/
+  private foundMs : Option Nat
   private text : String
   /-- Why vampire stopped. -/
   terminationReason : TerminationReason
@@ -1371,6 +1375,8 @@ structure Outcome where
   reason : TerminationReason
   strategy : Option String := none
   strategyMs : Option Nat := none
+  scheduleMs : Option Nat := none
+  foundMs : Option Nat := none
 
 /-- Builds the tables from the annotated formulas of a proof. -/
 private def build (text : String) (all : Array Annotated) (outcome : Outcome) :
@@ -1414,7 +1420,8 @@ private def build (text : String) (all : Array Annotated) (outcome : Outcome) :
     termTable := b.terms, literalTable := b.literals, formulaTable := b.formulas
     unitTable := unitRecs, satTable := satRecs, genTable := genRecs
     refutationIdx := refutation, strategyText := outcome.strategy
-    strategyMs := outcome.strategyMs, text, terminationReason := outcome.reason }
+    strategyMs := outcome.strategyMs, scheduleMs := outcome.scheduleMs
+    foundMs := outcome.foundMs, text, terminationReason := outcome.reason }
 
 end Tstp
 
@@ -1548,6 +1555,12 @@ def ofOutput (output : ByteArray) (problem : String) : Except Error Proof := do
           if t.endsWith "ms" then (String.ofList (t.toList.take (t.length - 2))).toNat? else none
         | _ => none
       outcome := { outcome with strategy, strategyMs := ms }
+  -- When the schedule began and found the proof, as the portfolio said.
+  let at_ (what : String) : Option Nat := lines.findSome? fun line => do
+    let (_, w) ← said line
+    guard (w.startsWith what && w.endsWith "ms")
+    (String.ofList ((w.toList.drop what.length).dropLast.dropLast)).toNat?
+  outcome := { outcome with scheduleMs := at_ "schedule began at ", foundMs := at_ "proof found at " }
   let body := block.getD ""
   Tstp.build body (← Tstp.parse body.toUTF8) outcome
 
@@ -1567,6 +1580,23 @@ it does where it counts beats.
 -/
 def strategyTime? (p : Proof) : Option Nat :=
   if p.strategyText.isNone then none else p.strategyMs
+
+/--
+What the search spent before the schedule began -- starting vampire up and
+parsing the problem -- in milliseconds, and `none` when there is no proof or
+vampire did not say. A run that names the strategy pays this too.
+-/
+def setupTime? (p : Proof) : Option Nat :=
+  if p.strategyText.isNone then none else p.scheduleMs
+
+/--
+When the proof was found, in milliseconds after vampire started, and `none`
+when there is no proof or vampire did not say. What the caller timed beyond
+this went on starting vampire's process and reading what it printed, which a
+run naming the strategy pays as well.
+-/
+def foundAtTime? (p : Proof) : Option Nat :=
+  if p.strategyText.isNone then none else p.foundMs
 
 /-- The proof as vampire wrote it, in TSTP. -/
 def proofText (p : Proof) : String := p.text

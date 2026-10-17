@@ -222,16 +222,17 @@ when the goal changes.
 private def suggestStrategyThreshold : Nat := 100
 
 /--
-What the search spent other than on the winning strategy's own run: starting
-vampire, parsing the problem, and the strategies the winning one won against.
-Naming the strategy saves the last of these, which is all but a few
-milliseconds of it. `none` when there is no proof, or vampire did not say what
-the winner ran for.
+What the strategies the winning one won against took, in milliseconds: from
+when the schedule began to when the proof was found, less the winner's own
+run. Naming the strategy saves this, and only this: starting vampire and
+parsing the problem it pays as well. `none` when there is no proof, or vampire
+did not say.
 -/
-private def otherThanWinnerTime (query : Query) : Option Nat := do
-  let winner ← query.proof.strategyTime?
-  guard (winner ≤ query.search)
-  return query.search - winner
+private def failedStrategiesTime (proof : Proof) : Option Nat := do
+  let foundAt ← proof.foundAtTime?
+  let spent := (← proof.setupTime?) + (← proof.strategyTime?)
+  guard (spent ≤ foundAt)
+  return foundAt - spent
 
 /--
 `proof`, which proves `goal`, put in a lemma of its own and applied to the
@@ -379,14 +380,19 @@ private def reportStats (query : Query) (outcome : Reconstruct.Outcome)
   let ms (name : String) (took : Nat) : MessageData :=
     m!"\n  {name}{"".pushn ' ' (14 - name.length)}{took}ms"
   let part (name : String) (took : Nat) : MessageData :=
-    m!"\n    {name}{"".pushn ' ' (24 - name.length)}{took}ms"
-  -- Where the search went: the strategy that found the proof, and everything
-  -- else -- starting vampire, parsing the problem, the strategies that did not
-  -- find it -- which vampire does not divide up.
+    m!"\n    {name}{"".pushn ' ' (30 - name.length)}{took}ms"
+  -- Where the search went: starting vampire and reading what it printed,
+  -- parsing the problem, the strategies that did not find the proof, then the
+  -- one that did.
   let within := Id.run do
-    let (some winner, some other) := (query.proof.strategyTime?, otherThanWinnerTime query)
+    let (some foundAt, some setup, some winner, some failed) :=
+      (query.proof.foundAtTime?, query.proof.setupTime?,
+        query.proof.strategyTime?, failedStrategiesTime query.proof)
       | return m!""
-    return part "everything else" other
+    if foundAt > query.search then return m!""
+    return part "starting and stopping vampire" (query.search - foundAt)
+      ++ part "parsing the problem" setup
+      ++ part "failed strategies" failed
       ++ part "successful strategy" winner
   let found := match query.proof.strategy? with
     | some strategy => m!"; the strategy that found it is \"{strategy}\""
@@ -407,7 +413,7 @@ or not this does.
 private def suggestStrategy (stx : Syntax) (rest : Array Syntax) (query : Query) :
     TacticM PUnit := do
   let some strategy := query.proof.strategy? | return
-  let some saved := otherThanWinnerTime query | return
+  let some saved := failedStrategiesTime query.proof | return
   unless saved ≥ suggestStrategyThreshold do return
   let rest := rest.filterMap fun s =>
     match s.reprint with
