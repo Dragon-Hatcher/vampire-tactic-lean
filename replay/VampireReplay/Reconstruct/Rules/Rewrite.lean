@@ -73,7 +73,7 @@ private def applied (name : String) (head : Option Expr) (args : Array Expr) :
   if let some interpretation ← interpreted name args then
     return interpretation
   let some head := head | throwIntroduced "the symbol" name
-  return mkAppN head args
+  return (mkAppN head args).headBeta
 
 /--
 The trees one step builds, each term of vampire's once: by the term, and
@@ -151,7 +151,7 @@ private def literalAt (cache : TreeCache) (vars : Vars) (bindings : Std.HashMap 
         | throwError "literal has unknown predicate {l.predicate}"
       match ← interpreted symbol.name args with
       | some atom => pure atom
-      | none => pure (mkAppN (← symbolExpr symbol.name) args)
+      | none => pure (mkAppN (← symbolExpr symbol.name) args).headBeta
   shared (if l.polarity then atom else mkApp (mkConst ``Not) atom)
 
 /--

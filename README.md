@@ -85,6 +85,13 @@ theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
 a constant together with the types and instances it is applied at is one
 symbol, whichever path to the instance the term took.
 
+A function the goal or its hypotheses use as a value -- `Function.Injective f`,
+`f = g`, `∀ g : ℕ → ℕ, …` -- makes its type a sort: `f` is a constant of it, and
+`f x` is written through that sort's application symbol. Only the problem's own
+facts make such sorts; an instance of a lemma that would need one the problem
+does not have is left out. A function applied to some of its arguments is not a
+value: that would be a new function, which first-order logic cannot name.
+
 `ℤ`, `ℚ` and `ℝ` are translated to Vampire's `$int`, `$rat` and `$real`; `+`,
 `-`, `*`, `/`, unary minus, `<`, `≤`, `>`, `≥`, `⌊x⌋` and `⌈x⌉` are translated
 too; `^` at a literal natural exponent is unfolded into multiplications. `ℕ` is

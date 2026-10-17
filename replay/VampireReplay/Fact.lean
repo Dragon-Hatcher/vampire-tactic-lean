@@ -54,6 +54,13 @@ def Fact.droppable (f : Fact) : Bool :=
     | _ => false
 
 /--
+Whether a fact is of the problem itself rather than an instance of a lemma or a
+suggested premise (`Vampire.Hypothesis.original`).
+-/
+def Fact.original (f : Fact) : Bool :=
+  !f.derived && !(f.source matches .suggestion _)
+
+/--
 A fact with what it says transformed: `step` is given the statement and returns
 the new one with a proof that the two are equal, or `none` where it changes
 nothing.

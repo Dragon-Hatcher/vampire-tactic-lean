@@ -92,6 +92,19 @@ structure State where
   typeSorts : Std.HashMap Expr (Option String) := {}
   /-- Which arguments of each function are its parameters (`parameters`), by the function. -/
   parameterPositions : Std.HashMap Expr (Array Bool) := {}
+  /--
+  The function types that are sorts: those of functions the problem uses as
+  values, or quantifies over (`scanFunctionValues`).
+  -/
+  functionSorts : Array Expr := #[]
+  /--
+  The functions the problem uses as values, each a symbol with its parameters
+  (`symbolOf`): each is a constant of its function sort, applied through that
+  sort's application symbol (`applicationSymbol`), wherever it occurs.
+  -/
+  valued : Array Expr := #[]
+  /-- The application symbol of each function sort, by the function type. -/
+  applications : Std.HashMap Expr String := {}
 deriving Inhabited
 
 abbrev TranslateM := StateRefT State MetaM
@@ -228,6 +241,31 @@ def parameters (type : Expr) : MetaM (Array Bool) :=
         (← isClass? decl.type).isSome)
     return out
 
+/--
+Whether `τ` is a function type -- a type of functions, not an implication between
+propositions -- which first-order logic has no sort of unless the problem makes
+one (`State.functionSorts`).
+-/
+def isFunctionType (τ : Expr) : MetaM Bool := do
+  let τ ← instantiateMVars τ
+  unless (← whnfR τ).isForall do return false
+  return !(← isProp τ)
+
+/-- Whether the function type `τ` is a sort of the problem's (`State.functionSorts`). -/
+def isFunctionSort (τ : Expr) : TranslateM Bool := do
+  let τ := (← instantiateMVars τ).consumeMData
+  for σ in (← get).functionSorts do
+    if σ == τ then return true
+    if ← withNewMCtxDepth <| withReducible <| isDefEq σ τ then return true
+  return false
+
+/--
+Whether `τ` is a sort of individuals of the problem: `isSortType`, but a
+function type only where the problem has made it one.
+-/
+def isSort (τ : Expr) : TranslateM Bool := do
+  if ← isFunctionType τ then isFunctionSort τ else isSortType τ
+
 /-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
 def sortName (e : Expr) : TranslateM String := do
   -- Annotations say nothing of which type it is.
@@ -245,6 +283,7 @@ def sortName (e : Expr) : TranslateM String := do
   let hint ← match e.getAppFn with
     | .fvar fvarId => pure (← fvarId.getUserName).toString
     | .const name _ => pure (name.componentsRev.head?.map toString |>.getD name.toString)
+    | .forallE .. => pure "fun"
     | _ => pure "sort"
   let name ← freshName (sanitize hint false)
   modify fun s => { s with
@@ -271,12 +310,12 @@ def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
     let locals := args.map (·.fvarId!)
     let dependent (e : Expr) : Bool := e.hasAnyFVar locals.contains
     if dependent result then return none
-    unless isPropType result || (← isSortType result) do return none
+    unless isPropType result || (← isSort result) do return none
     let mut argTypes := #[]
     for arg in args do
       let argType ← inferType arg
       if dependent argType then return none
-      unless ← isSortType argType do return none
+      unless ← isSort argType do return none
       argTypes := argTypes.push argType
     let argNames ← argTypes.mapM sortName
     let resultName ← if isPropType result then pure "$o" else sortName result
@@ -316,6 +355,11 @@ monomorphization settles and a first-order prover has no reading of.
 def isIndividualDomain (domain : Expr) : MetaM Bool := do
   if (← isClass? domain).isSome then return false
   isSortType domain
+
+/-- `isIndividualDomain`, a function type being one only where it is a sort of the problem's. -/
+def individualDomain (domain : Expr) : TranslateM Bool := do
+  if (← isClass? domain).isSome then return false
+  isSort domain
 
 /--
 Rejects a quantifier over something that is not a sort of individuals: a
@@ -375,6 +419,66 @@ def symbolOf (e : Expr) : TranslateM (Expr × Array Expr) := do
       throwError "cannot translate{indentExpr e}\nto TPTP: its argument {i + 1} is a \
         type or instance argument coming after an ordinary one"
   return (mkAppN fn (args.extract 0 k), args.extract k args.size)
+
+/-- Whether a symbol with its parameters is one of the functions used as values (`State.valued`). -/
+def isValued (key : Expr) : TranslateM Bool := do
+  let key ← instantiateMVars key
+  for v in (← get).valued do
+    if v == key then return true
+    if v.getAppFn == key.getAppFn && v.getAppNumArgs == key.getAppNumArgs then
+      if ← withNewMCtxDepth <| withTransparency .instances <| isDefEq v key then return true
+  return false
+
+/--
+The constant a function used as a value is, of its function sort, declaring it
+if new. It stands for the function itself.
+-/
+def valueSymbol (key : Expr) : TranslateM String := do
+  if let some name := (← get).symbols[key]? then return name
+  let sort ← sortName (← inferType key)
+  let hint ← match key.getAppFn with
+    | .fvar fvarId => pure (← fvarId.getUserName).toString
+    | .const name _ => pure (name.componentsRev.head?.map toString |>.getD name.toString)
+    | _ => pure "f"
+  let name ← freshName (sanitize hint false)
+  modify fun s => { s with
+    symbols := s.symbols.insert key name
+    arities := s.arities.insert name 0
+    decls.symbols := s.decls.symbols.push s!"tff({name}_decl, type, {name}: {sort})." }
+  return name
+
+/--
+The application symbol of the function sort `τ`, declaring it if new: it takes a
+function of the sort and its arguments, and stands for
+`fun g x₁ … xₙ => g x₁ … xₙ`, which replay reduces where it applies it.
+-/
+def applicationSymbol (τ : Expr) : TranslateM String := do
+  let τ := (← instantiateMVars τ).consumeMData
+  if let some name := (← get).applications[τ]? then return name
+  let functions ← sortName τ
+  let some (argSorts, result) ← withReducible <| forallTelescopeReducing τ fun xs r => do
+      if r.hasAnyFVar (xs.map (·.fvarId!)).contains then return none
+      let mut sorts := #[]
+      for x in xs do
+        let σ ← inferType x
+        if σ.hasAnyFVar (xs.map (·.fvarId!)).contains then return none
+        unless ← isSort σ do return none
+        sorts := sorts.push (← sortName σ)
+      let result ← if isPropType r then pure "$o"
+        else if ← isSort r then sortName r else return none
+      return some (sorts, result)
+    | throwError "cannot translate the function type{indentExpr τ}\nto TPTP: its \
+        arguments or its result are not sorts of individuals"
+  let apply ← withLocalDeclD `g τ fun g => withReducible <| forallTelescopeReducing τ fun xs _ => do
+    mkLambdaFVars (#[g] ++ xs) (mkAppN g xs)
+  let name ← freshName s!"app_{functions}"
+  modify fun s => { s with
+    symbols := s.symbols.insert apply name
+    arities := s.arities.insert name (argSorts.size + 1)
+    applications := s.applications.insert τ name
+    decls.symbols := s.decls.symbols.push
+      s!"tff({name}_decl, type, {name}: ({" * ".intercalate (functions :: argSorts.toList)}) > {result})." }
+  return name
 
 /-- How TPTP names the cast into one of its arithmetic types. -/
 def castInto (sort : String) : String :=
@@ -471,10 +575,12 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
   | .fvar fvarId =>
     if let some name := (← get).vars[fvarId]? then
       return .var name
+    if ← isValued e then return .app (← valueSymbol e) #[]
     let some name ← symbolName e (← fvarId.getType)
       | throwNotFirstOrderSymbol e e
     constant e name
   | .const .. =>
+    if ← isValued e then return .app (← valueSymbol e) #[]
     let some name ← symbolName e (← inferType e)
       | throwNotFirstOrderSymbol e e
     constant e name
@@ -484,10 +590,18 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
       throwError "cannot translate{indentExpr e}\nto TPTP: it applies\
         {indentExpr fn}\nwhich is not a constant or a local"
     if let .fvar fvarId := fn then
-      if (← get).vars.contains fvarId then
-        throwError "cannot translate{indentExpr e}\nto TPTP: it applies the bound \
-          variable{indentExpr fn}\nwhich is not first-order"
+      if let some name := (← get).vars[fvarId]? then
+        -- A variable of a function sort, applied through its application symbol.
+        unless ← isFunctionSort (← fvarId.getType) do
+          throwError "cannot translate{indentExpr e}\nto TPTP: it applies the bound \
+            variable{indentExpr fn}\nwhich is not first-order"
+        return ← applied (.var name) (← fvarId.getType) e.getAppArgs
     let (symbol, args) ← symbolOf e
+    -- A function used as a value somewhere is that value everywhere, applied
+    -- through its sort's application symbol.
+    if ← isValued symbol then
+      if args.isEmpty then return .app (← valueSymbol symbol) #[]
+      return ← applied (.app (← valueSymbol symbol) #[]) (← inferType symbol) args
     let some head ← symbolName symbol (← inferType symbol)
       | throwNotFirstOrderSymbol e symbol
     -- Applied to more arguments than its type takes as written: a term of a
@@ -502,6 +616,13 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
   | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it is not a constant, \
       a local or an application of one"
 where
+  /-- A function of the sort `τ` applied to `args`, through the sort's application symbol. -/
+  applied (function : Tm) (τ : Expr) (args : Array Expr) : TranslateM Tm := do
+    let name ← applicationSymbol τ
+    unless (← get).arities[name]? == some (args.size + 1) do
+      throwError "cannot translate an application of a function of type{indentExpr τ}\n\
+        to {args.size} arguments: TPTP applies it to all of them at once"
+    return .app name (#[function] ++ (← args.mapM translateTerm))
   /--
   A symbol standing on its own, which a first-order term can only be if it
   takes no arguments: a function used as a value -- `Function.Injective f` --
@@ -522,7 +643,7 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
     if (← isProp domain) && !body.hasLooseBVars then
       return .imp (← translateFormula domain) (← translateFormula body)
     else
-      unless ← isIndividualDomain domain do
+      unless ← individualDomain domain do
         throwNotFirstOrder e domain
       -- One block rather than a binder at a time: vampire's flattening merges
       -- adjacent quantifiers and does not keep their order while doing it, so
@@ -562,7 +683,7 @@ partial def translateFormula (e : Expr) : TranslateM Fm := do
         let mut binders := #[]
         for x in xs do
           let domain ← inferType x
-          unless ← isIndividualDomain domain do
+          unless ← individualDomain domain do
             throwNotFirstOrder e domain
           binders := binders.push (← bindVar x.fvarId!)
         match ← translateFormula body with
@@ -581,6 +702,63 @@ partial def arithmeticAtom (fn : String) (a b : Expr) (whole : Expr) :
   return .atom (← translateTerm whole)
 
 end
+
+/--
+The function sorts, and the functions used as values, of `e`: each function a
+symbol is applied to (`symbolOf`) that is a constant or a local, or one at its
+parameters, is used as a value, and its type is a sort; so is the type of each
+function a binder quantifies over.
+-/
+partial def scanFunctionValues (e : Expr) : TranslateM Unit := do
+  scan (← getLCtx) e
+where
+  /--
+  `e`, scanned under binders it opens; `base` is the context it started in, and
+  a type or function mentioning a local opened since -- `β → δ` under `∀ β δ` --
+  is no type or function of the problem's.
+  -/
+  scan (base : LocalContext) (e : Expr) : TranslateM Unit := do
+    match e with
+    | .forallE n d b bi | .lam n d b bi =>
+      scan base d
+      if ← isFunctionType d then addSort base d
+      withLocalDecl n bi d fun x => scan base (b.instantiate1 x)
+    | .app .. =>
+      let fn := e.getAppFn
+      if fn.isConst || fn.isFVar then
+        let (_, args) ← try symbolOf e catch _ => pure (fn, e.getAppArgs)
+        for a in args do value base a
+      else scan base fn
+      for a in e.getAppArgs do scan base a
+    | .letE _ t v b _ => scan base t; scan base v; scan base b
+    | .mdata _ b => scan base b
+    | _ => return
+  addSort (base : LocalContext) (τ : Expr) : TranslateM Unit := do
+    let τ := (← instantiateMVars τ).consumeMData
+    if τ.hasAnyFVar (!base.contains ·) || τ.hasExprMVar then return
+    unless ← isFunctionSort τ do
+      modify fun s => { s with functionSorts := s.functionSorts.push τ }
+  value (base : LocalContext) (a : Expr) : TranslateM Unit := do
+    let a := a.consumeMData
+    unless a.getAppFn.isConst || a.getAppFn.isFVar do return
+    if a.hasAnyFVar (!base.contains ·) || a.hasExprMVar then return
+    let τ ← inferType a
+    unless ← isFunctionType τ do return
+    -- Applied to some of its arguments, it is no function of the problem's,
+    -- but a new one, which first-order logic cannot name.
+    let (key, rest) ← try symbolOf a catch _ => return
+    unless rest.isEmpty do return
+    addSort base τ
+    unless ← isValued key do
+      modify fun s => { s with valued := s.valued.push key }
+
+/--
+The function sorts the problem's own facts make (`scanFunctionValues`): what
+monomorphization asks of whether a fact quantifying over functions can be stated.
+-/
+def functionSortsOf (es : Array Expr) : MetaM (Array Expr) := do
+  let ((), state) ← (es.forM fun e => do scanFunctionValues (← instantiateMVars e)).run {}
+  return state.functionSorts
 
 /--
 The TPTP role of a hypothesis. Vampire treats both as asserted, so this does
@@ -623,6 +801,13 @@ structure Hypothesis where
   those that can be stated are of use.
   -/
   droppable : Bool := false
+  /--
+  Whether it is of the problem itself -- the goal, a hypothesis of it, one the
+  caller named or gathered -- rather than an instance of a lemma or a suggested
+  premise: only these make function types sorts (`scanFunctionValues`), so that
+  a lemma cannot bring a sort the problem never uses.
+  -/
+  original : Bool := true
 deriving Inhabited
 
 /--
@@ -636,6 +821,8 @@ def problemOf (hypotheses : Array Hypothesis) : MetaM (String × Symbols × Std.
   let go : TranslateM (Array String × Std.HashSet Nat) := do
     let mut formulas := #[]
     let mut skipped := {}
+    for h in hypotheses do
+      if h.original then scanFunctionValues (← instantiateMVars (← inferType h.proof))
     for (h, i) in hypotheses.zipIdx do
       let saved ← get
       try

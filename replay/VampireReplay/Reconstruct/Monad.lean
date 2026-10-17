@@ -359,7 +359,11 @@ where
       | return e
     reopenLets ((b.instantiate1 local_).beta e.getAppArgs)
 
-/-- The Lean expression a TPTP symbol stands for, from the goal or a definition. -/
+/--
+The Lean expression a TPTP symbol stands for, from the goal or a definition.
+The application symbol of a function sort stands for `fun g x₁ … xₙ => g x₁ … xₙ`,
+so a symbol applied is reduced at its head where it is built.
+-/
 def symbolExpr (name : String) : ReconstructM Expr := do
   if let some e := (← read).symbols.symbols[name]? then return e
   if let some e := (← get).introduced[name]? then return e

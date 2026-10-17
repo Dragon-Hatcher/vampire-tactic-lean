@@ -66,3 +66,35 @@ example (a : ℕ) (n : ℕ) (l : List ℕ) (h : l.length = n) : (a :: l).length 
 -- an error that says why.
 #guard_msgs (drop info) in
 example (p : Prop) (hp : p) (hq : ∀ n : ℕ, (n : ℤ) ≥ 0) : p := by vampire [*]
+
+-- Functions as values. A function the problem uses as a value -- an argument to
+-- a symbol, or what a quantifier ranges over -- makes its type a sort: the
+-- function is a constant of it, applied through the sort's application symbol
+-- wherever it occurs.
+#guard_msgs (drop info) in
+example (f : ℕ → ℕ) (hf : Function.Injective f) (a b : ℕ) (h : f a = f b) : a = b := by
+  vampire [hf, h, Function.Injective.eq_iff]
+
+#guard_msgs (drop info) in
+example (P : (ℕ → ℕ) → Prop) (h : ∀ g : ℕ → ℕ, P g) (f : ℕ → ℕ) : P f := by vampire [h]
+
+#guard_msgs (drop info) in
+example (f g : ℕ → ℕ) (h : f = g) (a : ℕ) : f a = g a := by vampire [h]
+
+#guard_msgs (drop info) in
+example (f g : ℕ → ℕ) (h : ∀ x, f (g x) = x) (a : ℕ) : (f ∘ g) a = a := by
+  vampire [h, Function.comp_apply]
+
+#guard_msgs (drop info) in
+example (Q : (ℕ → Prop) → Prop) (p : ℕ → Prop) (hq : Q p) (hp : ∀ x, p x) (a : ℕ) :
+    Q p ∧ p a := by vampire [hq, hp]
+
+#guard_msgs (drop info) in
+example (f : ℕ → ℕ) (hf : Function.Injective f) : ∃ g : ℕ → ℕ, Function.Injective g := by
+  vampire [hf]
+
+-- A lemma does not make a sort the problem has no use for: `id` as a value in
+-- the instance of `Function.injective_id` is no function of the problem's, and
+-- the instance is left out.
+#guard_msgs (drop info) in
+example (a : ℕ) (h : a = a) : a = a := by vampire [h, Function.injective_id]

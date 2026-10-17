@@ -162,10 +162,10 @@ private def Opened.polymorphic (o : Opened) : Bool :=
   !o.fact.levelParams.isEmpty || o.parameter.any id
 
 /--
-Whether an opened fact quantifies over functions: none of its instances could
-be stated in first-order logic, which applies no variable, so it is not
-instantiated at all, and leaves the instances that can be stated their place
-under `maxInstances`.
+Whether an opened fact quantifies over functions. Where the problem has no
+function sorts (`Vampire.functionSortsOf`), none of its instances could be
+stated in first-order logic, so it is not instantiated at all, and leaves the
+instances that can be stated their place under `maxInstances`.
 -/
 private def Opened.quantifiesOverFunctions (o : Opened) : MetaM Bool :=
   (o.binders.zip o.parameter).anyM fun (x, isParam) => do
@@ -272,7 +272,8 @@ private def schedule (todo : Array (Array (Nat × Nat × Nat))) (g : Nat) (pair 
 The facts with each polymorphic one replaced by its instances: the monomorphic
 facts as they were, then the instances, in the order they were found.
 -/
-def monomorphize (facts : Array Fact) : MetaM (Array Fact) := withNewMCtxDepth do
+def monomorphize (facts : Array Fact) (functions : Bool := false) : MetaM (Array Fact) :=
+    withNewMCtxDepth do
   let cache : Positions ← IO.mkRef {}
   let mut mono := #[]
   let mut poly : Array Opened := #[]
@@ -289,7 +290,7 @@ def monomorphize (facts : Array Fact) : MetaM (Array Fact) := withNewMCtxDepth d
       mono := mono.push { f with proof := f.proof.instantiateLevelParams f.levelParams zeros
                                  type := f.type.instantiateLevelParams f.levelParams zeros
                                  levelParams := [] }
-    else if ← o.quantifiesOverFunctions then
+    else if !functions && (← o.quantifiesOverFunctions) then
       trace[vampire.monomorphize] "not instantiated, as it quantifies over functions: {f.type}"
     else poly := poly.push o
   if poly.isEmpty then return mono

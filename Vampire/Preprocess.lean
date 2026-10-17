@@ -265,7 +265,10 @@ def canonicalize : Step := fun goal facts => goal.withContext do
 
 /-- Monomorphization (`Vampire.Monomorphize.monomorphize`), as a step. -/
 def monomorphize : Step := fun goal facts => goal.withContext do
-  return (goal, ← Monomorphize.monomorphize facts)
+  -- Facts quantifying over functions can be stated only where the problem itself
+  -- makes function types sorts; lemmas do not get to.
+  let functions := !(← functionSortsOf ((facts.filter (·.original)).map (·.type))).isEmpty
+  return (goal, ← Monomorphize.monomorphize facts functions)
 
 /-- The name given to the negated goal in the local context. -/
 private def goalMarker : Name := `_vampireNegatedGoal

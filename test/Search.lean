@@ -82,3 +82,12 @@ example (a b : ℤ) (h : a ∣ b) (c : ℤ) : a ∣ b * c := by vampire?
 
 #guard_msgs (drop info) in
 example (a b : ℤ) (h : a ∣ b) (c : ℤ) : a ∣ b * c := by vampire [h, Int.dvd_mul_of_dvd_left]
+
+-- A function used as a value, and a lemma about injectivity found for it.
+#guard_msgs (drop info) in
+example (f : ℕ → ℕ) (hf : Function.Injective f) (a b : ℕ) (h : f a = f b) : a = b := by
+  vampire?
+
+#guard_msgs (drop info) in
+example (f : ℕ → ℕ) (hf : Function.Injective f) (a b : ℕ) (h : f a = f b) : a = b := by
+  vampire [hf, h, Function.not_injective_iff]

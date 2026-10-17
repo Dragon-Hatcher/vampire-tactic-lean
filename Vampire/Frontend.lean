@@ -100,7 +100,7 @@ def pose (mv : MVarId) (hints : Array Fact) : MetaM Posed := mv.withContext do
   let preprocessing := (← IO.monoMsNow) - started
   let hypotheses := facts.map fun f =>
     { proof := f.proof, role := if f.isGoal then .negatedConjecture else .axiom
-      droppable := f.droppable : Hypothesis }
+      droppable := f.droppable, original := f.original : Hypothesis }
   let (problem, symbols, skipped) ← goal.withContext (problemOf hypotheses)
   let translation := (← IO.monoMsNow) - started - preprocessing
   trace[vampire] "problem:\n{problem}"

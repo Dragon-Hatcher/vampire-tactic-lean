@@ -29,6 +29,18 @@ example (p : Prop) (hp : p) (hq : ∀ n : Nat, (n : Int) ≥ 0) : p := by vampir
 #guard_msgs in
 example (p q : Prop) (hp : p) (hq : ∀ n : Nat, (n : Int) ≥ 0) : q := by vampire (timeout := 5) [*]
 
+-- A function applied to some of its arguments is a new function, which
+-- first-order logic cannot name: a value only of functions the problem names.
+/--
+error: cannot translate
+  P (f 0)
+to TPTP: P has type
+  (ℕ → ℕ) → Prop
+which is not first-order over types of individuals
+-/
+#guard_msgs in
+example (f : ℕ → ℕ → ℕ) (P : (ℕ → ℕ) → Prop) (h : P (f 0)) : P (f 0) := by vampire [h]
+
 -- Options that would have vampire take steps replay cannot certify are refused.
 /-- error: `virtual_integer_real_arithmetic_substitution=off` makes vampire take steps replay cannot follow; replay needs `virtual_integer_real_arithmetic_substitution=on` -/
 #guard_msgs in

@@ -246,7 +246,7 @@ a definition gave it.
 def applySymbol (name : String) (args : Array Expr) : ReconstructM Expr := do
   match ← interpreted name args with
   | some e => return e
-  | none => return mkAppN (← symbolExpr name) args
+  | none => return (mkAppN (← symbolExpr name) args).headBeta
 
 /--
 `sym before = sym after`, from a proof that each argument of the one is the
