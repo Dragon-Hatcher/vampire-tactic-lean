@@ -15,14 +15,14 @@ set_option linter.unusedVariables false
 example (a b : ℕ) : a + b = b + a := by vampire?
 
 #guard_msgs (drop info) in
-example (a b : ℕ) : a + b = b + a := by vampire +mono [Nat.add_comm]
+example (a b : ℕ) : a + b = b + a := by vampire [Nat.add_comm]
 
 -- A library lemma about sets.
 #guard_msgs (drop info) in
 example (s t : Set ℕ) : s ∩ t ⊆ s := by vampire?
 
 #guard_msgs (drop info) in
-example (s t : Set ℕ) : s ∩ t ⊆ s := by vampire +mono [Set.inter_subset_left]
+example (s t : Set ℕ) : s ∩ t ⊆ s := by vampire [Set.inter_subset_left]
 
 -- A local hypothesis together with a library lemma.
 #guard_msgs (drop info) in
@@ -30,7 +30,7 @@ example (f : ℕ → ℕ) (h : ∀ x, f x = x + 0) (a : ℕ) : f a = a := by vam
 
 #guard_msgs (drop info) in
 example (f : ℕ → ℕ) (h : ∀ x, f x = x + 0) (a : ℕ) : f a = a := by
-  vampire +mono [h, Nat.add_eq_left]
+  vampire [h, Nat.add_eq_left]
 
 -- Over the reals, with a library lemma the arithmetic does not know. The
 -- lemma is SInE's seventieth: monomorphization has to get that far down the
@@ -40,4 +40,4 @@ example (f : ℕ → ℕ) (h : ∀ x, f x = x + 0) (a : ℕ) : f a = a := by
 example (x y : ℝ) (h : |x| ≤ y) : 0 ≤ y := by vampire?
 
 #guard_msgs (drop info) in
-example (x y : ℝ) (h : |x| ≤ y) : 0 ≤ y := by vampire +mono [h, abs_nonneg]
+example (x y : ℝ) (h : |x| ≤ y) : 0 ≤ y := by vampire [h, abs_nonneg]

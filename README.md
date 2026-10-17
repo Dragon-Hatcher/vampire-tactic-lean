@@ -6,7 +6,7 @@ A Lean tactic that discharges goals using the Vampire theorem prover.
 /-- Every group of exponent 2 is abelian. -/
 theorem mul_comm_of_sq_eq_one (G : Type) [Group G] (h : ∀ x : G, x * x = 1) :
     ∀ a b : G, a * b = b * a := by
-  vampire +mono [h, mul_assoc, one_mul]
+  vampire [h, mul_assoc, one_mul]
 ```
 
 Vampire finds the refutation; the tactic then **replays that refutation as a
@@ -67,20 +67,23 @@ Hypotheses already in the local context are sent only if named in square
 brackets (`vampire [h, q]`). Use `*` for everything in the local context:
 `vampire [*, other_theorem]`.
 
-Vampire's logic is monomorphic, so a goal quantifying over a type or carrying a
-typeclass has no direct reading. `vampire +mono` runs
-[lean-auto](https://github.com/leanprover-community/lean-auto)'s
-monomorphisation first, as the
-[lean-smt](https://github.com/ufmg-smite/lean-smt) tactic does.
+Vampire's logic is monomorphic, so a fact stated over types or instances -- a
+lemma such as `mul_assoc`, or a hypothesis `∀ {α} (x : α), f x = x` -- has no
+direct reading. It is sent as its instances: each constant the problem applies
+at a type (`*` at `G`) instantiates the facts that apply it at a type of their
+own, with their instances found by type class synthesis, until nothing new
+comes. A problem with nothing polymorphic in it costs nothing extra.
 
 ```lean
 variable [Group G]
 
 theorem inverse : ∀ (a : G), a * a⁻¹ = 1 := by
-  vampire +mono [mul_assoc, one_mul, inv_mul_cancel]
+  vampire [mul_assoc, one_mul, inv_mul_cancel]
 ```
 
-`G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols.
+`G` becomes an uninterpreted sort and `*`, `⁻¹` and `1` uninterpreted symbols:
+a constant together with the types and instances it is applied at is one
+symbol, whichever path to the instance the term took.
 
 `ℤ`, `ℚ` and `ℝ` are translated to Vampire's `$int`, `$rat` and `$real`; `+`,
 `-`, `*`, `/`, unary minus, `<`, `≤`, `>`, `≥`, `⌊x⌋` and `⌈x⌉` are translated
@@ -138,16 +141,18 @@ Written as `vampire (timeout := 60) [h]`. The full set is `Vampire.TacticConfig`
 | `schedule` | `casc` | the strategy schedule to work through |
 | `strategy` | — | run only this strategy, as the tactic suggests it |
 | `options` | — | extra vampire options, as `#[("name", "value")]` |
-| `mono` | false | monomorphise with `lean-auto` first (`+mono`) |
 | `showQuery` | false | print the TPTP problem instead of running the prover |
 | `stats` | false | report what each phase cost and how many steps the proof had (`+stats`) |
 | `checkSteps` | false | check each replayed step as it is built, naming the rule that fails |
 | `admit` | false | close the goal even where the proof uses a rule with no replay yet, admitting those steps as `sorry` (`+admit`) |
-| `skipUntranslatable` | false | leave out, rather than fail on, a hypothesis that cannot be stated in TPTP (`vampire?` sets it) |
 | `premises` | 128 | how many premises `vampire?` asks the library suggestions engine for |
 
 `vampire?` looks for premises itself, as `exact?` and `simp?` do, and suggests
 the `vampire [...]` call that uses the ones the proof needed.
+
+A hypothesis you name has to be translatable, or the call fails saying why. One
+gathered by `*`, a premise `vampire?` was suggested, and an instance of a
+polymorphic fact are left out instead where they cannot be stated in TPTP.
 
 `+stats` says where the time went:
 
@@ -184,7 +189,7 @@ from a slow replay.
 
 | message | what it means |
 | --- | --- |
-| `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses, raise `timeout`, or try `+mono`. If a `strategy` is named, only that one was tried; remove it to run the whole schedule |
+| `vampire did not refute the goal: …` | the search came back empty. Pass more hypotheses or raise `timeout`. If a `strategy` is named, only that one was tried; remove it to run the whole schedule |
 | `vampire refuted the goal but the proof could not be replayed: …` | a bug in this library, not in your goal. The prover found a proof and the reconstruction could not follow it; please report it with the goal |
 | `vampire's proof uses …, which this tactic does not replay yet` | Vampire used an inference rule that has no reconstruction yet. `+admit` closes the goal anyway, with a `sorry` for those steps and a warning saying so |
 | `could not find vampire` | the C++ side was not built. Run `lake build`, or set `VAMPIRE_BINARY` |

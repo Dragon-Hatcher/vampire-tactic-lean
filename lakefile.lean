@@ -5,7 +5,6 @@ open Lake DSL System
 package vampire
 
 require "leanprover-community" / "mathlib" @ git "v4.33.0"
-require "leanprover-community" / "auto" @ git "v4.33.0"
 
 -- Replay, in a package of its own so that it can be precompiled; see
 -- `replay/lakefile.lean`.

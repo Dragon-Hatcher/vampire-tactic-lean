@@ -1,6 +1,6 @@
 import Lean
-import Auto.Tactic
 import Vampire.Arith
+import VampireReplay.Fact
 import Vampire.LiteralRewrite
 import Vampire.Preprocess
 import VampireReplay.Reconstruct
@@ -35,8 +35,6 @@ private partial def subterms (e : Expr) :
 
 /-- Configuration for the `vampire` tactic. -/
 structure TacticConfig extends Config where
-  /-- Whether to monomorphize the goal with `lean-auto` before translating it. -/
-  mono : Bool := false
   /-- Show the TPTP problem instead of running vampire. Useful for debugging. -/
   showQuery : Bool := false
   /--
@@ -59,19 +57,9 @@ structure TacticConfig extends Config where
   -/
   admit : Bool := false
   /--
-  Leave out, rather than fail on, a fact that cannot be translated: under
-  `+mono`, a monomorphized instance `lean-auto` cannot state
-  (`auto.mono.ignoreNonQuasiHigherOrder`, as LeanHammer runs it), and a
-  hypothesis that cannot be stated in TPTP. The negated goal is never left out
-  entirely. `vampire?` sets this: the premises a selector suggests are not all
-  of a kind the translation takes.
-  -/
-  skipUntranslatable : Bool := false
-  /--
   How many premises `vampire?` asks the library suggestions engine for. Most
   contribute nothing: monomorphization only instantiates a lemma where its
-  constants meet the problem's. What limits it is monomorphization's own cost,
-  which at 256 premises can exhaust the default heartbeats.
+  constants meet the problem's.
   -/
   premises : Nat := 128
 deriving Inhabited
@@ -79,7 +67,11 @@ deriving Inhabited
 /-- A goal written out as the TPTP problem vampire is to refute. -/
 structure Posed where
   /-- The goal preprocessing left, whose type is `False`. -/
-  preprocessed : Preprocess.Result
+  goal : MVarId
+  /-- The facts sent, each the hypothesis of the problem named for its position. -/
+  facts : Array Fact
+  /-- The facts left out, which cannot be stated in TPTP (`Fact.droppable`). -/
+  leftOut : Array Fact
   /-- The copy of the caller's goal that preprocessing consumed. -/
   copy : MVarId
   /-- The TPTP problem sent to vampire. -/
@@ -99,45 +91,21 @@ structure Query extends Posed where
   search : Nat
 
 /-- Preprocesses the goal and translates it, without running vampire. -/
-def pose (cfg : TacticConfig) (mv : MVarId) (hs : Array Auto.Lemma) :
-    MetaM Posed := mv.withContext do
+def pose (mv : MVarId) (hints : Array Fact) : MetaM Posed := mv.withContext do
   -- Preprocessing assigns the goal it is given, so work on a copy and leave the
   -- caller's goal for it to discharge.
   let copy := (← mkFreshExprMVar (← mv.getType)).mvarId!
   let started ← IO.monoMsNow
-  let preprocessed ←
-    if cfg.mono then
-      withOptions (fun o =>
-          -- `lean-auto` stops instantiating after this many matching steps,
-          -- silently: a lemma not yet reached is not instantiated at all. The
-          -- default, 1024, is exhausted long before a hundred premises are.
-          let o := auto.mono.saturationThreshold.set o
-            (max (auto.mono.saturationThreshold.get o) (100 * hs.size))
-          if cfg.skipUntranslatable then auto.mono.ignoreNonQuasiHigherOrder.set o true
-          else o)
-        (Preprocess.mono copy hs)
-    else Preprocess.intros copy (hs.map (·.proof))
-  -- Vampire has no exponentiation, so a literal power is written out as the
-  -- multiplications it stands for, and it reads a decimal as a fraction, so a
-  -- decimal is written as that fraction -- in Lean, with a proof, so that what
-  -- is asked and what is replayed say the same thing. Under `+mono` the lemmas
-  -- are also written out before monomorphization, by
-  -- `Preprocess.lemmaWrittenOut`; this pass runs on both paths all the same.
-  let hypotheses ← preprocessed.goal.withContext <|
-    preprocessed.hypotheses.mapM fun (h, role) => do
-      return (← Preprocess.writtenOut h, role)
-  -- Vampire reads no `if-then-else` over terms, so each is lifted out into a
-  -- function defined by its two cases.
-  let (goal, hypotheses) ← Preprocess.liftIte preprocessed.goal hypotheses
-  -- Nor quantifies over a proposition.
-  let hypotheses ← goal.withContext (Preprocess.instantiateProps hypotheses)
-  let preprocessed := { preprocessed with goal, hypotheses }
+  let (goal, facts) ← Preprocess.preprocess copy hints
   let preprocessing := (← IO.monoMsNow) - started
-  let (problem, symbols) ←
-    preprocessed.goal.withContext (problemOf hypotheses cfg.skipUntranslatable)
+  let hypotheses := facts.map fun f =>
+    { proof := f.proof, role := if f.isGoal then .negatedConjecture else .axiom
+      droppable := f.droppable : Hypothesis }
+  let (problem, symbols, skipped) ← goal.withContext (problemOf hypotheses)
   let translation := (← IO.monoMsNow) - started - preprocessing
   trace[vampire] "problem:\n{problem}"
-  return { preprocessed, copy, problem, symbols, preprocessing, translation }
+  let leftOut := (facts.zipIdx.filter fun (_, i) => skipped.contains i).map (·.1)
+  return { goal, facts, leftOut, copy, problem, symbols, preprocessing, translation }
 
 /-- Runs vampire on a posed problem. -/
 def run (cfg : TacticConfig) (posed : Posed) (searchFrom : System.FilePath) :
@@ -175,11 +143,6 @@ def usedHypotheses (proof : Proof) : Array Nat := Id.run do
     todo := todo ++ u.parents
   return used
 
-/-- The leaves of a derivation: the lemmas it was derived from. -/
-private partial def leavesOf : Auto.DTr → Array String
-  | .leaf s => #[s]
-  | .node _ children => children.flatMap leavesOf
-
 namespace Tactic
 
 syntax vampireStar := "*"
@@ -199,9 +162,9 @@ context:
 example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire [hp, hpq]
 example (p q : Prop) (hp : p) (hpq : p → q) : q := by vampire [*]
 ```
-`+mono` monomorphizes the goal with `lean-auto` first, reducing Lean's
-dependent type theory to something first-order; `vampire +showQuery` prints the
-TPTP problem instead of running the prover. Other fields of
+A polymorphic fact -- a lemma such as `mul_assoc`, or a hypothesis stated over
+types -- is sent as its instances at the types and instances the problem uses.
+`vampire +showQuery` prints the TPTP problem instead of running the prover. Other fields of
 `Vampire.TacticConfig` are available in the same way, e.g.
 `vampire (timeout := 60)`.
 
@@ -214,29 +177,35 @@ syntax (name := vampireStx) "vampire" optConfig vampireHints : tactic
 declare_config_elab elabConfig TacticConfig
 
 /--
-A hint, as `lean-auto` states one: what proves it, what it says, and the
+A term named in brackets, as a fact: what proves it, what it says, and the
 universes it is stated over.
 
-Kept whole rather than reduced to the term, because a term named here can
-still be waiting on what it is stated of -- `mul_assoc` says nothing until a
-type and its `Semigroup` instance are chosen -- and it is monomorphization
-that chooses. A lemma handed over as a term alone has had the universes it was
-abstracted over forgotten, and then nothing can instantiate it.
+Elaborated as far as it goes and what is left abstracted, because a term named
+here can still be waiting on what it is stated of -- `mul_assoc` says nothing
+until a type and its `Semigroup` instance are chosen -- and it is
+monomorphization that chooses: it is given `∀ G [Semigroup G], …`, over the
+universe the type lives in.
 -/
-def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Auto.Lemma)
-  | `(vampireHintElem| *) => do
-    let hs ← Preprocess.propHypotheses (← getMainGoal)
-    hs.mapM fun h => do
-      let name ← h.fvarId!.getUserName
-      return ⟨⟨h, ← inferType h, .leaf s!"❰{name}❱"⟩, #[]⟩
-  | `(vampireHintElem| $h:term) => do
-    -- Named `fact` rather than `lemma`, which is a keyword once Mathlib's
-    -- tactics are imported, as they are here through `Vampire.Arith`.
-    let fact ← Auto.Prep.elabLemma h (.leaf s!"❰{h}❱")
-    return #[fact]
+def elabFact (stx : Lean.Term) : TacticM Fact :=
+  Term.withoutModifyingElabMetaStateWithInfo <| withRef stx <| Term.withoutErrToSorry do
+    let e ← Term.elabTerm stx none
+    Term.synthesizeSyntheticMVars (postpone := .no) (ignoreStuckTC := true)
+    let abstracted ← abstractMVars (← instantiateMVars e)
+    return { proof := abstracted.expr, type := ← instantiateMVars (← inferType abstracted.expr)
+             levelParams := abstracted.paramNames.toList
+             source := .hint ((stx.raw.reprint.getD (toString stx)).trimAscii.toString) }
+
+/-- The hypotheses of the local context, as facts `*` gathered. -/
+def starFacts (mv : MVarId) : MetaM (Array Fact) := mv.withContext do
+  (← Preprocess.propHypotheses mv).mapM fun h => do
+    Fact.ofLocal h.fvarId! (.star (← h.fvarId!.getUserName))
+
+def elabHintElem : TSyntax ``vampireHintElem → TacticM (Array Fact)
+  | `(vampireHintElem| *) => do starFacts (← getMainGoal)
+  | `(vampireHintElem| $h:term) => return #[← elabFact h]
   | _ => throwUnsupportedSyntax
 
-def elabHints : TSyntax ``vampireHints → TacticM (Array Auto.Lemma)
+def elabHints : TSyntax ``vampireHints → TacticM (Array Fact)
   | `(vampireHints| [ $[$hs],* ]) => withMainContext do
     hs.foldlM (init := #[]) fun acc h => return acc ++ (← elabHintElem h)
   | `(vampireHints| ) => return #[]
@@ -321,6 +290,29 @@ private def asLemma (goal : MVarId) (proof : Expr) : MetaM Expr := goal.withCont
   let args ← locals.filterM fun x => return !(← x.fvarId!.getDecl).isLet
   return mkAppN (mkConst name (levels.map mkLevelParam)) args
 
+/--
+What was left out of the problem, as part of why the search came back empty:
+the hypotheses gathered by `*` by name, and how many suggested premises and
+instances of polymorphic facts.
+-/
+private def leftOutNote (leftOut : Array Fact) : MessageData := Id.run do
+  if leftOut.isEmpty then return m!""
+  let mut parts : Array String := #[]
+  let stars := leftOut.filterMap fun f =>
+    match f.source, f.derived with | .star n, false => some n.toString | _, _ => none
+  unless stars.isEmpty do
+    parts := parts.push s!"the hypotheses {", ".intercalate stars.toList}"
+  let count (p : Fact → Bool) (one many : String) :=
+    let n := (leftOut.filter p).size
+    if n == 0 then none else some s!"{n} {if n == 1 then one else many}"
+  if let some c := count (fun f => !f.derived && f.source matches .suggestion _)
+      "suggested premise" "suggested premises" then
+    parts := parts.push c
+  if let some c := count (·.derived) "instance of a polymorphic fact"
+      "instances of polymorphic facts" then
+    parts := parts.push c
+  return m!" Left out, as they cannot be stated in TPTP: {", ".intercalate parts.toList}."
+
 /-- Why the search came back empty, as the error the tactic reports. -/
 private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α := do
   -- `unknown` also covers vampire being stopped before it could report,
@@ -335,11 +327,9 @@ private def throwNoRefutation (cfg : TacticConfig) (query : Query) : TacticM α 
     if cfg.strategy.isEmpty then m!""
     else m!" Only the named strategy was tried; remove `strategy` to run the \
       whole schedule."
-  let mono := if cfg.mono then m!"" else m!", or `+mono`"
-  let timeout := if cfg.mono then m!" or raising the timeout" else m!", raising the timeout"
   throwError "vampire did not refute the goal: \
-    {query.proof.terminationReason.describe}. Try passing more hypotheses\
-    {timeout}{mono}.{pinned}{hint}"
+    {query.proof.terminationReason.describe}. Try passing more hypotheses \
+    or raising the timeout.{pinned}{leftOutNote query.leftOut}{hint}"
 
 /-- Replays the refutation, and what that took in milliseconds. -/
 private def replayQuery (cfg : TacticConfig) (query : Query) :
@@ -347,7 +337,7 @@ private def replayQuery (cfg : TacticConfig) (query : Query) :
   let before ← IO.monoMsNow
   let outcome ←
     try
-      query.preprocessed.goal.withContext
+      query.goal.withContext
         (Reconstruct.run query.proof query.symbols
           LiteralRewrite.literalIff LiteralRewrite.literalFalse
           LiteralRewrite.literalRewritten LiteralRewrite.Viras.refute
@@ -439,7 +429,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let hs ← elabHints hsStx
     let mv ← getMainGoal
     let searchFrom := (← getFileName : System.FilePath).parent.getD "."
-    let posed ← pose cfg mv hs
+    let posed ← pose mv hs
     if cfg.showQuery then
       logInfo m!"TPTP problem:\n{posed.problem}"
       mv.admit (synthetic := false)
@@ -451,7 +441,7 @@ def evalVampire : Tactic := fun stx => withMainContext do
     let (outcome, replay) ← replayQuery cfg query
     if cfg.stats then
       reportStats query outcome replay
-    query.preprocessed.goal.assign (← asLemma query.preprocessed.goal outcome.proof)
+    query.goal.assign (← asLemma query.goal outcome.proof)
     mv.assign (.mvar query.copy)
     replaceMainGoal []
     -- The strategy is worth reporting only if the call does not already name
@@ -466,12 +456,12 @@ def evalVampire : Tactic := fun stx => withMainContext do
 the library suggestions engine (under Mathlib, Lean's SInE selector over the
 library and the current file; `set_library_suggestions` changes it) for
 `premises` theorems, adds every hypothesis in the local context and whatever is
-passed in brackets, and runs `vampire +mono` over them all, leaving out any it
-cannot translate. On success it closes the goal and suggests the call that
-names only the premises the proof used:
+passed in brackets, and runs `vampire` over them all, leaving out the
+suggestions and hypotheses it cannot translate. On success it closes the goal
+and suggests the call that names only the premises the proof used:
 ```lean
 example (a b : Nat) : a + b = b + a := by vampire?
--- Try this: vampire +mono (strategy := "...") [Nat.add_comm]
+-- Try this: vampire (strategy := "...") [Nat.add_comm]
 ```
 -/
 syntax (name := vampireSearchStx) "vampire?" optConfig vampireHints : tactic
@@ -482,64 +472,56 @@ private def hintText? (leaf : String) : Option String :=
     some (toString ((leaf.drop 1).dropEnd 1))
   else none
 
+/--
+How a fact the proof used is written in the call `vampire?` suggests, or `none`
+for one that needs nothing written: the goal's own. A hypothesis gathered by
+`*` whose name cannot be written is passed as `*`.
+-/
+private def written (f : Fact) : MetaM (Option String) := do
+  match f.source with
+  | .goal | .binder => return none
+  | .hint text => return some text
+  | .suggestion name => return some name.toString
+  | .star name => return some (if name.hasMacroScopes then "*" else name.toString)
+
 @[tactic vampireSearchStx]
 def evalVampireSearch : Tactic := fun stx => withMainContext do
   match stx with
   | `(tactic| vampire? $cfgStx:optConfig $hsStx:vampireHints) => do
-    let cfg := { (← elabConfig cfgStx) with mono := true, skipUntranslatable := true }
+    let cfg ← elabConfig cfgStx
     let mv ← getMainGoal
     let given ← elabHints hsStx
-    let locals ← (← Preprocess.propHypotheses mv).mapM fun h => do
-      let name ← h.fvarId!.getUserName
-      return (⟨⟨h, ← inferType h, .leaf s!"❰{name}❱"⟩, #[]⟩ : Auto.Lemma)
+    let locals ← starFacts mv
     let suggested ← LibrarySuggestions.select mv
       { maxSuggestions := cfg.premises, caller := some "vampire" }
     let mut library := #[]
     for s in suggested do
       -- A private name cannot be written in the call this suggests.
       if isPrivateName s.name then continue
-      try library := library.push (← Auto.Lemma.ofConst s.name (.leaf s!"❰{s.name}❱"))
-      catch _ => pure ()
-    let hs := given ++ locals ++ library
+      let some info := (← getEnv).find? s.name | continue
+      library := library.push
+        { proof := mkConst s.name (info.levelParams.map mkLevelParam), type := info.type
+          levelParams := info.levelParams, source := .suggestion s.name : Fact }
     let searchFrom := (← getFileName : System.FilePath).parent.getD "."
-    let posed ← pose cfg mv hs
+    let posed ← pose mv (given ++ locals ++ library)
     let query ← run cfg posed searchFrom
     unless query.proof.refutation?.isSome do
       throwNoRefutation cfg query
     let (outcome, _) ← replayQuery cfg query
-    -- The premises the proof used: those some hypothesis it used was
-    -- monomorphized from.
-    let usedLeaves := (usedHypotheses query.proof).foldl (init := ({} : Std.HashSet String))
-      fun acc i => (query.preprocessed.derivations[i]?.map leavesOf |>.getD #[]).foldl
-        (·.insert ·) acc
-    let used := hs.filter fun l => match l.deriv with
-      | .leaf s => usedLeaves.contains s
-      | _ => false
-    -- The call suggested has to work as written: it is translated as it would
-    -- be, and says to leave out what cannot be translated only if it needs to.
-    let saved ← saveState
-    let needsSkip ← tryCatchRuntimeEx
-      (do discard <| pose { cfg with skipUntranslatable := false } mv used; pure false)
-      (fun _ => pure true)
-    saved.restore
-    query.preprocessed.goal.assign (← asLemma query.preprocessed.goal outcome.proof)
+    query.goal.assign (← asLemma query.goal outcome.proof)
     mv.assign (.mvar query.copy)
     replaceMainGoal []
     unless outcome.unimplemented.isEmpty do return
-    let texts := used.filterMap fun l => match l.deriv with
-      | .leaf s => hintText? s
-      | _ => none
-    -- A hypothesis whose name cannot be written is passed as all of them.
-    let inaccessible ← used.anyM fun l => do
-      let .fvar fv := l.proof | return false
-      return (← fv.getUserName).hasMacroScopes
-    let texts := if inaccessible then
-        #["*"] ++ texts.filter fun t => !(locals.any fun l => l.deriv == .leaf s!"❰{t}❱")
-      else texts
-    let flags := if needsSkip then "+mono +skipUntranslatable" else "+mono"
+    -- What the proof used, as it is written: each fact the problem's hypotheses
+    -- it used came from, once.
+    let mut texts := #[]
+    for i in usedHypotheses query.proof do
+      let some f := query.facts[i]? | continue
+      let some text ← written f | continue
+      unless texts.contains text do texts := texts.push text
     let strategy := (query.proof.strategy?.map fun s => s!" (strategy := {String.quote s})").getD ""
     let hints := if texts.isEmpty then "" else s!" [{", ".intercalate texts.toList}]"
-    Meta.Tactic.TryThis.addSuggestion stx { suggestion := s!"vampire {flags}{strategy}{hints}" }
+    Meta.Tactic.TryThis.addSuggestion stx { suggestion := s!"vampire{strategy}{hints}" }
   | _ => throwUnsupportedSyntax
 
 end Tactic

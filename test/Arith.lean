@@ -72,6 +72,6 @@ example (x : ℚ) (h : 8e-2 * x = 1) : x = 12.5 := by vampire [*]
 #guard_msgs (drop info) in
 example (x : ℝ) (h1 : -0.75 < x) (h2 : x < 1e0) : x ≠ -1 ∧ x ≠ 2.0 := by vampire [*]
 
--- Under `+mono` a lemma's decimals are written out before monomorphization.
+-- A hypothesis's decimals are written out as the goal's are.
 #guard_msgs (drop info) in
-example (f : ℝ → ℝ) (h : ∀ y, f y = y * 0.5) : f 3.0 = 1.5 := by vampire +mono [h]
+example (f : ℝ → ℝ) (h : ∀ y, f y = y * 0.5) : f 3.0 = 1.5 := by vampire [h]

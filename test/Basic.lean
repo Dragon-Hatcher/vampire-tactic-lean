@@ -18,11 +18,6 @@ example {ι : Type} (a b : ι) (h : a = b) : b = a := by vampire [h]
 #guard_msgs (drop info) in
 example {ι : Type} (p : ι → Prop) (a : ι) (h : ∀ x, p x) : p a := by vampire [h]
 
--- A goal over `ℝ` under `+mono`. It is translated without `+mono` too; this
--- checks that monomorphization leaves it provable.
-#guard_msgs (drop info) in
-example (x : ℝ) (h : 0 < x) : 0 < x := by vampire +mono [h]
-
 -- `x ≠ a` is `¬(x = a)`, which vampire can state the other way round.
 #guard_msgs (drop info) in
 example {ι : Type} (f : ι → ι) (a b c : ι) (h : ∀ x, f x = a) (h2 : b = f c)

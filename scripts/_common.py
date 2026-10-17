@@ -5,6 +5,8 @@
 `run-problems.py` and `measure-replay.py` import this; `trace-problem.sh` runs it
 for the flags.
 """
+
+from __future__ import annotations
 import json
 import subprocess
 import sys

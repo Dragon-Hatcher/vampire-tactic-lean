@@ -73,7 +73,10 @@ deriving Inhabited
 structure State where
   /-- TPTP type name for each Lean sort. -/
   sorts : Std.HashMap Expr String := {}
-  /-- TPTP symbol name for each signature constant, keyed by its `Expr`. -/
+  /--
+  TPTP symbol name for each symbol of the signature: a constant or local, applied
+  to its type and instance arguments where it takes any (`symbolOf`).
+  -/
   symbols : Std.HashMap Expr String := {}
   /-- How many arguments each symbol was declared to take. -/
   arities : Std.HashMap String Nat := {}
@@ -87,8 +90,8 @@ structure State where
   Every subterm is asked, and they are at a handful of types.
   -/
   typeSorts : Std.HashMap Expr (Option String) := {}
-  /-- Whether each type an argument has been met at is a universe of types. -/
-  typeArguments : Std.HashMap Expr Bool := {}
+  /-- Which arguments of each function are its parameters (`parameters`), by the function. -/
+  parameterPositions : Std.HashMap Expr (Array Bool) := {}
 deriving Inhabited
 
 abbrev TranslateM := StateRefT State MetaM
@@ -185,18 +188,58 @@ def isSortType (e : Expr) : MetaM Bool := do
   if isPropType e || e matches .sort _ then return false
   isUniverseOfTypes (← inferType e)
 
+/--
+The name already given to an expression definitionally equal to `e` with the
+same head, if one has been: the same type or instance reached by another path,
+`Real.instLE` and `Preorder.toLE` of the reals' order say, is the same thing,
+and has to be the same TPTP symbol or sort.
+-/
+def sameAs (named : Std.HashMap Expr String) (e : Expr) : MetaM (Option String) := do
+  let fn := e.getAppFn
+  unless fn.isConst || fn.isFVar do return none
+  for (e', name) in named do
+    if e'.getAppFn == fn && e'.getAppNumArgs == e.getAppNumArgs then
+      if ← withNewMCtxDepth <| withTransparency .instances <| isDefEq e e' then
+        return some name
+  return none
+
+/--
+Which arguments of a function of type `type` are its parameters: its type and
+instance arguments, and any argument a later argument's type, or its result,
+depends on. They say which function it is -- `+` at `ℝ`, `abs` at a lattice --
+rather than what it is applied to, so a function together with its parameters
+is one TPTP symbol, and only the rest are its TPTP arguments.
+-/
+def parameters (type : Expr) : MetaM (Array Bool) :=
+  withReducible <| forallTelescopeReducing type fun xs result => do
+    let mut out := #[]
+    for i in [:xs.size] do
+      let x := xs[i]!
+      let decl ← x.fvarId!.getDecl
+      let laterTypes ← (xs.extract (i + 1) xs.size).mapM inferType
+      let dependent := result.containsFVar x.fvarId! ||
+        laterTypes.any (·.containsFVar x.fvarId!)
+      out := out.push (decl.binderInfo.isInstImplicit || dependent ||
+        (← isClass? decl.type).isSome)
+    return out
+
 /-- Returns the TPTP type name for the Lean sort `e`, declaring it if new. -/
 def sortName (e : Expr) : TranslateM String := do
+  -- Annotations say nothing of which type it is.
+  let e := (← instantiateMVars e).consumeMData
   if let some name := (← get).sorts[e]? then
+    return name
+  if let some name ← sameAs (← get).sorts e then
+    modify fun s => { s with sorts := s.sorts.insert e name }
     return name
   if let some builtin := arithmeticSort e then
     -- Recorded so that reading the proof back knows the Lean type, but not
     -- declared: TPTP has these types already.
     modify fun s => { s with sorts := s.sorts.insert e builtin }
     return builtin
-  let hint ← match e with
+  let hint ← match e.getAppFn with
     | .fvar fvarId => pure (← fvarId.getUserName).toString
-    | .const name _ => pure name.toString
+    | .const name _ => pure (name.componentsRev.head?.map toString |>.getD name.toString)
     | _ => pure "sort"
   let name ← freshName (sanitize hint false)
   modify fun s => { s with
@@ -211,8 +254,8 @@ of its result, or `none` when the type is not first-order over TPTP sorts.
 
 The sorts are named inside the telescope, since naming them afterwards would
 read expressions mentioning locals that no longer exist. A type that depends on
-its own arguments is rejected outright, which is what keeps type class
-instances and polymorphic constants out; `+mono` is the way to handle those.
+its own arguments is rejected outright: a symbol is given with its parameters
+(`symbolOf`), after which nothing it takes is a type or an instance.
 -/
 def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
   -- Its arity as written, up to what is reducible: a definition that is a
@@ -238,10 +281,13 @@ def signatureOf (type : Expr) : TranslateM (Option (Array String × String)) :=
 def symbolName (e : Expr) (type : Expr) : TranslateM (Option String) := do
   if let some name := (← get).symbols[e]? then
     return some name
+  if let some name ← sameAs (← get).symbols e then
+    modify fun s => { s with symbols := s.symbols.insert e name }
+    return some name
   let some (argNames, resultName) ← signatureOf type | return none
-  let hint ← match e with
+  let hint ← match e.getAppFn with
     | .fvar fvarId => pure (← fvarId.getUserName).toString
-    | .const name _ => pure name.toString
+    | .const name _ => pure (name.componentsRev.head?.map toString |>.getD name.toString)
     | _ => pure "f"
   let name ← freshName (sanitize hint false)
   let signature :=
@@ -276,13 +322,13 @@ tries to relate the two.
 -/
 def throwNotFirstOrder (e domain : Expr) : MetaM α :=
   throwError "cannot translate{indentExpr e}\nto TPTP: it quantifies over\
-    {indentExpr domain}\nwhich is not a type of individuals; try `+mono`"
+    {indentExpr domain}\nwhich is not a type of individuals"
 
 /-- Rejects a symbol whose type is not first-order over TPTP sorts. -/
 def throwNotFirstOrderSymbol (e symbol : Expr) : MetaM α := do
   throwError "cannot translate{indentExpr e}\nto TPTP: {symbol} has type\
     {indentExpr (← inferType symbol)}\nwhich is not first-order over types of \
-    individuals; try `+mono`"
+    individuals"
 
 /-- Hands out a fresh TPTP variable name for a bound local. -/
 def bindVar (fvarId : FVarId) : TranslateM (String × String) := do
@@ -302,17 +348,28 @@ def arithmeticSortOf (e : Expr) : TranslateM (Option String) := do
   return sort
 
 /--
-Whether an argument is a type, which carries no first-order content: `isSortType`,
-asked of the argument's type once rather than of every argument at it.
+A function applied to arguments, taken apart into the TPTP symbol it is -- the
+function with its parameters (`parameters`) -- and its TPTP arguments.
+Parameters come first in every function this meets; one after an ordinary
+argument has no TPTP reading.
 -/
-def isTypeArgument (e : Expr) : TranslateM Bool := do
-  if isPropType e || e matches .sort _ then return false
-  let τ ← inferType e
-  if let some answer := (← get).typeArguments[τ]? then
-    return answer
-  let answer ← isUniverseOfTypes τ
-  modify fun s => { s with typeArguments := s.typeArguments.insert τ answer }
-  return answer
+def symbolOf (e : Expr) : TranslateM (Expr × Array Expr) := do
+  let fn := e.getAppFn
+  let args := e.getAppArgs
+  let positions ← match (← get).parameterPositions[fn]? with
+    | some p => pure p
+    | none => do
+      let p ← parameters (← inferType fn)
+      modify fun s => { s with parameterPositions := s.parameterPositions.insert fn p }
+      pure p
+  let isParameter (i : Nat) := positions[i]?.getD false
+  let mut k := 0
+  while k < args.size && isParameter k do k := k + 1
+  for i in [k:args.size] do
+    if isParameter i then
+      throwError "cannot translate{indentExpr e}\nto TPTP: its argument {i + 1} is a \
+        type or instance argument coming after an ordinary one"
+  return (mkAppN fn (args.extract 0 k), args.extract k args.size)
 
 /-- How TPTP names the cast into one of its arithmetic types. -/
 def castInto (sort : String) : String :=
@@ -393,7 +450,7 @@ partial def arithmeticTerm? (e : Expr) : TranslateM (Option Tm) := do
   -- its own, which `$to_int` and the rest do not take. A numeral is the one
   -- natural number that can be written, as the number it is at this sort.
   | Nat.cast _ _ a =>
-    match numeral? a with
+    match (numeral? a).orElse fun _ => a.rawNatLit?.map Int.ofNat with
     | some n => return some (.app (renderNumeral sort n) #[])
     | none =>
       throwError "cannot translate{indentExpr e}\nto TPTP: TPTP has no natural \
@@ -418,16 +475,16 @@ partial def translateTerm (e : Expr) : TranslateM Tm := do
     return .app name #[]
   | .app .. =>
     let fn := e.getAppFn
-    let args := e.getAppArgs
-    -- Type arguments carry no first-order content.
-    let args ← args.filterM fun arg => return !(← isTypeArgument arg)
-    let head ← match fn with
-      | .fvar fvarId => symbolName fn (← fvarId.getType)
-      | .const .. => symbolName fn (← inferType fn)
-      | _ => throwError "cannot translate{indentExpr e}\nto TPTP: it applies\
-          {indentExpr fn}\nwhich is not a constant or a local"
-    let some head := head
-      | throwNotFirstOrderSymbol e fn
+    unless fn.isConst || fn.isFVar do
+      throwError "cannot translate{indentExpr e}\nto TPTP: it applies\
+        {indentExpr fn}\nwhich is not a constant or a local"
+    if let .fvar fvarId := fn then
+      if (← get).vars.contains fvarId then
+        throwError "cannot translate{indentExpr e}\nto TPTP: it applies the bound \
+          variable{indentExpr fn}\nwhich is not first-order"
+    let (symbol, args) ← symbolOf e
+    let some head ← symbolName symbol (← inferType symbol)
+      | throwNotFirstOrderSymbol e symbol
     -- Applied to more arguments than its type takes as written: a term of a
     -- sort used as a function -- a set applied to an element once membership
     -- is unfolded -- which TPTP cannot say.
@@ -539,52 +596,51 @@ structure Symbols where
   hypotheses : Std.HashMap String Expr := {}
 deriving Inhabited
 
-/--
-The TPTP problem for a set of hypotheses, to be refuted.
+/-- A hypothesis of the problem: what proves it, its role, and whether it may be left out. -/
+structure Hypothesis where
+  proof : Expr
+  role : Role
+  /--
+  Whether a hypothesis that cannot be stated in TPTP is left out rather than
+  failing the problem: one the caller did not state themselves -- an instance of
+  a lemma, a hypothesis gathered by `*`, a suggested premise -- of which only
+  those that can be stated are of use.
+  -/
+  droppable : Bool := false
+deriving Inhabited
 
-With @b skipUntranslatable, a hypothesis that cannot be stated in TPTP is left
-out rather than failing the problem, and the translation's state is as if it
-had never been tried; the rest keep their names, which are their positions.
-Under `+mono` the negated goal can be several facts -- `lean-auto` rewrites
-it with the lemmas it is given -- and any of them can be left out, but not all:
-without the goal there is nothing to refute, and the goal's own failure is
-the error.
+/--
+The TPTP problem for a set of hypotheses, to be refuted, each named for its
+position, and the positions of those left out.
+
+A droppable hypothesis that cannot be stated is left out, with the translation's
+state as if it had never been tried; any other is the error.
 -/
-def problemOf (hypotheses : Array (Expr × Role)) (skipUntranslatable := false) :
-    MetaM (String × Symbols) := do
+def problemOf (hypotheses : Array Hypothesis) : MetaM (String × Symbols × Std.HashSet Nat) := do
   let go : TranslateM (Array String × Std.HashSet Nat) := do
     let mut formulas := #[]
     let mut skipped := {}
-    let mut goalStated := false
-    let mut goalFailure : Option Exception := none
-    for ((h, role), i) in hypotheses.zipIdx do
-      if skipUntranslatable then
-        let saved ← get
-        try
-          let formula ← translateFormula (← inferType h)
-          formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
-          if role == .negatedConjecture then goalStated := true
-        catch e =>
-          set saved
-          skipped := skipped.insert i
-          if role == .negatedConjecture && goalFailure.isNone then goalFailure := some e
-          trace[vampire] "left out hypothesis {i}, which cannot be stated in TPTP: \
-            {e.toMessageData}"
-      else
-        let formula ← translateFormula (← inferType h)
-        formulas := formulas.push s!"tff(h{i}, {role.render}, {formula})."
-    if let some e := goalFailure then
-      unless goalStated do throw e
+    for (h, i) in hypotheses.zipIdx do
+      let saved ← get
+      try
+        let formula ← translateFormula (← inferType h.proof)
+        formulas := formulas.push s!"tff(h{i}, {h.role.render}, {formula})."
+      catch e =>
+        unless h.droppable do throw e
+        set saved
+        skipped := skipped.insert i
+        trace[vampire] "left out hypothesis {i}, which cannot be stated in TPTP: \
+          {e.toMessageData}"
     return (formulas, skipped)
   let ((formulas, skipped), state) ← go.run {}
   let lines := state.decls.types ++ state.decls.symbols ++ formulas
   let invert (m : Std.HashMap Expr String) : Std.HashMap String Expr :=
-    m.fold (init := {}) fun acc e name => acc.insert name e
-  let named := hypotheses.zipIdx.foldl (init := {}) fun acc ((h, _), i) =>
-    if skipped.contains i then acc else Std.HashMap.insert acc s!"h{i}" h
+    m.fold (init := {}) fun acc e name => if acc.contains name then acc else acc.insert name e
+  let named := hypotheses.zipIdx.foldl (init := {}) fun acc (h, i) =>
+    if skipped.contains i then acc else Std.HashMap.insert acc s!"h{i}" h.proof
   let symbols :=
     { sorts := invert state.sorts, symbols := invert state.symbols
       hypotheses := named }
-  return (String.intercalate "\n" lines.toList ++ "\n", symbols)
+  return (String.intercalate "\n" lines.toList ++ "\n", symbols, skipped)
 
 end Vampire

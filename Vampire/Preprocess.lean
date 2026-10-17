@@ -1,8 +1,17 @@
-import Auto.Tactic
 import Mathlib.Algebra.Group.Defs
 import Mathlib.Tactic.NormNum.OfScientific
 import Vampire.Arith
-import VampireReplay.Translate
+import VampireReplay.Monomorphize
+
+/-!
+Preprocessing: the goal reduced to `False` and a set of facts to refute, each
+step a transformation of those facts that keeps each one proved.
+
+`start` introduces the goal's binders and negates it. The steps (`steps`) then
+write out what TPTP cannot say as written -- literal powers and decimals --
+monomorphize, lift term-level `if-then-else` into functions, and instantiate
+quantified propositions. What is left is translated (`Vampire.problemOf`).
+-/
 
 namespace Vampire.Preprocess
 
@@ -13,11 +22,9 @@ What a lemma says of this very term, if it says anything of it.
 
 Unifying the lemma's left side with the term is what settles everything the
 lemma is stated over -- the type, its `Monoid`, the base and the exponent --
-and it settles them from the term rather than by looking for them. That
-matters after monomorphization, which replaces the instance a term was
-written with by one of its own: `Monoid R` can no longer be found for the `R`
-a monomorphized goal speaks of, but it is still written in the term, which is
-where this reads it.
+and it settles them from the term rather than by looking for them: the
+instance is whatever the term was written with, under a binder of a
+polymorphic fact as much as in the goal.
 
 `Nat` literals unify with `?n + 1`, so `pow_succ` applies to `x ^ 3` as it
 stands.
@@ -95,7 +102,7 @@ private def decimalFraction (e : Expr) : MetaM (Option (Expr × Expr)) := do
   return some (fraction, ← Arith.numerically (← mkEq e fraction))
 
 /-- The literal powers and decimals of a proposition, written out. -/
-private def writeOut : Simp.Simproc := fun e => do
+private def writeOutSimproc : Simp.Simproc := fun e => do
   if let some (product, holds) ← powProduct e then
     return .visit { expr := product, proof? := some holds }
   if let some (fraction, holds) ← decimalFraction e then
@@ -109,33 +116,21 @@ or itself where it has none.
 private def rewritten (stated : Expr) : MetaM (Option (Expr × Expr)) := do
   let context ← Simp.mkContext {} (simpTheorems := #[])
     (congrTheorems := ← getSimpCongrTheorems)
-  let (result, _) ← Simp.main stated context (methods := { post := writeOut })
+  let (result, _) ← Simp.main stated context (methods := { post := writeOutSimproc })
   match result.proof? with
   | none => return none
   | some holds => return some (result.expr, holds)
 
-/--
-A proof of something with the literal powers and decimals of what it says
-written out, or itself where it says none.
--/
-def writtenOut (h : Expr) : MetaM Expr := do
-  let some (_, holds) ← rewritten (← instantiateMVars (← inferType h)) | return h
-  mkEqMP holds h
+/-- A step of preprocessing: the goal, whose type is `False`, and the facts to refute. -/
+abbrev Step := MVarId → Array Fact → MetaM (MVarId × Array Fact)
 
 /--
-A lemma with the literal powers and decimals of what it says written out.
-
-Every lemma monomorphization is given goes through this, before it is given
-them: what monomorphization leaves of `x ^ 3` is an opaque function applied
-to `x` and to the natural number `3`, with the instance that said what the
-power meant replaced by one of its own. There is nothing left to write out
-by then, and a natural number is not something the prover is told about.
+The literal powers and decimals of each fact written out (`powProduct`,
+`decimalFraction`). Polymorphic facts are written out too, before they are
+instantiated, so that their instances are already.
 -/
-def lemmaWrittenOut (fact : Auto.Lemma) : MetaM Auto.Lemma := do
-  let some (stated, holds) ← rewritten (← instantiateMVars fact.type) | return fact
-  return { fact with
-    proof := ← mkEqMP holds fact.proof
-    type := stated }
+def writeOut : Step := fun goal facts => goal.withContext do
+  return (goal, ← facts.mapM (·.rewrite rewritten))
 
 /-- A term-level `if-then-else` lifted out into a function of its own. -/
 private structure Lifted where
@@ -191,23 +186,20 @@ private def lifting (e : Expr) : StateRefT (Array Lifted) MetaM Expr := do
     return .done applied)
 
 /--
-The hypotheses with their term-level `if-then-else`s lifted out into functions,
-the functions let-bound in the goal, and what defines each of them added as an
-axiom.
+The facts with their term-level `if-then-else`s lifted out into functions, the
+functions let-bound in the goal, and what defines each of them added as a fact.
 -/
-def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
-    MetaM (MVarId × Array (Expr × Role)) := goal.withContext do
+def liftIte : Step := fun goal facts => goal.withContext do
   let mut stated := #[]
   let mut lifted := #[]
-  for (h, role) in hypotheses do
-    let type ← instantiateMVars (← inferType h)
-    unless type.find? (·.isAppOfArity ``ite 5) |>.isSome do
-      stated := stated.push (h, none, role)
+  for f in facts do
+    unless f.type.find? (·.isAppOfArity ``ite 5) |>.isSome do
+      stated := stated.push (f, none)
       continue
-    let (type', more) ← (lifting type).run lifted
+    let (type', more) ← (lifting f.type).run lifted
     lifted := more
-    stated := stated.push (h, if type' == type then none else some type', role)
-  if lifted.isEmpty then return (goal, hypotheses)
+    stated := stated.push (f, if type' == f.type then none else some type')
+  if lifted.isEmpty then return (goal, facts)
   let mut goal := goal
   let mut placeholders := #[]
   let mut functions := #[]
@@ -223,12 +215,13 @@ def liftIte (goal : MVarId) (hypotheses : Array (Expr × Role)) :
   -- are the same once it is unfolded, which the kernel does.
   let hinted (proof type : Expr) := mkApp2 (mkConst ``id [.zero]) type proof
   let mut out := #[]
-  for (h, type', role) in stated do
+  for (f, type') in stated do
     out := out.push (match type' with
-      | some t => (hinted h (local_ t), role)
-      | none => (h, role))
+      | some t => { f with proof := hinted f.proof (local_ t), type := local_ t }
+      | none => f)
   for l in lifted do
-    out := out.push (hinted (local_ l.proof) (local_ l.holds), .axiom)
+    out := out.push { proof := hinted (local_ l.proof) (local_ l.holds), type := local_ l.holds
+                      source := .binder, derived := true }
   return (goal, out)
 
 /--
@@ -256,40 +249,68 @@ private partial def propInstances (h : Expr) : MetaM (Option Expr) := do
     let some inner ← propInstances (mkApp h x) | return none
     return some (← mkLambdaFVars #[x] inner)
 
-/-- Hypotheses with their universally quantified propositions instantiated. -/
-def instantiateProps (hypotheses : Array (Expr × Role)) : MetaM (Array (Expr × Role)) :=
-  hypotheses.mapM fun (h, role) => do
-    return ((← propInstances h).getD h, role)
+/-- The facts with their universally quantified propositions instantiated. -/
+def instantiateProps : Step := fun goal facts => goal.withContext do
+  return (goal, ← facts.mapM fun f => do
+    let some proof ← propInstances f.proof | return f
+    return { f with proof, type := ← instantiateMVars (← inferType proof) })
 
-/-- The hypotheses to refute, with their roles, and the goal they came from. -/
-structure Result where
-  hypotheses : Array (Expr × Role)
-  goal : MVarId
-  /--
-  Under `+mono`, what each hypothesis was derived from, by position: the
-  lemmas `lean-auto` instantiated to get it, as the leaves of its derivation.
-  Empty otherwise, where a hypothesis is what was passed.
-  -/
-  derivations : Array Auto.DTr := #[]
+/-- The way of writing each constant at its parameters met so far, by the constant. -/
+private abbrev Canonical := StateRefT (Std.HashMap Expr (Array Expr) ×
+  Std.HashMap Expr (Array Bool)) MetaM
+
+/--
+`e` with each constant applied at parameters (`Vampire.parameters`) written the
+way it was first met: the same type or instance reached by another path is the
+same thing to the prover, and has to be stated the same way to replay too.
+-/
+private def canonicalized (e : Expr) : Canonical Expr := do
+  -- The locals `transform` opens binders as are no locals of the goal's, and a
+  -- key mentioning one is a term under a binder, not a constant instance.
+  let base ← getLCtx
+  Meta.transform e (post := fun e => do
+    let fn := e.getAppFn
+    unless e.isApp && (fn.isConst || fn.isFVar) do return .continue
+    let positions ← match (← get).2[fn]? with
+      | some p => pure p
+      | none => do
+        let p ← try parameters (← inferType fn) catch _ => pure #[]
+        modify fun (r, c) => (r, c.insert fn p)
+        pure p
+    let args := e.getAppArgs
+    let mut k := 0
+    while k < args.size && (positions[k]?.getD false) do k := k + 1
+    if k == 0 then return .continue
+    let key := mkAppN fn (args.extract 0 k)
+    if key.hasLooseBVars || key.hasExprMVar || key.hasAnyFVar (!base.contains ·) then
+      return .continue
+    let known := ((← get).1[fn]?).getD #[]
+    for r in known do
+      if r == key then return .continue
+      if r.getAppNumArgs == key.getAppNumArgs then
+        if ← withNewMCtxDepth <| withTransparency .instances <| isDefEq r key then
+          return .done (mkAppN r (args.extract k args.size))
+    modify fun (r, c) => (r.insert fn (known.push key), c)
+    return .continue)
+
+/--
+Each fact with every constant at its parameters written one way (`canonicalized`).
+What a fact says changes only up to definitional unfolding of instances, so its
+proof proves what it says now as it did before.
+-/
+def canonicalize : Step := fun goal facts => goal.withContext do
+  let (facts, _) ← (facts.mapM fun (f : Fact) => do
+    let type ← canonicalized f.type
+    if type == f.type then return f
+    return { f with type, proof := ← mkExpectedTypeHint f.proof type }).run ({}, {})
+  return (goal, facts)
+
+/-- Monomorphization (`Vampire.Monomorphize.monomorphize`), as a step. -/
+def monomorphize : Step := fun goal facts => goal.withContext do
+  return (goal, ← Monomorphize.monomorphize facts)
 
 /-- The name given to the negated goal in the local context. -/
 private def goalMarker : Name := `_vampireNegatedGoal
-
-/--
-What the negated goal's derivation is rooted at, so that it can be told apart
-from the axioms after `lean-auto` has monomorphized the context: whatever
-monomorphization derives from it has this leaf in its derivation tree.
-
-The lemma is built here with this leaf rather than collected by
-`collectLctxLemmas`, whose leaves are a format of `lean-auto`'s own.
--/
-private def goalLeaf : Auto.DTr := .leaf "vampire negated goal"
-
-private partial def dtrContains (self other : Auto.DTr) : Bool :=
-  if self == other then true
-  else match self with
-    | .leaf _ => false
-    | .node _ dtrs => dtrs.any (dtrContains · other)
 
 /-- Whether `e` is an inhabitation fact, possibly under binders. -/
 private def isInhabitation : Expr → Bool
@@ -300,8 +321,7 @@ private def isInhabitation : Expr → Bool
 
 /--
 Whether `fv` is a hypothesis worth sending. Inhabitation facts are dropped:
-TPTP domains are non-empty, so they carry nothing, and monomorphization
-introduces one per sort.
+TPTP domains are non-empty, so they carry nothing.
 -/
 def isHypothesis (fv : FVarId) : MetaM Bool := do
   let decl ← fv.getDecl
@@ -329,173 +349,38 @@ private def negateGoal (mv : MVarId) : MetaM (Array Expr × MVarId) := mv.withCo
   return (#[.fvar fv], mv)
 
 /--
-Moves the goal's binders into the local context and negates it.
+Moves the goal's binders into the local context and negates it, and returns
+the facts to refute: the hypotheses the goal introduced, the negated goal, and
+the caller's.
 
 As in `lean-smt`, the query is the smallest one that states the goal: the
 hypotheses are those introduced from the goal itself plus whatever the caller
 passed in brackets. Hypotheses already in the local context are only included
 if named, or via `*`.
 -/
-def intros (mv : MVarId) (extra : Array Expr) : MetaM Result := do
+def start (mv : MVarId) (hints : Array Fact) : MetaM (MVarId × Array Fact) := do
   let (fvs, mv) ← mv.intros
-  let introduced := (← mv.withContext (fvs.filterM isHypothesis)).map Expr.fvar
+  let introduced ← mv.withContext do
+    (← fvs.filterM isHypothesis).mapM (Fact.ofLocal · .binder)
   let (negated, mv) ← negateGoal mv
-  let axioms := (extra ++ introduced).toList.eraseDups.toArray
-  return {
-    hypotheses := axioms.map (·, .axiom) ++ negated.map (·, .negatedConjecture)
-    goal := mv
-  }
+  let negated ← mv.withContext do negated.mapM fun h => Fact.ofLocal h.fvarId! .goal
+  -- A hypothesis named in brackets that the goal introduced too is sent once.
+  let hints := hints.filter fun h => !introduced.any (·.proof == h.proof)
+  return (mv, hints ++ introduced ++ negated)
 
-/--
-The heads the translation reads as arithmetic, each with how many of its
-arguments, the last ones, are its operands: the rest are the type and the
-instances, which say what arithmetic it is.
--/
-private def arithmeticOperands : Std.HashMap Name Nat := .ofList
-  [(``OfNat.ofNat, 0), (``HAdd.hAdd, 2), (``HSub.hSub, 2), (``HMul.hMul, 2),
-   (``HDiv.hDiv, 2), (``HMod.hMod, 2), (``Neg.neg, 1), (``LE.le, 2), (``LT.lt, 2),
-   (``GE.ge, 2), (``GT.gt, 2), (``Int.cast, 1), (``Nat.cast, 1),
-   -- Mathlib's, named rather than referred to, as in `VampireReplay.Translate`.
-   (`Int.floor, 1), (`Int.ceil, 1)]
+/-- The steps, in order, each with what it is called in a trace. -/
+def steps : List (String × Step) :=
+  [("writing out", writeOut), ("monomorphization", monomorphize),
+   ("canonicalization", canonicalize), ("lifting if-then-else", liftIte),
+   ("instantiating propositions", instantiateProps)]
 
-/-- How many operands `e` has, if it is arithmetic at `ℤ`, `ℚ` or `ℝ`. -/
-private def arithmeticOperands? (e : Expr) : Option Nat := do
-  let .const c _ := e.getAppFn | none
-  let k ← arithmeticOperands[c]?
-  let τ ← e.getAppArgs[0]?
-  guard (arithmeticSort τ.consumeMData).isSome
-  return k
-
-/--
-`e` with `step` applied to every subterm, top down, except inside what the
-translation reads as arithmetic at `ℤ`, `ℚ` or `ℝ`: there only the operands are
-visited, and a numeral not at all.
--/
-private partial def transformKeepingArithmetic (step : Expr → MetaM Expr) (e : Expr) :
-    MetaM Expr :=
-  Meta.transform e (usedLetOnly := false) (pre := fun e => do
-    let e := e.consumeMData
-    if let some k := arithmeticOperands? e then
-      let args := e.getAppArgs
-      let args ← args.mapIdxM fun i a =>
-        if i + k ≥ args.size then transformKeepingArithmetic step a else pure a
-      return .done (mkAppN e.getAppFn args)
-    return .continue (← step e))
-
-/--
-`lean-auto`'s reduction of a lemma's statement (`Auto.prepReduceExpr`: every
-subterm to weak head normal form, then projections of structure instances
-unfolded), except of what the translation reads as arithmetic. Reduced, a
-numeral at `ℝ` is taken apart into the Cauchy sequences the reals are built
-from, where the translation would have stated it as the TPTP number it is.
--/
-def reduceKeepingArithmetic (e : Expr) : MetaM Expr := do
-  let mode := auto.redMode.get (← getOptions)
-  let e ← withTransparency mode <| transformKeepingArithmetic whnf e
-  transformKeepingArithmetic Auto.unfoldProj e
-
-/-- `Auto.unfoldConstAndPreprocessLemma`, reducing by `reduceKeepingArithmetic`. -/
-private def preprocessLemma (lem : Auto.Lemma) : MetaM Auto.Lemma := do
-  let type ← reduceKeepingArithmetic (← instantiateMVars lem.type)
-  return { lem with type := ← Core.betaReduce (← instantiateMVars type) }
-
-/--
-The constants the translation reads as logic, or lifts out before it reads; and
-`lean-auto`'s own `∀` and `→` (`Auto.Embedding.forallF`, `ImpF`), which it
-states binders by and which unfold to binders again.
--/
-private def logicalConstants : List Name :=
-  [``Not, ``And, ``Or, ``Iff, ``True, ``False, ``Eq, ``Ne, ``Exists, ``ite, ``dite,
-   ``Auto.Embedding.forallF, ``Auto.Embedding.ImpF]
-
-/--
-Whether an atom `lean-auto` stood for `value` goes back to being `value`: what
-the translation reads for itself -- a type, which it names as a sort; a
-connective, an equation, or a quantifier, which `lean-auto` states as an atom
-applied to the body; `ℤ`, `ℚ` or `ℝ`'s arithmetic -- and a local of the goal's,
-which it names as it stands. The rest are constants at instances it could not
-name, which is what the atoms are for.
--/
-private def isInterpretedAtom (value : Expr) : MetaM Bool := do
-  let value := value.consumeMData
-  if value.isFVar || value.isLambda || (← isType value) then return true
-  if (arithmeticSort value).isSome || (arithmeticOperands? value).isSome then return true
-  match value.getAppFn with
-  | .const c _ => return logicalConstants.contains c
-  | _ => return false
-
-/--
-Monomorphizes with `lean-auto`, reducing Lean's dependent type theory to
-something first-order, and leaves a `False` goal over the instances it found.
-
-What is sent is what `intros` sends: the hypotheses introduced from the goal,
-the negated goal, and whatever the caller passed in brackets. The rest of the
-local context goes only if named, or with `*`.
-
-`lean-auto` finds the instances and names each constant at its instance by an
-atom -- `@abs ℝ …` as `e2` -- which is what makes them first-order. It would go
-on to prove the problem for every value of its atoms and check that
-reflectively; but the atoms that are `≤`, `+` and `0` over `ℝ`, unknown, leave
-the problem without its arithmetic, and a refutation needs what they are. So
-the atoms the translation reads for itself are put back as what they stand for
-(`isInterpretedAtom`), and only the rest stay atoms: the problem is refuted for
-any values of those, as `lean-auto` would have it, and that refutation is then
-applied to what they stand for, where each instance's own proof -- over the
-constants -- proves what it states.
--/
-def mono (mv : MVarId) (extra : Array Auto.Lemma) : MetaM Result := do
-  let (goalBinders, mv) ← mv.intros
-  let (negated, absurd) ← negateGoal mv
-  absurd.withContext do
-    -- `false` is what confines this to the binders and the negated goal:
-    -- `true` would have `lean-auto` take the whole local context, whatever was
-    -- named, and a hypothesis named in brackets would then be sent twice.
-    let binderLemmas ← Auto.collectLctxLemmas false goalBinders
-    let goalLemmas ← negated.mapM fun ngoal => do
-      return (⟨⟨ngoal, ← instantiateMVars (← inferType ngoal), goalLeaf⟩, #[]⟩ :
-        Auto.Lemma)
-    let lctxLemmas := binderLemmas ++ goalLemmas
-    -- The terms named in brackets come as `lean-auto` elaborated them, whole:
-    -- what a lemma is stated of is settled by monomorphization, and it can
-    -- only settle it where the lemma still says which universes and which
-    -- instances it is waiting for.
-    let lemmas ← (← (lctxLemmas ++ extra).mapM lemmaWrittenOut).mapM preprocessLemma
-    let lemmas ← Meta.withDefault (Auto.rewriteIteCondDecide lemmas)
-    let inhFacts ← Auto.Inhabitation.getInhFactsFromLCtx
-    -- The atoms are locals only while `lean-auto` has them in scope, so the
-    -- goal is built there: `∀ e₁ … eₙ, fact₁ → … → False`, closed.
-    let (goalType, values, facts) ← Meta.withDefault <|
-        Auto.Monomorphization.monomorphize lemmas inhFacts fun state => do
-      let lctx ← getLCtx
-      let atoms := state.exprFVarVal.toArray.qsort fun (a, _) (b, _) =>
-        ((lctx.find? a).map (·.index)).getD 0 < ((lctx.find? b).map (·.index)).getD 0
-      let mut interpreted := #[]
-      let mut defined := #[]
-      for atom in atoms do
-        if ← isInterpretedAtom atom.2 then interpreted := interpreted.push atom
-        else defined := defined.push atom
-      -- A binder comes back as `lean-auto`'s constant applied to its body, and
-      -- is one once that is unfolded and reduced.
-      let restore (e : Expr) : MetaM Expr := do
-        let e := e.replaceFVars (interpreted.map (Expr.fvar ·.1)) (interpreted.map (·.2))
-        Core.betaReduce (← deltaExpand e
-          (· matches ``Auto.Embedding.forallF | ``Auto.Embedding.ImpF))
-      let facts := state.facts
-      let mut body := mkConst ``False
-      for fact in facts.reverse do
-        body := .forallE `h (← restore (← instantiateMVars fact.type)) body .default
-      for (fv, _) in defined.reverse do
-        body := .forallE (← fv.getUserName) (← restore (← fv.getType))
-          (body.abstract #[.fvar fv]) .default
-      return (body, defined.map (·.2), facts.map fun f => (f.proof, f.deriv))
-    let goal ← mkFreshExprSyntheticOpaqueMVar goalType
-    absurd.assign (mkAppN goal (values ++ facts.map (·.1)))
-    let (fvars, goal) ← goal.mvarId!.introNP (values.size + facts.size)
-    return {
-      hypotheses := (fvars[values.size:].toArray.zip facts).map fun (fv, _, deriv) =>
-        (.fvar fv, if dtrContains deriv goalLeaf then .negatedConjecture else .axiom)
-      goal
-      derivations := facts.map (·.2)
-    }
+/-- The goal reduced to `False`, and the facts to refute, every step taken. -/
+def preprocess (mv : MVarId) (hints : Array Fact) : MetaM (MVarId × Array Fact) := do
+  let (goal, facts) ← start mv hints
+  steps.foldlM (init := (goal, facts)) fun (goal, facts) (name, step) => do
+    let started ← IO.monoMsNow
+    let out ← step goal facts
+    trace[vampire.timing] "{name} took {(← IO.monoMsNow) - started}ms"
+    return out
 
 end Vampire.Preprocess
